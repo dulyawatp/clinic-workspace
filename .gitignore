@@ -1,0 +1,26 @@
+node_modules/
+dist/
+coverage/
+
+# tool output
+playwright-report/
+test-results/
+
+# local environment and data
+.env
+.env.*
+!.env.example
+data/
+*.sqlite
+*.sqlite-journal
+
+# OS noise
+.DS_Store
+
+# Local Python and agent/test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+app/.vitest/
+.playwright-mcp/
+.superpowers/

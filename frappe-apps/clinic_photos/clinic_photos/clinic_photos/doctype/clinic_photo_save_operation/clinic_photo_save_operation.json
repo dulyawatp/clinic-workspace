@@ -1,0 +1,260 @@
+{
+ "actions": [],
+ "allow_import": 0,
+ "allow_rename": 0,
+ "creation": "2026-11-08 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "site",
+  "actor",
+  "kind",
+  "request_key",
+  "identity_digest",
+  "payload_digest",
+  "state",
+  "draft",
+  "expected_version",
+  "original",
+  "synthetic_patient",
+  "annotation_json",
+  "staged_key",
+  "staged_sha256",
+  "staged_size",
+  "staged_format",
+  "image_base64",
+  "reservation_key",
+  "generation",
+  "expected_sha256",
+  "expected_size",
+  "published_file",
+  "published_domain_doctype",
+  "published_domain_name",
+  "published_version",
+  "creation_identity"
+ ],
+ "fields": [
+  {
+   "fieldname": "site",
+   "fieldtype": "Data",
+   "label": "Site",
+   "no_copy": 1,
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "actor",
+   "fieldtype": "Link",
+   "label": "Actor",
+   "no_copy": 1,
+   "options": "User",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "kind",
+   "fieldtype": "Data",
+   "label": "Request Kind",
+   "no_copy": 1,
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "request_key",
+   "fieldtype": "Data",
+   "label": "Request Key",
+   "no_copy": 1,
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "identity_digest",
+   "fieldtype": "Data",
+   "label": "Identity Digest",
+   "length": 64,
+   "no_copy": 1,
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "payload_digest",
+   "fieldtype": "Data",
+   "label": "Payload Digest",
+   "length": 64,
+   "no_copy": 1,
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "default": "SUBMITTED",
+   "fieldname": "state",
+   "fieldtype": "Select",
+   "label": "State",
+   "no_copy": 1,
+   "options": "SUBMITTED\nPREPARED\nPUBLISHED\nABORTED\nQUARANTINED",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "draft",
+   "fieldtype": "Data",
+   "label": "Draft",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "expected_version",
+   "fieldtype": "Int",
+   "label": "Expected Version",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "original",
+   "fieldtype": "Data",
+   "label": "Original",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "synthetic_patient",
+   "fieldtype": "Data",
+   "label": "Synthetic Patient",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "annotation_json",
+   "fieldtype": "Long Text",
+   "label": "Canonical Annotation JSON",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "staged_key",
+   "fieldtype": "Data",
+   "label": "Staged Image Key",
+   "no_copy": 1,
+   "read_only": 1,
+   "description": "Server-generated basename of the accepted image inside the bound site's private staging area. Metadata only: the row never stores the image bytes."
+  },
+  {
+   "fieldname": "staged_sha256",
+   "fieldtype": "Data",
+   "label": "Staged Image SHA-256",
+   "length": 64,
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "staged_size",
+   "fieldtype": "Int",
+   "label": "Staged Image Byte Size",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "staged_format",
+   "fieldtype": "Data",
+   "label": "Staged Image Format",
+   "no_copy": 1,
+   "read_only": 1,
+   "description": "JPEG or PNG, from the validated header bytes. The staged extension must agree."
+  },
+  {
+   "fieldname": "image_base64",
+   "fieldtype": "Long Text",
+   "hidden": 1,
+   "label": "Canonical Image Base64 (legacy)",
+   "no_copy": 1,
+   "read_only": 1,
+   "description": "Legacy image-bearing column. Never written by this version and never cleared by it; a row that carries it is refused instead of being read, migrated or published."
+  },
+  {
+   "fieldname": "reservation_key",
+   "fieldtype": "Data",
+   "label": "Reservation Key",
+   "no_copy": 1,
+   "read_only": 1,
+   "unique": 1,
+   "description": "Canonical private key reserved by the committed PREPARED operation. This row is the authoritative pending key registration."
+  },
+  {
+   "fieldname": "generation",
+   "fieldtype": "Int",
+   "label": "Preparation Generation",
+   "no_copy": 1,
+   "read_only": 1,
+   "description": "Durable generation persisted by the PREPARED transition; never the process-local attempt counter."
+  },
+  {
+   "fieldname": "expected_sha256",
+   "fieldtype": "Data",
+   "label": "Expected SHA-256",
+   "length": 64,
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "expected_size",
+   "fieldtype": "Int",
+   "label": "Expected Byte Size",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "published_file",
+   "fieldtype": "Data",
+   "label": "Published File",
+   "no_copy": 1,
+   "read_only": 1,
+   "description": "Native File name created by the committed publication. Written only in the same guarded update as PUBLISHED."
+  },
+  {
+   "fieldname": "published_domain_doctype",
+   "fieldtype": "Data",
+   "label": "Published Domain DocType",
+   "no_copy": 1,
+   "read_only": 1,
+   "description": "The one immutable domain record this publication created."
+  },
+  {
+   "fieldname": "published_domain_name",
+   "fieldtype": "Data",
+   "label": "Published Domain Name",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "published_version",
+   "fieldtype": "Int",
+   "label": "Published Version",
+   "no_copy": 1,
+   "read_only": 1,
+   "description": "Server-derived annotation version number; empty for the synthetic original kind."
+  },
+  {
+   "fieldname": "creation_identity",
+   "fieldtype": "Data",
+   "label": "Creation Identity",
+   "no_copy": 1,
+   "read_only": 1,
+   "description": "Captured provenance of the created object on this host/volume as <st_dev>:<st_ino>. Not portable restore identity and not an authorization capability."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-11-08 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Clinic Photos",
+ "name": "Clinic Photo Save Operation",
+ "naming_rule": "By script",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "creation",
+ "sort_order": "ASC",
+ "states": [],
+ "track_changes": 0
+}

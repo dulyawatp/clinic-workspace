@@ -1,0 +1,47 @@
+[
+  {
+    "id": "fixture-encounter-01",
+    "patientId": "fixture-patient-01",
+    "patientName": "สมชาย Smith",
+    "occurredAt": "2026-10-28T09:15:00+07:00",
+    "type": "follow_up",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  },
+  {
+    "id": "fixture-encounter-02",
+    "patientId": "fixture-patient-02",
+    "patientName": "อารีย์ ใจดี",
+    "occurredAt": "2026-10-27T10:00:00+07:00",
+    "type": "new_visit",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  },
+  {
+    "id": "fixture-encounter-03",
+    "patientId": "fixture-patient-03",
+    "patientName": "Narin Chaiyaporn",
+    "occurredAt": "2026-10-26T11:30:00+07:00",
+    "type": "procedure",
+    "clinician": "Fixture Nurse",
+    "fictional": true
+  },
+  {
+    "id": "fixture-encounter-04",
+    "patientId": "fixture-patient-04",
+    "patientName": "กมลรัตน์ วงศ์ทอง",
+    "occurredAt": "2026-10-25T14:00:00+07:00",
+    "type": "follow_up",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  },
+  {
+    "id": "fixture-encounter-05",
+    "patientId": "fixture-patient-05",
+    "patientName": "Daniel Okafor",
+    "occurredAt": "2026-10-24T16:15:00+07:00",
+    "type": "new_visit",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  }
+]

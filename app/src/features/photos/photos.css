@@ -1,0 +1,228 @@
+.photos-workspace {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+  max-width: 1200px;
+}
+.photos-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.photos-heading h2 {
+  margin: 2px 0 4px;
+  font-size: clamp(22px, 3vw, 30px);
+}
+.photos-heading p {
+  margin: 0;
+  color: var(--muted);
+}
+.photos-heading .photos-eyebrow,
+.photos-section-head .photos-eyebrow {
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.photos-caveat,
+.photos-consent,
+.photos-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+}
+.photos-save {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+}
+.photos-save h3,
+.photos-save p {
+  margin: 0;
+}
+.photos-save input {
+  max-width: 100%;
+}
+.photos-save-status {
+  width: 100%;
+  padding: 12px;
+  border-left: 3px solid var(--primary);
+  background: #f2f4fb;
+  overflow-wrap: anywhere;
+}
+.photos-save-status p {
+  margin-top: 6px;
+}
+.photos-live-list {
+  display: grid;
+  gap: 10px;
+  padding-left: 20px;
+}
+.photos-live-list a {
+  color: var(--primary);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.photos-live-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+.photos-caveat {
+  background: #f2f4fb;
+  border-color: #d9deed;
+}
+.photos-consent {
+  background: #fff9ec;
+  border-color: #edd8a4;
+}
+.photos-caveat p,
+.photos-consent p {
+  margin: 6px 0 0;
+  line-height: 1.5;
+}
+.photos-card {
+  background: #fff;
+  min-width: 0;
+}
+.photos-card > p {
+  color: var(--muted);
+  line-height: 1.5;
+}
+.photos-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.photos-section-head h3,
+.photos-section-head p {
+  margin: 0;
+}
+.photos-section-head h3 {
+  margin-top: 5px;
+  font-size: 20px;
+}
+.photos-section-head > span {
+  border-radius: 100px;
+  padding: 5px 12px;
+  background: #f2f4fb;
+  color: var(--primary);
+  font-weight: 700;
+}
+.photos-grid,
+.photos-side-by-side {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 18px;
+}
+.photos-tile {
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.photos-image {
+  aspect-ratio: 3 / 2;
+  background: #eeeef3;
+}
+.photos-image img,
+.photos-slider img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.photos-tile figcaption {
+  display: grid;
+  gap: 5px;
+  padding: 14px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.photos-tile figcaption span,
+.photos-tile time {
+  color: var(--muted);
+}
+.photos-badge {
+  justify-self: start;
+  border-radius: 100px;
+  padding: 4px 9px;
+  background: #f0f1f5;
+  font-weight: 600;
+}
+.photos-tile figcaption .photos-badge--missing {
+  background: #fff2d5;
+  color: #755400;
+}
+.photos-tile figcaption .photos-badge--recorded {
+  background: #e6f5ec;
+  color: #22663d;
+}
+.photos-selectors {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 20px 0;
+}
+.photos-selectors label {
+  display: grid;
+  gap: 8px;
+  font-weight: 600;
+  min-width: 0;
+}
+.photos-selectors select {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: inherit;
+}
+.photos-card h4 {
+  margin: 24px 0 12px;
+  font-size: 16px;
+}
+.photos-slider {
+  width: 100%;
+  aspect-ratio: 3 / 2;
+  background: #eeeef3;
+}
+.photos-range {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-top: 16px;
+  font-weight: 600;
+}
+.photos-range input {
+  grid-column: 1 / -1;
+  width: 100%;
+  min-height: 44px;
+  accent-color: var(--primary);
+}
+.photos-image-error {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  text-align: center;
+}
+@media (max-width: 600px) {
+  .photos-grid,
+  .photos-selectors {
+    grid-template-columns: 1fr;
+  }
+  .photos-card,
+  .photos-caveat,
+  .photos-consent {
+    padding: 16px;
+  }
+}

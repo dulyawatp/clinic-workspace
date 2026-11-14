@@ -1,0 +1,1025 @@
+{
+  "spec_version": "1.0",
+  "product": "Demo Clinic",
+  "backend": [
+    "Frappe",
+    "Marley Health",
+    "ERPNext"
+  ],
+  "schema_status": "requires_installed_site_verification",
+  "screens": [
+    {
+      "id": "SH-01",
+      "route": "/clinic/login",
+      "view": "`/clinic/login`",
+      "roles": [
+        "all"
+      ],
+      "priority": "P0",
+      "outcome": "session login; invalid/expired state"
+    },
+    {
+      "id": "SH-02",
+      "route": "/clinic/home",
+      "view": "`/clinic/home`",
+      "roles": [
+        "all"
+      ],
+      "priority": "P0",
+      "outcome": "role-directed home, switch only if permitted"
+    },
+    {
+      "id": "SH-03",
+      "route": "/clinic/search",
+      "view": "`/clinic/search`",
+      "roles": [
+        "permitted"
+      ],
+      "priority": "P0",
+      "outcome": "patient/appointment/global search with role filters"
+    },
+    {
+      "id": "SH-04",
+      "route": "/clinic/notifications",
+      "view": "`/clinic/notifications`",
+      "roles": [
+        "all"
+      ],
+      "priority": "P0",
+      "outcome": "assigned work, unread/read, deep links"
+    },
+    {
+      "id": "SH-05",
+      "route": "/clinic/profile",
+      "view": "`/clinic/profile`",
+      "roles": [
+        "all"
+      ],
+      "priority": "P0",
+      "outcome": "user, role, language, logout"
+    },
+    {
+      "id": "SH-06",
+      "route": "/clinic/patients",
+      "view": "`/clinic/patients`",
+      "roles": [
+        "REC",
+        "DOC",
+        "NUR",
+        "limited"
+      ],
+      "priority": "P0",
+      "outcome": "patient list/search/filter"
+    },
+    {
+      "id": "SH-07",
+      "route": "/clinic/patients/new",
+      "view": "`/clinic/patients/new`",
+      "roles": [
+        "REC",
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "register patient form"
+    },
+    {
+      "id": "SH-08",
+      "route": "/clinic/patients/:id",
+      "view": "`/clinic/patients/:id`",
+      "roles": [
+        "authorized"
+      ],
+      "priority": "P0",
+      "outcome": "patient summary, identity, allergies, visit timeline"
+    },
+    {
+      "id": "SH-09",
+      "route": "/clinic/patients/:id/edit",
+      "view": "`/clinic/patients/:id/edit`",
+      "roles": [
+        "REC",
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "edit allowed demographics"
+    },
+    {
+      "id": "SH-10",
+      "route": "/clinic/patients/:id/history",
+      "view": "`/clinic/patients/:id/history`",
+      "roles": [
+        "DOC",
+        "NUR-limited"
+      ],
+      "priority": "P0",
+      "outcome": "medical/surgical history, allergies, medications"
+    },
+    {
+      "id": "SH-11",
+      "route": "/clinic/patients/:id/timeline",
+      "view": "`/clinic/patients/:id/timeline`",
+      "roles": [
+        "authorized"
+      ],
+      "priority": "P0",
+      "outcome": "appointments, encounters, procedures, labs, bills permission-filtered"
+    },
+    {
+      "id": "SH-12",
+      "route": "/clinic/patients/:id/photos",
+      "view": "`/clinic/patients/:id/photos`",
+      "roles": [
+        "REC",
+        "DOC",
+        "NUR"
+      ],
+      "priority": "P0",
+      "outcome": "profile and visit photo gallery"
+    },
+    {
+      "id": "SH-13",
+      "route": "/clinic/patients/:id/photo/new",
+      "view": "`/clinic/patients/:id/photo/new`",
+      "roles": [
+        "REC",
+        "DOC",
+        "NUR"
+      ],
+      "priority": "P0",
+      "outcome": "camera/upload and photo context"
+    },
+    {
+      "id": "SH-14",
+      "route": "/clinic/photos/:id",
+      "view": "`/clinic/photos/:id`",
+      "roles": [
+        "DOC",
+        "authorized"
+      ],
+      "priority": "P0",
+      "outcome": "photo detail and original metadata"
+    },
+    {
+      "id": "SH-15",
+      "route": "/clinic/photos/:id/annotate",
+      "view": "`/clinic/photos/:id/annotate`",
+      "roles": [
+        "DOC",
+        "authorized"
+      ],
+      "priority": "P1/EXT",
+      "outcome": "arrows, circles, rectangles, labels, undo, preserve original"
+    },
+    {
+      "id": "SH-16",
+      "route": "/clinic/patients/:id/before-after",
+      "view": "`/clinic/patients/:id/before-after`",
+      "roles": [
+        "DOC",
+        "authorized"
+      ],
+      "priority": "P1/EXT",
+      "outcome": "side-by-side comparable visits/photo pairs"
+    },
+    {
+      "id": "RC-01",
+      "route": "/clinic/reception",
+      "view": "`/clinic/reception`",
+      "roles": [
+        "REC"
+      ],
+      "priority": "P0",
+      "outcome": "front desk home KPIs and shortcuts"
+    },
+    {
+      "id": "RC-02",
+      "route": "/clinic/reception/queue",
+      "view": "`/clinic/reception/queue`",
+      "roles": [
+        "REC",
+        "NUR"
+      ],
+      "priority": "P0",
+      "outcome": "today's waiting/check-in list; action states"
+    },
+    {
+      "id": "RC-03",
+      "route": "/clinic/appointments",
+      "view": "`/clinic/appointments`",
+      "roles": [
+        "REC",
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "list and calendar; filter by practitioner/date/type"
+    },
+    {
+      "id": "RC-04",
+      "route": "/clinic/appointments/new",
+      "view": "`/clinic/appointments/new`",
+      "roles": [
+        "REC"
+      ],
+      "priority": "P0",
+      "outcome": "book appointment, available slots"
+    },
+    {
+      "id": "RC-05",
+      "route": "/clinic/appointments/:id",
+      "view": "`/clinic/appointments/:id`",
+      "roles": [
+        "REC",
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "appointment details, status, actions"
+    },
+    {
+      "id": "RC-06",
+      "route": "/clinic/appointments/:id/reschedule",
+      "view": "`/clinic/appointments/:id/reschedule`",
+      "roles": [
+        "REC"
+      ],
+      "priority": "P0",
+      "outcome": "new slot, overlap rules and reason"
+    },
+    {
+      "id": "RC-07",
+      "route": "/clinic/appointments/:id/cancel",
+      "view": "`/clinic/appointments/:id/cancel`",
+      "roles": [
+        "REC"
+      ],
+      "priority": "P0",
+      "outcome": "confirmation/reason; native status action"
+    },
+    {
+      "id": "RC-08",
+      "route": "/clinic/reception/check-in/:id",
+      "view": "`/clinic/reception/check-in/:id`",
+      "roles": [
+        "REC",
+        "NUR"
+      ],
+      "priority": "P0/VERIFY",
+      "outcome": "check-in; may use standard or custom backend workflow"
+    },
+    {
+      "id": "RC-09",
+      "route": "/clinic/reception/check-out/:id",
+      "view": "`/clinic/reception/check-out/:id`",
+      "roles": [
+        "REC",
+        "CAS"
+      ],
+      "priority": "P0",
+      "outcome": "visit completion and invoice/follow-up handoff"
+    },
+    {
+      "id": "RC-10",
+      "route": "/clinic/reception/follow-up",
+      "view": "`/clinic/reception/follow-up`",
+      "roles": [
+        "REC"
+      ],
+      "priority": "P0",
+      "outcome": "book return visit for existing patient"
+    },
+    {
+      "id": "DR-01",
+      "route": "/clinic/doctor",
+      "view": "`/clinic/doctor`",
+      "roles": [
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "doctor home, personal schedule and tasks"
+    },
+    {
+      "id": "DR-02",
+      "route": "/clinic/doctor/my-appointments",
+      "view": "`/clinic/doctor/my-appointments`",
+      "roles": [
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "own appointment queue/calendar"
+    },
+    {
+      "id": "DR-03",
+      "route": "/clinic/encounters",
+      "view": "`/clinic/encounters`",
+      "roles": [
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "consultation list: draft/complete"
+    },
+    {
+      "id": "DR-04",
+      "route": "/clinic/encounters/new",
+      "view": "`/clinic/encounters/new`",
+      "roles": [
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "start encounter from appointment or patient"
+    },
+    {
+      "id": "DR-05",
+      "route": "/clinic/encounters/:id",
+      "view": "`/clinic/encounters/:id`",
+      "roles": [
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "patient visit shell, navigation across medical sections"
+    },
+    {
+      "id": "DR-06",
+      "route": "/clinic/encounters/:id/history",
+      "view": "`/clinic/encounters/:id/history`",
+      "roles": [
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "patient complaint and longitudinal history"
+    },
+    {
+      "id": "DR-07",
+      "route": "/clinic/encounters/:id/exam",
+      "view": "`/clinic/encounters/:id/exam`",
+      "roles": [
+        "DOC",
+        "NUR limited"
+      ],
+      "priority": "P0",
+      "outcome": "vitals, physical exam, clinical findings"
+    },
+    {
+      "id": "DR-08",
+      "route": "/clinic/encounters/:id/clinical-note",
+      "view": "`/clinic/encounters/:id/clinical-note`",
+      "roles": [
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "create/edit linked Clinical Note; save draft"
+    },
+    {
+      "id": "DR-09",
+      "route": "/clinic/encounters/:id/diagnoses",
+      "view": "`/clinic/encounters/:id/diagnoses`",
+      "roles": [
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "symptoms, diagnoses, clinical coding as supported"
+    },
+    {
+      "id": "DR-10",
+      "route": "/clinic/encounters/:id/medications",
+      "view": "`/clinic/encounters/:id/medications`",
+      "roles": [
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "medication prescriptions/orders"
+    },
+    {
+      "id": "DR-11",
+      "route": "/clinic/encounters/:id/procedures",
+      "view": "`/clinic/encounters/:id/procedures`",
+      "roles": [
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "order / review clinical procedures"
+    },
+    {
+      "id": "DR-12",
+      "route": "/clinic/procedures/:id",
+      "view": "`/clinic/procedures/:id`",
+      "roles": [
+        "DOC",
+        "NUR limited",
+        "PHA limited"
+      ],
+      "priority": "P0",
+      "outcome": "perform procedure, status, consumption panel"
+    },
+    {
+      "id": "DR-13",
+      "route": "/clinic/encounters/:id/labs",
+      "view": "`/clinic/encounters/:id/labs`",
+      "roles": [
+        "DOC",
+        "NUR"
+      ],
+      "priority": "P0",
+      "outcome": "order and review lab tests"
+    },
+    {
+      "id": "DR-14",
+      "route": "/clinic/labs/:id",
+      "view": "`/clinic/labs/:id`",
+      "roles": [
+        "DOC",
+        "NUR authorized"
+      ],
+      "priority": "P0",
+      "outcome": "lab request/test detail/result"
+    },
+    {
+      "id": "DR-15",
+      "route": "/clinic/encounters/:id/external-lab",
+      "view": "`/clinic/encounters/:id/external-lab`",
+      "roles": [
+        "DOC",
+        "NUR"
+      ],
+      "priority": "P1/EXT",
+      "outcome": "outside provider, status, result upload and review"
+    },
+    {
+      "id": "DR-16",
+      "route": "/clinic/encounters/:id/photos",
+      "view": "`/clinic/encounters/:id/photos`",
+      "roles": [
+        "DOC",
+        "NUR limited"
+      ],
+      "priority": "P0",
+      "outcome": "visit-linked photo gallery / annotation link"
+    },
+    {
+      "id": "DR-17",
+      "route": "/clinic/encounters/:id/summary",
+      "view": "`/clinic/encounters/:id/summary`",
+      "roles": [
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "review then submit/complete; downstream orders"
+    },
+    {
+      "id": "DR-18",
+      "route": "/clinic/doctor/follow-ups",
+      "view": "`/clinic/doctor/follow-ups`",
+      "roles": [
+        "DOC"
+      ],
+      "priority": "P0",
+      "outcome": "patients awaiting clinical follow-up"
+    },
+    {
+      "id": "NU-01",
+      "route": "/clinic/nurse",
+      "view": "`/clinic/nurse`",
+      "roles": [
+        "NUR"
+      ],
+      "priority": "P1",
+      "outcome": "treatment assistant home"
+    },
+    {
+      "id": "NU-02",
+      "route": "/clinic/nurse/vitals/:appointmentId",
+      "view": "`/clinic/nurse/vitals/:appointmentId`",
+      "roles": [
+        "NUR",
+        "DOC"
+      ],
+      "priority": "P0 if nurse used",
+      "outcome": "record vitals; appointment/patient links"
+    },
+    {
+      "id": "NU-03",
+      "route": "/clinic/nurse/treatment-prep/:id",
+      "view": "`/clinic/nurse/treatment-prep/:id`",
+      "roles": [
+        "NUR"
+      ],
+      "priority": "P1",
+      "outcome": "patient, procedure, room and materials checklist"
+    },
+    {
+      "id": "NU-04",
+      "route": "/clinic/nurse/aftercare/:id",
+      "view": "`/clinic/nurse/aftercare/:id`",
+      "roles": [
+        "NUR"
+      ],
+      "priority": "P1",
+      "outcome": "recording recovery/aftercare note and handoff"
+    },
+    {
+      "id": "PH-01",
+      "route": "/clinic/pharmacy",
+      "view": "`/clinic/pharmacy`",
+      "roles": [
+        "PHA"
+      ],
+      "priority": "P0",
+      "outcome": "stock metrics, key alerts, shortcuts"
+    },
+    {
+      "id": "PH-02",
+      "route": "/clinic/pharmacy/items",
+      "view": "`/clinic/pharmacy/items`",
+      "roles": [
+        "PHA"
+      ],
+      "priority": "P0",
+      "outcome": "item catalog/search/filter"
+    },
+    {
+      "id": "PH-03",
+      "route": "/clinic/pharmacy/items/:id",
+      "view": "`/clinic/pharmacy/items/:id`",
+      "roles": [
+        "PHA"
+      ],
+      "priority": "P0",
+      "outcome": "item detail/stock/batch settings"
+    },
+    {
+      "id": "PH-04",
+      "route": "/clinic/pharmacy/batches",
+      "view": "`/clinic/pharmacy/batches`",
+      "roles": [
+        "PHA"
+      ],
+      "priority": "P0",
+      "outcome": "batch list, expiry filter"
+    },
+    {
+      "id": "PH-05",
+      "route": "/clinic/pharmacy/batches/:id",
+      "view": "`/clinic/pharmacy/batches/:id`",
+      "roles": [
+        "PHA"
+      ],
+      "priority": "P0",
+      "outcome": "batch detail, provenance, expiry, on hand"
+    },
+    {
+      "id": "PH-06",
+      "route": "/clinic/pharmacy/expiry",
+      "view": "`/clinic/pharmacy/expiry`",
+      "roles": [
+        "PHA",
+        "MGR"
+      ],
+      "priority": "P1",
+      "outcome": "near-expiry usable stock; 30/60/90-day thresholds"
+    },
+    {
+      "id": "PH-07",
+      "route": "/clinic/pharmacy/stock-balance",
+      "view": "`/clinic/pharmacy/stock-balance`",
+      "roles": [
+        "PHA",
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "stock by warehouse/item/batch"
+    },
+    {
+      "id": "PH-08",
+      "route": "/clinic/pharmacy/stock-ledger",
+      "view": "`/clinic/pharmacy/stock-ledger`",
+      "roles": [
+        "PHA",
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "movement audit, document drilldown"
+    },
+    {
+      "id": "PH-09",
+      "route": "/clinic/pharmacy/receive",
+      "view": "`/clinic/pharmacy/receive`",
+      "roles": [
+        "PHA"
+      ],
+      "priority": "P0",
+      "outcome": "purchase receipt for existing PO or direct receipt"
+    },
+    {
+      "id": "PH-10",
+      "route": "/clinic/pharmacy/transfers/new",
+      "view": "`/clinic/pharmacy/transfers/new`",
+      "roles": [
+        "PHA"
+      ],
+      "priority": "P0",
+      "outcome": "stock transfer/issue with batch details"
+    },
+    {
+      "id": "PH-11",
+      "route": "/clinic/pharmacy/usage",
+      "view": "`/clinic/pharmacy/usage`",
+      "roles": [
+        "PHA",
+        "DOC limited"
+      ],
+      "priority": "P0",
+      "outcome": "consumables linked to procedure/stock ledger"
+    },
+    {
+      "id": "PH-12",
+      "route": "/clinic/pharmacy/purchase-orders",
+      "view": "`/clinic/pharmacy/purchase-orders`",
+      "roles": [
+        "PHA",
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "PO list, status, supplier"
+    },
+    {
+      "id": "PH-13",
+      "route": "/clinic/pharmacy/purchase-orders/new",
+      "view": "`/clinic/pharmacy/purchase-orders/new`",
+      "roles": [
+        "PHA",
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "prepare/submit PO according to policy"
+    },
+    {
+      "id": "PH-14",
+      "route": "/clinic/pharmacy/purchase-orders/:id",
+      "view": "`/clinic/pharmacy/purchase-orders/:id`",
+      "roles": [
+        "PHA",
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "order and receipt status"
+    },
+    {
+      "id": "PH-15",
+      "route": "/clinic/pharmacy/suppliers",
+      "view": "`/clinic/pharmacy/suppliers`",
+      "roles": [
+        "PHA",
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "supplier search/view/setup permission"
+    },
+    {
+      "id": "PH-16",
+      "route": "/clinic/pharmacy/reconcile",
+      "view": "`/clinic/pharmacy/reconcile`",
+      "roles": [
+        "PHA",
+        "ADM"
+      ],
+      "priority": "P1",
+      "outcome": "stock count / variance / submit restricted"
+    },
+    {
+      "id": "CA-01",
+      "route": "/clinic/cashier",
+      "view": "`/clinic/cashier`",
+      "roles": [
+        "CAS",
+        "REC delegated"
+      ],
+      "priority": "P0",
+      "outcome": "pending bills, payments, shortcuts"
+    },
+    {
+      "id": "CA-02",
+      "route": "/clinic/cashier/pending",
+      "view": "`/clinic/cashier/pending`",
+      "roles": [
+        "CAS"
+      ],
+      "priority": "P0",
+      "outcome": "visits awaiting billing"
+    },
+    {
+      "id": "CA-03",
+      "route": "/clinic/invoices",
+      "view": "`/clinic/invoices`",
+      "roles": [
+        "CAS",
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "invoice list, outstanding, filter"
+    },
+    {
+      "id": "CA-04",
+      "route": "/clinic/invoices/new",
+      "view": "`/clinic/invoices/new`",
+      "roles": [
+        "CAS"
+      ],
+      "priority": "P0",
+      "outcome": "create sales invoice from encounter/procedure"
+    },
+    {
+      "id": "CA-05",
+      "route": "/clinic/invoices/:id",
+      "view": "`/clinic/invoices/:id`",
+      "roles": [
+        "CAS",
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "invoice detail, submit, adjustments"
+    },
+    {
+      "id": "CA-06",
+      "route": "/clinic/invoices/:id/payment",
+      "view": "`/clinic/invoices/:id/payment`",
+      "roles": [
+        "CAS"
+      ],
+      "priority": "P0",
+      "outcome": "take cash or card *method*, payment entry"
+    },
+    {
+      "id": "CA-07",
+      "route": "/clinic/payments",
+      "view": "`/clinic/payments`",
+      "roles": [
+        "CAS",
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "payment history and receipt list"
+    },
+    {
+      "id": "CA-08",
+      "route": "/clinic/payments/:id/receipt",
+      "view": "`/clinic/payments/:id/receipt`",
+      "roles": [
+        "CAS"
+      ],
+      "priority": "P0",
+      "outcome": "print/download receipt"
+    },
+    {
+      "id": "CA-09",
+      "route": "/clinic/cashier/refunds",
+      "view": "`/clinic/cashier/refunds`",
+      "roles": [
+        "CAS",
+        "MGR"
+      ],
+      "priority": "P1",
+      "outcome": "return/cancel workflow with permission/approval"
+    },
+    {
+      "id": "MG-01",
+      "route": "/clinic/management",
+      "view": "`/clinic/management`",
+      "roles": [
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "clinic owner overview KPI + trends"
+    },
+    {
+      "id": "MG-02",
+      "route": "/clinic/management/appointments",
+      "view": "`/clinic/management/appointments`",
+      "roles": [
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "visit volume, cancellation/no-show, doctor allocation"
+    },
+    {
+      "id": "MG-03",
+      "route": "/clinic/management/treatments",
+      "view": "`/clinic/management/treatments`",
+      "roles": [
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "treatment volumes by procedure and period"
+    },
+    {
+      "id": "MG-04",
+      "route": "/clinic/management/financial",
+      "view": "`/clinic/management/financial`",
+      "roles": [
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "invoiced revenue, receipts, outstanding, trends"
+    },
+    {
+      "id": "MG-05",
+      "route": "/clinic/management/inventory",
+      "view": "`/clinic/management/inventory`",
+      "roles": [
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "inventory value, stock/expiry and purchases"
+    },
+    {
+      "id": "MG-06",
+      "route": "/clinic/management/purchasing",
+      "view": "`/clinic/management/purchasing`",
+      "roles": [
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "spend, orders, received/unreceived"
+    },
+    {
+      "id": "MG-07",
+      "route": "/clinic/management/reports",
+      "view": "`/clinic/management/reports`",
+      "roles": [
+        "MGR"
+      ],
+      "priority": "P0",
+      "outcome": "all reports directory/export (approved)"
+    },
+    {
+      "id": "AD-01",
+      "route": "/clinic/admin",
+      "view": "`/clinic/admin`",
+      "roles": [
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "admin home: setup status, exceptions"
+    },
+    {
+      "id": "AD-02",
+      "route": "/clinic/admin/users",
+      "view": "`/clinic/admin/users`",
+      "roles": [
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "users, roles and access policies"
+    },
+    {
+      "id": "AD-03",
+      "route": "/clinic/admin/practitioners",
+      "view": "`/clinic/admin/practitioners`",
+      "roles": [
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "doctor roster / linked users"
+    },
+    {
+      "id": "AD-04",
+      "route": "/clinic/admin/schedules",
+      "view": "`/clinic/admin/schedules`",
+      "roles": [
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "practitioner schedule and availability"
+    },
+    {
+      "id": "AD-05",
+      "route": "/clinic/admin/appointment-types",
+      "view": "`/clinic/admin/appointment-types`",
+      "roles": [
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "visit types, durations, charges where supported"
+    },
+    {
+      "id": "AD-06",
+      "route": "/clinic/admin/procedure-templates",
+      "view": "`/clinic/admin/procedure-templates`",
+      "roles": [
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "service/procedure and consumables defaults"
+    },
+    {
+      "id": "AD-07",
+      "route": "/clinic/admin/locations",
+      "view": "`/clinic/admin/locations`",
+      "roles": [
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "healthcare service units, rooms, warehouses"
+    },
+    {
+      "id": "AD-08",
+      "route": "/clinic/admin/items",
+      "view": "`/clinic/admin/items`",
+      "roles": [
+        "ADM",
+        "PHA delegated"
+      ],
+      "priority": "P0",
+      "outcome": "medicine/product/service item setup"
+    },
+    {
+      "id": "AD-09",
+      "route": "/clinic/admin/pricing",
+      "view": "`/clinic/admin/pricing`",
+      "roles": [
+        "ADM",
+        "MGR authorized"
+      ],
+      "priority": "P0",
+      "outcome": "price lists and payment methods"
+    },
+    {
+      "id": "AD-10",
+      "route": "/clinic/admin/lab-templates",
+      "view": "`/clinic/admin/lab-templates`",
+      "roles": [
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "lab test catalog / external provider mapping (if used)"
+    },
+    {
+      "id": "AD-11",
+      "route": "/clinic/admin/clinic-settings",
+      "view": "`/clinic/admin/clinic-settings`",
+      "roles": [
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "company, default department, photo/expiry policies"
+    },
+    {
+      "id": "AD-12",
+      "route": "/clinic/admin/audit",
+      "view": "`/clinic/admin/audit`",
+      "roles": [
+        "ADM",
+        "authorized"
+      ],
+      "priority": "P0",
+      "outcome": "document/file changes, reversal/error logs"
+    },
+    {
+      "id": "AD-13",
+      "route": "/clinic/admin/integration-status",
+      "view": "`/clinic/admin/integration-status`",
+      "roles": [
+        "ADM"
+      ],
+      "priority": "P0",
+      "outcome": "backend versions, connectivity, master data readiness"
+    },
+    {
+      "id": "SYS-01",
+      "route": null,
+      "view": "global Loading / Empty / Error",
+      "roles": [
+        "all"
+      ],
+      "priority": "P0",
+      "outcome": "no records, retry, save failure, validation"
+    },
+    {
+      "id": "SYS-02",
+      "route": null,
+      "view": "global Unauthorized / Session expired",
+      "roles": [
+        "all"
+      ],
+      "priority": "P0",
+      "outcome": "403 / login required / masked content"
+    },
+    {
+      "id": "SYS-03",
+      "route": null,
+      "view": "global Unsaved / Conflict / Duplicate",
+      "roles": [
+        "all"
+      ],
+      "priority": "P0",
+      "outcome": "protect work, prevent double submit"
+    },
+    {
+      "id": "SYS-04",
+      "route": null,
+      "view": "global Print / Preview / Export",
+      "roles": [
+        "permitted"
+      ],
+      "priority": "P0",
+      "outcome": "invoice/medical documents as permitted"
+    }
+  ]
+}

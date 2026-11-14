@@ -1,0 +1,912 @@
+{
+  "schema": 2,
+  "app": "clinic_photos",
+  "module": "clinic_photos.tests.test_file_policy",
+  "case_class": "ProtectedFileBoundaryTests",
+  "isolation": "One case per isolated native execution. A protected denial latches this app's abort for the whole execution, so cases must never share an execution and the production latch is never cleared.",
+  "selection_contract": "bench --site <site> run-tests --app <app> --module <case module> --case <case class> --test <bare_method>. Each case may declare its own module/case_class; cases that declare neither inherit the manifest-level pair (schema-1 compatibility). A case with readiness 'blocked' is never selectable and no command is generated for it.",
+  "acceptance": "Every executable manifest case must report exactly one passing result, in its own native execution, with provenance emitted by the selected test itself (identity + per-invocation nonce) and with a versioned, observed disposal confirmation covering the run (run id, site, project, source and contract digests, per-case nonces and raw-output hashes) and the residue it created (rows AND protected storage keys). Skips, missing/duplicate/extra results, identity or nonce mismatch, failures and an unobserved disposal are acceptance failures. A failing case still surrenders its residue. Empty residue is not proof of filesystem cleanliness. Blocked cases are excluded from the matrix, never selected, and never counted as a pass. 'expects_denial'/'latches_abort' describe the in-process owner/latch protocol only; the publication child refusals asserted by pub.process.* cases are process outcome assertions, not owner-latch denials.",
+  "cases": [
+    {
+      "id": "setup.reserved_namespace",
+      "method": "test_reserved_test_keys_stay_in_the_orphan_namespace",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician",
+        "Nursing User"
+      ],
+      "guard": "reserved orphan namespace",
+      "description": "Both authors' protected keys stay in the reserved namespace.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "mro.protected_mixin",
+      "method": "test_installed_file_class_uses_the_protected_mixin",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "extend_doctype_class seam",
+      "description": "An installed File instance is the protected mixin.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "actor.administrator_not_clinician",
+      "method": "test_administrator_is_not_an_ordinary_clinician",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Administrator"
+      ],
+      "guard": "actor classification",
+      "description": "Administrator is not treated as an ordinary clinician.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "read.clinician_roles_allowed",
+      "method": "test_both_clinician_roles_read_both_protected_files",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician",
+        "Nursing User"
+      ],
+      "guard": "protected read admission",
+      "description": "Physician and Nursing User both read both authors' protected bytes.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "read.non_clinician_denied",
+      "method": "test_non_clinician_cannot_download_or_read_protected_content",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Healthcare Administrator",
+        "Physician",
+        "Nursing User"
+      ],
+      "guard": "protected read denial",
+      "description": "A non-clinician cannot read or download any protected file.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "read.share_denied",
+      "method": "test_explicit_file_share_does_not_admit_a_non_clinician",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Healthcare Administrator"
+      ],
+      "guard": "explicit File share does not widen read",
+      "description": "An explicit File share does not admit a non-clinician.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "read.disabled_clinician_denied",
+      "method": "test_disabled_clinician_cannot_read_with_an_existing_session",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "disabled clinician with a live session",
+      "description": "A disabled clinician cannot read with an existing session.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "read.non_author_allowed",
+      "method": "test_non_author_clinician_reads_protected_content",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Nursing User",
+        "Physician"
+      ],
+      "guard": "non-author clinician read admission",
+      "description": "A non-author clinician still reads the protected bytes.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "list.hides_protected",
+      "method": "test_non_clinician_list_hides_protected_rows_but_not_unrelated_rows",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Healthcare Administrator",
+        "Physician"
+      ],
+      "guard": "permission_query_conditions",
+      "description": "List queries hide protected rows but keep unrelated rows.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "read.direct_document_denied",
+      "method": "test_direct_document_read_is_denied_for_non_clinicians",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Healthcare Administrator"
+      ],
+      "guard": "has_permission document read",
+      "description": "A direct document read is denied for a non-clinician.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "mutate.owner_change_denied",
+      "method": "test_non_author_cannot_change_file_owner",
+      "owner": "fresh",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": [
+        "file_finalize"
+      ],
+      "roles": [
+        "Nursing User"
+      ],
+      "guard": "file_finalize identity guard",
+      "description": "Non-author owner change is denied by the metadata finalization boundary.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "mutate.privacy_flip_denied",
+      "method": "test_non_author_cannot_flip_file_privacy",
+      "owner": "fresh",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": [
+        "file_finalize"
+      ],
+      "roles": [
+        "Nursing User"
+      ],
+      "guard": "file_finalize identity guard",
+      "description": "Non-author privacy flip is denied by the metadata finalization boundary.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "mutate.url_move_denied",
+      "method": "test_non_author_cannot_move_file_url",
+      "owner": "fresh",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": [
+        "file_finalize"
+      ],
+      "roles": [
+        "Nursing User"
+      ],
+      "guard": "file_finalize identity guard",
+      "description": "Non-author URL move is denied by the metadata finalization boundary.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "mutate.encoded_url_denied",
+      "method": "test_non_author_encoded_url_spelling_denied",
+      "owner": "fresh",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": [],
+      "roles": [
+        "Nursing User"
+      ],
+      "guard": "canonical spelling preflight",
+      "description": "A percent-encoded spelling of the same key is denied before any boundary (owner not notified, nothing latched).",
+      "expects_denial": true,
+      "latches_abort": false
+    },
+    {
+      "id": "content.replace_denied",
+      "method": "test_author_cannot_replace_protected_content",
+      "owner": "fresh",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": [
+        "content_write"
+      ],
+      "roles": [
+        "Physician"
+      ],
+      "guard": "content_write chain",
+      "description": "The author cannot replace protected bytes outside the bound write chain.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "derivative.thumbnail_denied",
+      "method": "test_derivative_thumbnail_denied",
+      "owner": "fresh",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": [],
+      "roles": [
+        "Physician"
+      ],
+      "guard": "derivative denial",
+      "description": "Thumbnail generation is denied before any boundary (owner not notified).",
+      "expects_denial": true,
+      "latches_abort": false
+    },
+    {
+      "id": "derivative.optimize_denied",
+      "method": "test_derivative_optimize_denied",
+      "owner": "fresh",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": [],
+      "roles": [
+        "Physician"
+      ],
+      "guard": "derivative denial",
+      "description": "Optimization is denied before any boundary (owner not notified).",
+      "expects_denial": true,
+      "latches_abort": false
+    },
+    {
+      "id": "delete.version_denied",
+      "method": "test_author_cannot_delete_committed_version",
+      "owner": "fresh",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": [
+        "protected_cleanup"
+      ],
+      "roles": [
+        "Physician"
+      ],
+      "guard": "protected_cleanup version guard",
+      "description": "The author cannot delete a committed annotation version.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "delete.version_denied_nursing",
+      "method": "test_non_author_cannot_delete_committed_version",
+      "owner": "fresh",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": [
+        "protected_cleanup"
+      ],
+      "roles": [
+        "Nursing User"
+      ],
+      "guard": "protected_cleanup version guard",
+      "description": "A Nursing User cannot delete a committed annotation version.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "delete.annotation_file_denied",
+      "method": "test_author_cannot_delete_committed_annotation_file",
+      "owner": "fresh",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": [
+        "protected_cleanup"
+      ],
+      "roles": [
+        "Physician"
+      ],
+      "guard": "protected_cleanup File guard",
+      "description": "The author cannot delete the committed annotation File.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "mutate.original_reference_denied",
+      "method": "test_committed_original_reference_change_denied",
+      "owner": "fresh",
+      "expected_exception": "ValidationError",
+      "expected_owner_reasons": [
+        "original_finalize"
+      ],
+      "roles": [
+        "Physician"
+      ],
+      "guard": "original_finalize immutability guard",
+      "description": "With a live owner the immutable-reference guard is reached and maps to ValidationError.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "delete.original_denied",
+      "method": "test_original_record_delete_denied",
+      "owner": "fresh",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": [
+        "protected_cleanup"
+      ],
+      "roles": [
+        "Physician"
+      ],
+      "guard": "protected_cleanup original guard",
+      "description": "An original photo record cannot be deleted.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "no_owner.original_registration_denied",
+      "method": "test_original_registration_without_owner_denied",
+      "owner": "none",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "owner gate before original registration",
+      "description": "Without an owner, original registration is denied by the gate and nothing is inserted.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "no_owner.file_insert_denied",
+      "method": "test_reserved_file_insert_without_owner_denied",
+      "owner": "none",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "owner gate before reserved File insert",
+      "description": "Without an owner, a reserved File insert is denied by the gate.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "no_owner.content_write_denied",
+      "method": "test_content_write_without_owner_denied",
+      "owner": "none",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "owner gate before content write",
+      "description": "Without an owner, a content write is denied and the bytes stay unchanged.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "no_owner.version_delete_denied",
+      "method": "test_version_delete_without_owner_denied",
+      "owner": "none",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "owner gate before version cleanup",
+      "description": "Without an owner, a committed version delete is denied by the gate.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "no_owner.annotation_file_delete_denied",
+      "method": "test_annotation_file_delete_without_owner_denied",
+      "owner": "none",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "owner gate before File cleanup",
+      "description": "Without an owner, the annotation File delete is denied by the gate.",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "no_owner.original_update_gate_precedes_lifecycle",
+      "method": "test_original_update_without_owner_denied_by_gate_not_validation",
+      "owner": "none",
+      "expected_exception": "PermissionError",
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "owner gate precedes the original_finalize guard",
+      "description": "Without an owner the original update is denied by the gate with PermissionError, not by the immutable-reference guard (no ValidationError).",
+      "expects_denial": true,
+      "latches_abort": true
+    },
+    {
+      "id": "list.unregistered_not_classified",
+      "method": "test_unregistered_reserved_metadata_is_not_listed_for_clinicians",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "unrelated File classification",
+      "description": "An unrelated File is not classified as protected.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "cleanup.unrelated_unchanged",
+      "method": "test_unrelated_file_lifecycle_is_unchanged",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "unrelated native lifecycle",
+      "description": "Unrelated File content and save behaviour are unchanged.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "context.request_local",
+      "method": "test_publication_context_is_request_local_and_not_client_settable",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Administrator"
+      ],
+      "guard": "request-local publication context",
+      "description": "No publication context is bound at request start and it is not client-settable.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "pub.process.unknown_operation_refused",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationProcessEntryCases",
+      "method": "test_child_refuses_unknown_operation_without_residue",
+      "readiness": "executable",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "fresh child refuses an unknown operation identity",
+      "description": "The fixed child refuses an opaque identity that does not exist and creates no operation, File or byte.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "pub.process.site_binding_enforced",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationProcessEntryCases",
+      "method": "test_child_binds_the_approved_site_and_ignores_no_other",
+      "readiness": "executable",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "fixed allowed-site set",
+      "description": "A non-approved site is refused with exit 2 before any framework connection and the approved site is untouched.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "pub.process.argv_shape_fixed",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationProcessEntryCases",
+      "method": "test_child_rejects_client_supplied_argv_shapes",
+      "readiness": "executable",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "fixed server-selected argument vector",
+      "description": "Only `--site <site> --operation-id <id>` in that order is accepted; extra, reordered or malformed shapes are refused with exit 2.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "pub.process.output_bounded_no_saved_claim",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationProcessEntryCases",
+      "method": "test_child_output_is_phifree_and_never_claims_saved",
+      "readiness": "executable",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "bounded PHI-free child output",
+      "description": "A refusal emits exactly one bounded status line with a derived exit code and never claims a saved outcome, actor, payload or path.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "pub.schema.reservation_null_and_unique",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationSchemaNativeCases",
+      "method": "test_reservation_null_semantics_and_unique_index",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "reservation schema NULL/unique semantics",
+      "description": "Two NULL reservations coexist and a duplicate reservation key is refused.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[task6-schema-sync] Reservation columns and indexes are declared only in the reviewed app JSON and are not installed; a narrow reload_doc sync is a separate parent-authorized window."
+    },
+    {
+      "id": "pub.schema.set_value_no_hooks_no_commit",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationSchemaNativeCases",
+      "method": "test_set_value_has_no_hooks_and_no_commit",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "db.set_value ORM/commit posture",
+      "description": "db.set_value updates the operation row without document hooks and without an implicit commit visible to a second connection.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[task6-schema-sync] The set_value hook/commit posture needs the synced reservation columns and a second live connection."
+    },
+    {
+      "id": "pub.original.first_jpeg_mro_and_get_content",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationOriginalNativeCases",
+      "method": "test_first_jpeg_original_uses_protected_mro_and_get_content",
+      "readiness": "executable",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "first synthetic original via the real writer",
+      "description": "The first JPEG original is created by the protected writer through the fresh child; the committed File uses the protected MRO and get_content returns the exact published bytes to an authorized clinician.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "pub.original.hooks_and_rollback_residue",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationOriginalNativeCases",
+      "method": "test_native_hooks_and_rollback_residue_observed",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "native hooks and on_rollback residue",
+      "description": "Native hooks fire for the bound writer transaction and a rolled-back publication leaves the protected residue observable.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[writer-transaction] Native hook and on_rollback residue observation needs a bound writer transaction produced by the fresh child."
+    },
+    {
+      "id": "pub.reservation.survives_rollback",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationReservationNativeCases",
+      "method": "test_prepared_reservation_survives_rollback",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "PREPARED reservation floor",
+      "description": "A committed PREPARED reservation survives a rolled-back publication transaction and is still resolvable.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[prepared-reservation] A committed PREPARED reservation needs the installed Task-6 schema and one enabled synthetic clinician."
+    },
+    {
+      "id": "pub.reservation.retarget_reserved_refused",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationReservationNativeCases",
+      "method": "test_dedup_retarget_reserved_refused",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "reserved-destination retarget guard",
+      "description": "A reserved destination cannot be retargeted to another operation.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[prepared-reservation] A reserved destination exists only after a committed PREPARED reservation."
+    },
+    {
+      "id": "pub.reservation.retarget_registered_refused",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationReservationNativeCases",
+      "method": "test_dedup_retarget_registered_refused",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "registered-destination retarget guard",
+      "description": "A registered non-reserved protected destination cannot be retargeted.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[published-object] A registered non-reserved protected destination needs one already committed protected record."
+    },
+    {
+      "id": "pub.reservation.post_insert_retarget_requires_rollback",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationReservationNativeCases",
+      "method": "test_post_insert_retarget_requires_rollback",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "post-insert identity branches",
+      "description": "A post-insert retarget is refused and the rollback preserves the original identity.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[writer-transaction] A post-insert retarget needs a real completed native insert inside the writer transaction to roll back."
+    },
+    {
+      "id": "pub.reservation.original_path_rollback_guarded",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationReservationNativeCases",
+      "method": "test_original_path_rollback_guarded",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "original_path rollback compensation",
+      "description": "A real shutil.move compensation on a bound transaction preserves protected residue.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[writer-transaction] A real shutil.move compensation needs the writer and a live owner from the fresh child."
+    },
+    {
+      "id": "pub.reservation.unsaved_file_rollback_guarded",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationReservationNativeCases",
+      "method": "test_unsaved_file_rollback_guarded",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "unsaved-File rollback",
+      "description": "An unsaved File inside a bound publication transaction is not left behind as an unprotected object.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[writer-transaction] An unsaved File exists only inside a real bound publication transaction."
+    },
+    {
+      "id": "pub.reservation.administrator_delete_refused",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationReservationNativeCases",
+      "method": "test_administrator_delete_refused",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "protected cleanup under Administrator",
+      "description": "Even an Administrator session cannot delete committed protected records under a live owner.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[published-object] A committed protected record and its bytes are needed, plus DocPerm/root teardown observation."
+    },
+    {
+      "id": "pub.atomicity.two_phase_atomic",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationAtomicityNativeCases",
+      "method": "test_prepared_commit_then_publication_is_atomic",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "two-phase PREPARED/PUBLISHED atomicity",
+      "description": "The PREPARED commit and the publication transaction cannot produce a partial published state.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[two-phase-fixtures] Two-phase atomicity needs a committed SUBMITTED operation, a PREPARED commit and a publication transaction."
+    },
+    {
+      "id": "pub.atomicity.same_owner_after_commit",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationAtomicityNativeCases",
+      "method": "test_same_owner_rechecks_after_commit",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "same-owner post-commit verification",
+      "description": "Only the same owner re-checks version and authority after the preparation commit.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[published-object] Same-owner post-commit verification needs one committed published object and a live exclusion owner."
+    },
+    {
+      "id": "pub.atomicity.revocation_between_phases",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationAtomicityNativeCases",
+      "method": "test_revocation_between_phases_blocks_publication",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "native authorization revocation",
+      "description": "Revocation between preparation and publication blocks the publication.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[native-user-permission] Revocation between phases needs a clinician whose enablement or permissions an authorized operator changes."
+    },
+    {
+      "id": "pub.atomicity.unknown_commit_not_retried",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationAtomicityNativeCases",
+      "method": "test_unknown_commit_outcome_is_not_retried",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "unknown commit outcome",
+      "description": "An unknown commit outcome is reported as unknown and never retried as a fresh append.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[fault-seam] An unknown commit outcome needs a controllable commit-path fault; no runtime fault hook exists and patching installed production code is out of scope."
+    },
+    {
+      "id": "pub.atomicity.duplicate_launch_no_resume",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationAtomicityNativeCases",
+      "method": "test_duplicate_launch_does_not_resume_prepared",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "duplicate launch / PREPARED non-resume",
+      "description": "A duplicate launch loads the advanced state and never repeats the PREPARED insertion.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[prepared-reservation] Duplicate launch and PREPARED non-resume need one PREPARED operation with a durable reservation."
+    },
+    {
+      "id": "pub.access.replay_after_newer_version",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationAccessNativeCases",
+      "method": "test_replay_after_newer_version_returns_immutable_version",
+      "readiness": "executable",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "current-access replay N after N+1",
+      "description": "Replaying at version N after a committed N+1 resolves the immutable published version N through the original operation, not a new append.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "pub.access.lost_response_replay",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationAccessNativeCases",
+      "method": "test_lost_response_replay_resolves_original_tuple",
+      "readiness": "executable",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "lost-response same-key replay",
+      "description": "A retried identical request key after a dropped response resolves the original committed tuple through the same operation instead of creating a second append.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "pub.access.allowlist_cross_actor_audit",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationAccessNativeCases",
+      "method": "test_operator_allowlist_cross_actor_audit_is_denied",
+      "readiness": "executable",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician",
+        "Nursing User"
+      ],
+      "guard": "default-empty operator allowlist",
+      "description": "A non-allowlisted clinician cannot perform recovery inspection across actors.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "pub.access.disabled_or_revoked_actor",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationAccessNativeCases",
+      "method": "test_disabled_or_revoked_actor_cannot_replay",
+      "readiness": "executable",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "disabled/revoked actor replay",
+      "description": "A disabled or revoked actor cannot replay or obtain a successful saved outcome.",
+      "expects_denial": false,
+      "latches_abort": false
+    },
+    {
+      "id": "pub.access.native_file_veto",
+      "module": "clinic_photos.tests.test_publication",
+      "case_class": "PublicationAccessNativeCases",
+      "method": "test_native_file_veto_denies_replay",
+      "readiness": "blocked",
+      "owner": "none",
+      "expected_exception": null,
+      "expected_owner_reasons": null,
+      "roles": [
+        "Physician"
+      ],
+      "guard": "native File permission veto",
+      "description": "A native File permission veto denies the replay even when durable evidence matches.",
+      "expects_denial": false,
+      "latches_abort": false,
+      "blocked_reason": "[published-object] The native File veto needs a committed protected File plus a native permission decision to veto it."
+    }
+  ],
+  "evidence_schema": 3
+}

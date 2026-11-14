@@ -1,0 +1,44 @@
+[
+  {
+    "id": "fixture-staff-01",
+    "displayName": "Fixture Receptionist",
+    "role": "REC",
+    "fictional": true
+  },
+  {
+    "id": "fixture-staff-02",
+    "displayName": "Fixture Doctor",
+    "role": "DOC",
+    "fictional": true
+  },
+  {
+    "id": "fixture-staff-03",
+    "displayName": "Fixture Nurse",
+    "role": "NUR",
+    "fictional": true
+  },
+  {
+    "id": "fixture-staff-04",
+    "displayName": "Fixture Pharmacist",
+    "role": "PHA",
+    "fictional": true
+  },
+  {
+    "id": "fixture-staff-05",
+    "displayName": "Fixture Cashier",
+    "role": "CAS",
+    "fictional": true
+  },
+  {
+    "id": "fixture-staff-06",
+    "displayName": "Fixture Manager",
+    "role": "MGR",
+    "fictional": true
+  },
+  {
+    "id": "fixture-staff-07",
+    "displayName": "Fixture Administrator",
+    "role": "ADM",
+    "fictional": true
+  }
+]

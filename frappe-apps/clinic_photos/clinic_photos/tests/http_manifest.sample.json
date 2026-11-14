@@ -1,0 +1,418 @@
+{
+  "schema": "clinic_photos.http_manifest/v1",
+  "note": "Schema example only. Copy outside the repository, chmod 600, replace every REPLACE-WITH / approval marker with the explicitly approved disposable target and synthetic identifiers. Session values live only in environment variables; this file references their names.",
+  "target": {
+    "base_url": "https://disposable-photos.example.test",
+    "approved_target": "https://disposable-photos.example.test",
+    "disposable": true,
+    "approval_reference": "REPLACE-WITH-EXPLICIT-DISPOSABLE-APPROVAL",
+    "transport": "https",
+    "tunnel_contract": null
+  },
+  "provisioner_attestation": {
+    "attested_by": "REPLACE-WITH-PROVISIONER",
+    "attested_at": "REPLACE-WITH-TIMESTAMP",
+    "statement": "Synthetic principals, File/Photo records and the exact target exist only on the approved disposable site. This attestation is not proof of native role state or disposal.",
+    "not_proof": true
+  },
+  "records": {
+    "photo": "PHOTO-SYNTHETIC-5555555555555555",
+    "version": "VERSION-SYNTHETIC-6666666666666666",
+    "draft": "DRAFT-SYNTHETIC-7777777777777777"
+  },
+  "assets": {
+    "original": {
+      "file_name": "clinic-photo-11111111-1111-1111-1111-111111111111.png",
+      "sha256": "aa60b2dc951c890e0a9c3ba299217a38608cf59af3c48c697331c5ae65cbbdee",
+      "size": 42,
+      "content_type": "image/png",
+      "body_fragments": [
+        "SYNTHETIC-PHOTO-ORIGINAL-BYTES-DO-NOT-USE"
+      ]
+    },
+    "annotation": {
+      "file_name": "clinic-annotation-22222222-2222-2222-2222-222222222222.json",
+      "sha256": "db0e6172f3586b1407a448171c305e2377cdad2d72a1b1ecf9109eafd5611cde",
+      "size": 67,
+      "content_type": "application/json",
+      "body_fragments": [
+        "SYNTHETIC-ANNOTATION-NOT-REAL",
+        "annotation_marker"
+      ]
+    },
+    "unrelated": {
+      "file_name": "unrelated-finance-44444444-4444-4444-4444-444444444444.mt940",
+      "sha256": "40e3b9080d96cae069065e8dc0a42e1e4362b96f0cb3b1e99d172f91c2e74b7e",
+      "size": 38,
+      "content_type": "application/octet-stream",
+      "body_fragments": [
+        "UNRELATED-FINANCE-STATEMENT-SYNTHETIC"
+      ]
+    }
+  },
+  "files": {
+    "original": {
+      "fid": "FILE-SYNTHETIC-ORIGINAL-1111111111111111",
+      "path": "/private/files/clinic-photo-11111111-1111-1111-1111-111111111111.png",
+      "asset": "original"
+    },
+    "annotation": {
+      "fid": "FILE-SYNTHETIC-ANNOTATION-2222222222222222",
+      "path": "/private/files/clinic-annotation-22222222-2222-2222-2222-222222222222.json",
+      "asset": "annotation"
+    },
+    "alias": {
+      "fid": "FILE-SYNTHETIC-ALIAS-3333333333333333",
+      "path": "/private/files/clinic-photo-11111111-1111-1111-1111-111111111111.png",
+      "asset": "original"
+    },
+    "unrelated": {
+      "fid": "FILE-SYNTHETIC-UNRELATED-4444444444444444",
+      "path": "/private/files/unrelated-finance-44444444-4444-4444-4444-444444444444.mt940",
+      "asset": "unrelated"
+    }
+  },
+  "actors": {
+    "author": {
+      "kind": "clinician-author",
+      "session_env": "CLINIC_PHOTO_TEST_SESSION_AUTHOR"
+    },
+    "other_clinician": {
+      "kind": "clinician-other",
+      "session_env": "CLINIC_PHOTO_TEST_SESSION_OTHER_CLINICIAN"
+    },
+    "nonclinician": {
+      "kind": "nonclinician",
+      "session_env": "CLINIC_PHOTO_TEST_SESSION_NONCLINICIAN"
+    },
+    "guest": {
+      "kind": "guest",
+      "session_env": null
+    },
+    "revoked_owner": {
+      "kind": "revoked-owner-existing-session",
+      "session_env": "CLINIC_PHOTO_TEST_SESSION_REVOKED_OWNER"
+    },
+    "disabled": {
+      "kind": "disabled-user",
+      "session_env": "CLINIC_PHOTO_TEST_SESSION_DISABLED"
+    },
+    "shared_nonclinician": {
+      "kind": "explicit-file-share-nonclinician",
+      "session_env": "CLINIC_PHOTO_TEST_SESSION_SHARED_NONCLINICIAN"
+    }
+  },
+  "routes": {
+    "direct_original": {
+      "kind": "direct_private",
+      "file": "original"
+    },
+    "direct_alias": {
+      "kind": "direct_private",
+      "file": "alias",
+      "query": {
+        "fid": "FILE-SYNTHETIC-ALIAS-3333333333333333"
+      }
+    },
+    "download_original": {
+      "kind": "native_download",
+      "file": "original",
+      "query": {
+        "file_url": "/private/files/clinic-photo-11111111-1111-1111-1111-111111111111.png"
+      }
+    },
+    "download_annotation": {
+      "kind": "native_download",
+      "file": "annotation",
+      "query": {
+        "file_url": "/private/files/clinic-annotation-22222222-2222-2222-2222-222222222222.json"
+      }
+    },
+    "zip_protected": {
+      "kind": "native_zip",
+      "files": [
+        "original",
+        "annotation"
+      ]
+    },
+    "zip_mixed": {
+      "kind": "native_zip",
+      "files": [
+        "original",
+        "unrelated"
+      ]
+    },
+    "internal_protected": {
+      "kind": "internal_protected",
+      "path": "/protected/private/files/clinic-photo-11111111-1111-1111-1111-111111111111.png"
+    }
+  },
+  "cases": [
+    {
+      "id": "author.direct.original.allowed",
+      "actor": "author",
+      "route": "direct_original",
+      "expect": {
+        "status": 200,
+        "body": "allowed_bytes",
+        "asset": "original",
+        "content_type": "image/png"
+      }
+    },
+    {
+      "id": "author.direct.alias.allowed",
+      "actor": "author",
+      "route": "direct_alias",
+      "expect": {
+        "status": 200,
+        "body": "allowed_bytes",
+        "asset": "original",
+        "content_type": "image/png"
+      }
+    },
+    {
+      "id": "author.download.original.allowed",
+      "actor": "author",
+      "route": "download_original",
+      "expect": {
+        "status": 200,
+        "body": "allowed_bytes",
+        "asset": "original",
+        "content_type": "image/png"
+      }
+    },
+    {
+      "id": "author.download.annotation.allowed",
+      "actor": "author",
+      "route": "download_annotation",
+      "expect": {
+        "status": 200,
+        "body": "allowed_bytes",
+        "asset": "annotation",
+        "content_type": "application/json"
+      }
+    },
+    {
+      "id": "author.zip.protected.allowed",
+      "actor": "author",
+      "route": "zip_protected",
+      "expect": {
+        "status": 200,
+        "body": "zip_allowed",
+        "assets": [
+          "original",
+          "annotation"
+        ],
+        "content_type": "application/zip"
+      }
+    },
+    {
+      "id": "other_clinician.direct.original.allowed",
+      "actor": "other_clinician",
+      "route": "direct_original",
+      "expect": {
+        "status": 200,
+        "body": "allowed_bytes",
+        "asset": "original",
+        "content_type": "image/png"
+      }
+    },
+    {
+      "id": "other_clinician.download.annotation.allowed",
+      "actor": "other_clinician",
+      "route": "download_annotation",
+      "expect": {
+        "status": 200,
+        "body": "allowed_bytes",
+        "asset": "annotation",
+        "content_type": "application/json"
+      }
+    },
+    {
+      "id": "other_clinician.zip.protected.allowed",
+      "actor": "other_clinician",
+      "route": "zip_protected",
+      "expect": {
+        "status": 200,
+        "body": "zip_allowed",
+        "assets": [
+          "original",
+          "annotation"
+        ],
+        "content_type": "application/zip"
+      }
+    },
+    {
+      "id": "nonclinician.direct.original.denied",
+      "actor": "nonclinician",
+      "route": "direct_original",
+      "expect": {
+        "status": 403,
+        "body": "denied",
+        "forbidden_assets": [
+          "original",
+          "annotation"
+        ]
+      }
+    },
+    {
+      "id": "nonclinician.download.original.denied",
+      "actor": "nonclinician",
+      "route": "download_original",
+      "expect": {
+        "status": 403,
+        "body": "denied",
+        "forbidden_assets": [
+          "original",
+          "annotation"
+        ]
+      }
+    },
+    {
+      "id": "guest.direct.original.denied",
+      "actor": "guest",
+      "route": "direct_original",
+      "expect": {
+        "status": 403,
+        "body": "denied",
+        "forbidden_assets": [
+          "original",
+          "annotation"
+        ]
+      }
+    },
+    {
+      "id": "guest.download.original.denied",
+      "actor": "guest",
+      "route": "download_original",
+      "expect": {
+        "status": 403,
+        "body": "denied",
+        "forbidden_assets": [
+          "original",
+          "annotation"
+        ]
+      }
+    },
+    {
+      "id": "guest.zip.protected.denied",
+      "actor": "guest",
+      "route": "zip_protected",
+      "expect": {
+        "status": 403,
+        "body": "denied",
+        "forbidden_assets": [
+          "original",
+          "annotation"
+        ]
+      }
+    },
+    {
+      "id": "revoked_owner.direct.original.denied",
+      "actor": "revoked_owner",
+      "route": "direct_original",
+      "expect": {
+        "status": 403,
+        "body": "denied",
+        "forbidden_assets": [
+          "original",
+          "annotation"
+        ]
+      }
+    },
+    {
+      "id": "revoked_owner.download.annotation.denied",
+      "actor": "revoked_owner",
+      "route": "download_annotation",
+      "expect": {
+        "status": 403,
+        "body": "denied",
+        "forbidden_assets": [
+          "original",
+          "annotation"
+        ]
+      }
+    },
+    {
+      "id": "disabled.direct.original.denied",
+      "actor": "disabled",
+      "route": "direct_original",
+      "expect": {
+        "status": 403,
+        "body": "denied",
+        "forbidden_assets": [
+          "original",
+          "annotation"
+        ]
+      }
+    },
+    {
+      "id": "disabled.zip.protected.denied",
+      "actor": "disabled",
+      "route": "zip_protected",
+      "expect": {
+        "status": 403,
+        "body": "denied",
+        "forbidden_assets": [
+          "original",
+          "annotation"
+        ]
+      }
+    },
+    {
+      "id": "shared_nonclinician.direct.alias.denied",
+      "actor": "shared_nonclinician",
+      "route": "direct_alias",
+      "expect": {
+        "status": 403,
+        "body": "denied",
+        "forbidden_assets": [
+          "original",
+          "annotation"
+        ]
+      }
+    },
+    {
+      "id": "shared_nonclinician.download.annotation.denied",
+      "actor": "shared_nonclinician",
+      "route": "download_annotation",
+      "expect": {
+        "status": 403,
+        "body": "denied",
+        "forbidden_assets": [
+          "original",
+          "annotation"
+        ]
+      }
+    },
+    {
+      "id": "shared_nonclinician.zip.mixed.denied_protected",
+      "actor": "shared_nonclinician",
+      "route": "zip_mixed",
+      "expect": {
+        "status": 200,
+        "body": "zip_mixed",
+        "assets": [
+          "unrelated"
+        ],
+        "forbidden_assets": [
+          "original"
+        ],
+        "content_type": "application/zip"
+      }
+    },
+    {
+      "id": "guest.internal_protected.denied",
+      "actor": "guest",
+      "route": "internal_protected",
+      "expect": {
+        "status": 404,
+        "body": "denied",
+        "forbidden_assets": [
+          "original",
+          "annotation"
+        ]
+      }
+    }
+  ]
+}

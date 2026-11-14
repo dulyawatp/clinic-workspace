@@ -1,0 +1,3 @@
+# Generated native SPA build (see README "Native SPA hosting").
+# `pnpm --filter @clinic/app build:native` writes here; it is never committed.
+clinic_ui/public/ui/

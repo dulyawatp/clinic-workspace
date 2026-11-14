@@ -1,0 +1,65 @@
+[
+  {
+    "usr": "rec",
+    "pwd": "fixture",
+    "user": {
+      "id": "fixture-rec",
+      "displayName": "Fixture Receptionist",
+      "roles": ["REC"]
+    }
+  },
+  {
+    "usr": "doc",
+    "pwd": "fixture",
+    "user": {
+      "id": "fixture-doc",
+      "displayName": "Fixture Doctor",
+      "roles": ["DOC"]
+    }
+  },
+  {
+    "usr": "nur",
+    "pwd": "fixture",
+    "user": {
+      "id": "fixture-nur",
+      "displayName": "Fixture Nurse",
+      "roles": ["NUR"]
+    }
+  },
+  {
+    "usr": "pha",
+    "pwd": "fixture",
+    "user": {
+      "id": "fixture-pha",
+      "displayName": "Fixture Pharmacist",
+      "roles": ["PHA"]
+    }
+  },
+  {
+    "usr": "cas",
+    "pwd": "fixture",
+    "user": {
+      "id": "fixture-cas",
+      "displayName": "Fixture Cashier",
+      "roles": ["CAS"]
+    }
+  },
+  {
+    "usr": "mgr",
+    "pwd": "fixture",
+    "user": {
+      "id": "fixture-mgr",
+      "displayName": "Fixture Manager",
+      "roles": ["MGR"]
+    }
+  },
+  {
+    "usr": "adm",
+    "pwd": "fixture",
+    "user": {
+      "id": "fixture-adm",
+      "displayName": "Fixture Administrator",
+      "roles": ["ADM"]
+    }
+  }
+]

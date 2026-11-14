@@ -1,0 +1,36 @@
+{
+  "fictional": true,
+  "generatedBy": "scripts/generate-photo-fixtures.mjs",
+  "assets": [
+    {
+      "fileId": "fixture-photo-1",
+      "photoId": "PH-1",
+      "patientId": "PAT-1",
+      "bodyArea": "face",
+      "viewpoint": "synthetic-frame-v1",
+      "category": "before",
+      "fileName": "photo-before.png",
+      "contentType": "image/png",
+      "bytes": 220,
+      "sha256": "7eae15f049f13532aea3c50a7cf98e3b7a78f510cfa43cc1665c4d74754d63d3",
+      "width": 48,
+      "height": 32,
+      "dataBase64": "iVBORw0KGgoAAAANSUhEUgAAADAAAAAgCAIAAADbtmxLAAAAo0lEQVR42u3OOQ7CUAxF0azYOyDTIp4UCISGTLtgZll0ruzySbb0pVPe4la/HaZrL8prGKoylG7ou8M09aK8hiHg0AbT1InyGoZ4Q58NpksnymsYylC+ofcK07kV5TUMZSjf0GuFaWxFeQ1DwKEFprER5TUM8YaeC0ynRpTXMJShfEOPGaZjLcprGMpQvqH7DNNQi/IahoBDN5iGgyivYQg39AfFDtKG/dGNJwAAAABJRU5ErkJggg=="
+    },
+    {
+      "fileId": "fixture-photo-2",
+      "photoId": "PH-2",
+      "patientId": "PAT-1",
+      "bodyArea": "face",
+      "viewpoint": "synthetic-frame-v1",
+      "category": "after",
+      "fileName": "photo-after.png",
+      "contentType": "image/png",
+      "bytes": 528,
+      "sha256": "db297368ee74119d967fd0d3b34803e5dc336c907874398c72f96d3c57ebba4b",
+      "width": 48,
+      "height": 32,
+      "dataBase64": "iVBORw0KGgoAAAANSUhEUgAAADAAAAAgCAIAAADbtmxLAAAB10lEQVR42q3OyXHDMAyFYVWPBkwtBeAUr6JE1ZC9phhDTmgxDxRpZeY/4OH0NbeBfN8Lr3JKc+zWkU/mpGRxtwP5vkd+rMGaAtBKUwm6GawJIKDZAqWaGpBoDNYICGuyIKApBgWNwZpnQFhTBooayyroa2GcA117unbS18xpk5INXQ35wmfEVYBE0yuaLVCq2Q8Kml7RZEFAsxMUNY5rQVizB7TSVIKuraLJgD4Xxjnp0pPPT2lWmtIuLUmGPi2DRlwOBDTFoKBpFc0TIKwpA0XNxP8DugyKpgC00lSCLgdqsGZQNFugVFMDumsE9LHwY+eBfB+OcbPSxOeWfPc7ZpXGVecD+RqsWbgWhDVloF/N/W6wphJ07hRNAehRE0GppgYkmk7RbIESTQABTTEoaDpFkwX91QjoNJDvfeFVTmmOnTryyZyULO50IN/7yI81WFMAWmkqQSeDNQEENFugVFMDEo3BGgFhTRYENMWgoDFY8wwIa8pAUWNZBb0tjHOgY0/HTnqbOW1SsqGjIV/4jLgKkGh6RbMFSjX7QUHTK5osCGh2gqLGcS0Ia/aAVppK0LFVNBnQ68I4J7305PNTmpWmtJeWJEOvlkEjLgcCmmJQ0LSKRgf9ALKmg1m25WCNAAAAAElFTkSuQmCC"
+    }
+  ]
+}

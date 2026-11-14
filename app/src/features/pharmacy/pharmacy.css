@@ -1,0 +1,89 @@
+.pharmacy-card {
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
+.pharmacy-intro {
+  padding: clamp(20px, 3vw, 32px);
+  border-bottom: 1px solid var(--border);
+}
+.pharmacy-eyebrow {
+  color: var(--primary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.pharmacy-intro h2 {
+  margin: 8px 0;
+  font-size: 1.3rem;
+}
+.pharmacy-intro p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.pharmacy-table-wrap {
+  overflow-x: auto;
+}
+.pharmacy-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: start;
+  font-size: 0.875rem;
+}
+.pharmacy-table :is(th, td) {
+  padding: 16px 24px;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+.pharmacy-table th {
+  background: var(--canvas);
+  font-size: 0.75rem;
+}
+.pharmacy-table td {
+  border-top: 1px solid var(--border);
+}
+.pharmacy-tag {
+  display: inline-block;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+@media (max-width: 600px) {
+  .pharmacy-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .pharmacy-table,
+  .pharmacy-table tbody,
+  .pharmacy-table tr,
+  .pharmacy-table td {
+    display: block;
+  }
+  .pharmacy-table tr {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .pharmacy-table td {
+    display: grid;
+    grid-template-columns: minmax(6rem, 1fr) 2fr;
+    gap: 12px;
+    padding: 6px 0;
+    border: 0;
+  }
+  .pharmacy-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+  .pharmacy-tag {
+    justify-self: start;
+  }
+}

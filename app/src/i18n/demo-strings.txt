@@ -1,0 +1,40 @@
+Demo-only strings removed from the prototype runtime catalogue
+==============================================================
+
+Source: handoff/clinic-runtime-translations.json (1070 keys, generated 2026-11-03).
+Both app/src/i18n/catalog/th.json and app/src/i18n/catalog/en.json keep every
+remaining source key verbatim; no key was renamed, added, or namespaced.
+
+Excluded entries (6)
+--------------------
+Removed from both catalogues. These were fixed sample notifications baked with
+transactional data (invoice number, patient ID, batch count, relative
+timestamps), not reusable UI copy.
+
+| Key | English value removed | Reason |
+| --- | --- | --- |
+| `notif.bill` | Invoice DC-INV-00218 is unpaid | Fixed invoice identifier |
+| `notif.bill.meta` | Today 09:12 · front desk | Fixed timestamp for that sample invoice |
+| `notif.expiry` | 3 batches expire within 30 days | Fixed batch count for a sample alert |
+| `notif.expiry.meta` | 1 hour ago · pharmacy queue | Fixed relative timestamp for that sample alert |
+| `notif.labReceived` | External lab result uploaded for P-10241 | Fixed patient identifier |
+| `notif.labReceived.meta` | 12 minutes ago · awaiting doctor review | Fixed relative timestamp for that sample result |
+
+Regression guard: `i18n.test.ts` asserts these keys are absent from both
+catalogues and that no value matches a fixed invoice (`INV-…`) or patient
+(`P-…`) identifier.
+
+Retained
+--------
+- `notif.demoNote` — real UI copy explaining that notifications are samples, no
+  fixed record data.
+- `lab.refPlaceholder` ("e.g. BCL-88412") — format hint for a free-text field,
+  not a transactional record.
+- All other 1064 source keys, unchanged in both locales.
+
+Scan result
+-----------
+Scanned every value for invoice/patient/record identifiers, fixed relative
+timestamps, and fixed counts. Only the six keys above were demo-only
+transactional data; nothing else was removed. The source snapshot contains no
+fictional person names and no sample amounts.

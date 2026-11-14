@@ -1,0 +1,1587 @@
+{
+  "spec_version": "2.0",
+  "product": "Demo Clinic",
+  "source": "Clinic_Functional_Requirements_v2.md",
+  "description": "37 consolidated task-oriented design surfaces containing all 97 prior v1 screen and state IDs; each surface requires P0 TH/EN and responsive consideration",
+  "backend_status": "unverified_installed_site",
+  "default_locale": "th",
+  "supported_locales": [
+    "th",
+    "en"
+  ],
+  "legacy_v1_screen_count": 97,
+  "design_surface_count": 37,
+  "surfaces": [
+    {
+      "id": "APP-01",
+      "name": "Sign-in and language choice",
+      "route": "/clinic/login",
+      "roles": [
+        "ALL"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "sign in",
+        "language TH/EN",
+        "session expired",
+        "authentication errors"
+      ],
+      "legacy_v1_ids": [
+        "SH-01"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "APP-02",
+      "name": "Application shell, role home dispatch and profile",
+      "route": "/clinic",
+      "roles": [
+        "ALL"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "shell",
+        "profile",
+        "per-user language preference",
+        "notifications",
+        "logout"
+      ],
+      "legacy_v1_ids": [
+        "SH-02",
+        "SH-04",
+        "SH-05"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "APP-03",
+      "name": "Global authorized search",
+      "route": "/clinic/search",
+      "roles": [
+        "PERMITTED"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "patient/appointment results",
+        "pagination",
+        "permission-aware empty state"
+      ],
+      "legacy_v1_ids": [
+        "SH-03"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "APP-04",
+      "name": "Print/export and global system states",
+      "route": "/clinic/system",
+      "roles": [
+        "ALL"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "print preview",
+        "no permission",
+        "empty/loading",
+        "stale/unsaved/duplicate",
+        "error recovery"
+      ],
+      "legacy_v1_ids": [
+        "SYS-01",
+        "SYS-02",
+        "SYS-03",
+        "SYS-04"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "PAT-01",
+      "name": "Patient directory",
+      "route": "/clinic/patients",
+      "roles": [
+        "REC",
+        "DOC",
+        "NUR",
+        "ADM"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "search",
+        "filtered records",
+        "duplicate candidate",
+        "new patient"
+      ],
+      "legacy_v1_ids": [
+        "SH-06"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "PAT-02",
+      "name": "Patient create and edit",
+      "route": "/clinic/patients/new",
+      "roles": [
+        "REC",
+        "ADM"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "create/edit",
+        "demographics",
+        "contact",
+        "consent",
+        "validation"
+      ],
+      "legacy_v1_ids": [
+        "SH-07",
+        "SH-09"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "PAT-03",
+      "name": "Patient profile, history and timeline",
+      "route": "/clinic/patients/:id",
+      "roles": [
+        "AUTHORIZED"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "profile",
+        "history tab",
+        "visits timeline",
+        "rights-sensitive clinical content"
+      ],
+      "legacy_v1_ids": [
+        "SH-08",
+        "SH-10",
+        "SH-11"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "PAT-04",
+      "name": "Patient photos: gallery, capture and detail",
+      "route": "/clinic/patients/:id/photos",
+      "roles": [
+        "REC",
+        "DOC",
+        "NUR"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "before-check-in capture",
+        "consent",
+        "upload",
+        "view and tag",
+        "private File"
+      ],
+      "legacy_v1_ids": [
+        "SH-12",
+        "SH-13",
+        "SH-14"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "PAT-05",
+      "name": "Before/after compare and annotation",
+      "route": "/clinic/patients/:id/photos/compare",
+      "roles": [
+        "DOC",
+        "NUR-LIMITED"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "compare by visit/body region",
+        "draw shapes",
+        "save versions",
+        "non-destructive"
+      ],
+      "legacy_v1_ids": [
+        "SH-15",
+        "SH-16"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "REC-01",
+      "name": "Reception homepage",
+      "route": "/clinic/reception",
+      "roles": [
+        "REC"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "large action tiles",
+        "today summary",
+        "language switch"
+      ],
+      "legacy_v1_ids": [
+        "RC-01"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "REC-02",
+      "name": "Reception queue and check-in",
+      "route": "/clinic/reception/queue",
+      "roles": [
+        "REC",
+        "NUR"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "today",
+        "waiting",
+        "checked-in",
+        "check-in action",
+        "walk-in and invalid states"
+      ],
+      "legacy_v1_ids": [
+        "RC-02",
+        "RC-08"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "REC-03",
+      "name": "Appointment calendar",
+      "route": "/clinic/appointments",
+      "roles": [
+        "REC",
+        "DOC"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "doctor filters",
+        "slot conflict",
+        "day/week",
+        "change language during booking"
+      ],
+      "legacy_v1_ids": [
+        "RC-03"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "REC-04",
+      "name": "Appointment editor and details",
+      "route": "/clinic/appointments/:id",
+      "roles": [
+        "REC",
+        "DOC"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "create",
+        "details",
+        "reschedule",
+        "cancel",
+        "confirmation",
+        "return visit"
+      ],
+      "legacy_v1_ids": [
+        "RC-04",
+        "RC-05",
+        "RC-06",
+        "RC-07"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "REC-05",
+      "name": "Reception checkout and follow-up",
+      "route": "/clinic/reception/checkout",
+      "roles": [
+        "REC",
+        "CAS"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "bill handoff",
+        "follow-up scheduling",
+        "missing invoice or incomplete visit"
+      ],
+      "legacy_v1_ids": [
+        "RC-09",
+        "RC-10"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "DOC-01",
+      "name": "Doctor home and my-visit lists",
+      "route": "/clinic/doctor",
+      "roles": [
+        "DOC"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "my day",
+        "drafts",
+        "waiting patients",
+        "follow-ups"
+      ],
+      "legacy_v1_ids": [
+        "DR-01",
+        "DR-02",
+        "DR-03",
+        "DR-18"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "DOC-02",
+      "name": "ONE current visit clinical workspace",
+      "route": "/clinic/visits/:id",
+      "roles": [
+        "DOC",
+        "NUR-LIMITED"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "overview",
+        "history",
+        "exam/vitals",
+        "clinical note",
+        "assessment/diagnoses",
+        "medications",
+        "procedures",
+        "lab",
+        "external lab",
+        "photos/annotations",
+        "review/complete",
+        "draft recovery"
+      ],
+      "legacy_v1_ids": [
+        "DR-04",
+        "DR-05",
+        "DR-06",
+        "DR-07",
+        "DR-08",
+        "DR-09",
+        "DR-10",
+        "DR-11",
+        "DR-13",
+        "DR-15",
+        "DR-16",
+        "DR-17"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "DOC-03",
+      "name": "Clinical procedure record and stock consumption",
+      "route": "/clinic/procedures/:id",
+      "roles": [
+        "DOC",
+        "NUR-LIMITED",
+        "PHA-LIMITED"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "procedure details",
+        "consumables",
+        "batch/warehouse",
+        "complete/consume once"
+      ],
+      "legacy_v1_ids": [
+        "DR-12"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "DOC-04",
+      "name": "Lab request and result details",
+      "route": "/clinic/labs/:id",
+      "roles": [
+        "DOC",
+        "NUR-AUTHORIZED"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "native test",
+        "outside lab status",
+        "review and private result file"
+      ],
+      "legacy_v1_ids": [
+        "DR-14"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "NUR-01",
+      "name": "Nurse/assistant home",
+      "route": "/clinic/nurse",
+      "roles": [
+        "NUR"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "assigned patients",
+        "duties",
+        "overview"
+      ],
+      "legacy_v1_ids": [
+        "NU-01"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "NUR-02",
+      "name": "Nurse tasks: vitals, treatment prep, aftercare",
+      "route": "/clinic/nurse/tasks",
+      "roles": [
+        "NUR",
+        "DOC-AUTHORIZED"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "vitals",
+        "prep checklist",
+        "aftercare",
+        "lab dispatch"
+      ],
+      "legacy_v1_ids": [
+        "NU-02",
+        "NU-03",
+        "NU-04"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "PHA-01",
+      "name": "Pharmacy home",
+      "route": "/clinic/pharmacy",
+      "roles": [
+        "PHA"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "stock tiles",
+        "batch alerts",
+        "recent movements"
+      ],
+      "legacy_v1_ids": [
+        "PH-01"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "PHA-02",
+      "name": "Stock items catalogue/detail",
+      "route": "/clinic/pharmacy/items",
+      "roles": [
+        "PHA"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "items",
+        "UOM",
+        "stock vs service",
+        "batch tracking"
+      ],
+      "legacy_v1_ids": [
+        "PH-02",
+        "PH-03"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "PHA-03",
+      "name": "Batches and expiry management",
+      "route": "/clinic/pharmacy/batches",
+      "roles": [
+        "PHA",
+        "MGR"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "batch list/detail",
+        "expiry threshold",
+        "positive usable quantity"
+      ],
+      "legacy_v1_ids": [
+        "PH-04",
+        "PH-05",
+        "PH-06"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "PHA-04",
+      "name": "Stock balance and immutable ledger",
+      "route": "/clinic/pharmacy/balances",
+      "roles": [
+        "PHA",
+        "MGR"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "warehouse filters",
+        "ledger",
+        "reports",
+        "exports"
+      ],
+      "legacy_v1_ids": [
+        "PH-07",
+        "PH-08"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "PHA-05",
+      "name": "Receive stock and batch creation",
+      "route": "/clinic/pharmacy/receive",
+      "roles": [
+        "PHA"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "PO receipt",
+        "supplier",
+        "quantities",
+        "batch",
+        "expiry",
+        "submit once"
+      ],
+      "legacy_v1_ids": [
+        "PH-09"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "PHA-06",
+      "name": "Stock operations and reconciliation",
+      "route": "/clinic/pharmacy/movements",
+      "roles": [
+        "PHA",
+        "DOC-LIMITED",
+        "ADM-RECONCILE"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "transfer",
+        "treatment usage",
+        "stock reconciliation restricted"
+      ],
+      "legacy_v1_ids": [
+        "PH-10",
+        "PH-11",
+        "PH-16"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "PHA-07",
+      "name": "Purchasing and suppliers",
+      "route": "/clinic/pharmacy/purchasing",
+      "roles": [
+        "PHA",
+        "MGR"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "PO list/new/detail",
+        "partial receiving",
+        "supplier list"
+      ],
+      "legacy_v1_ids": [
+        "PH-12",
+        "PH-13",
+        "PH-14",
+        "PH-15"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "CAS-01",
+      "name": "Cashier homepage and pending queue",
+      "route": "/clinic/cashier",
+      "roles": [
+        "CAS",
+        "REC-DELEGATED"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "pending bills",
+        "patient link",
+        "shift overview"
+      ],
+      "legacy_v1_ids": [
+        "CA-01",
+        "CA-02"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "CAS-02",
+      "name": "Invoices list, create and detail",
+      "route": "/clinic/invoices",
+      "roles": [
+        "CAS",
+        "MGR"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "billing lines",
+        "taxes",
+        "discount permission",
+        "preview",
+        "submit"
+      ],
+      "legacy_v1_ids": [
+        "CA-03",
+        "CA-04",
+        "CA-05"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "CAS-03",
+      "name": "Payment, receipt and refund states",
+      "route": "/clinic/payments",
+      "roles": [
+        "CAS",
+        "MGR-APPROVAL"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "cash/card payment",
+        "allocate",
+        "receipt",
+        "refund/return restricted"
+      ],
+      "legacy_v1_ids": [
+        "CA-06",
+        "CA-07",
+        "CA-08",
+        "CA-09"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "MGR-01",
+      "name": "Owner dashboard",
+      "route": "/clinic/management",
+      "roles": [
+        "MGR"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "KPIs",
+        "charts",
+        "confirmed revenue vs payment",
+        "appointments",
+        "stock"
+      ],
+      "legacy_v1_ids": [
+        "MG-01"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "MGR-02",
+      "name": "Management drilldown reports",
+      "route": "/clinic/management/reports",
+      "roles": [
+        "MGR"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "appointments",
+        "procedures",
+        "finance",
+        "inventory",
+        "purchasing",
+        "exports"
+      ],
+      "legacy_v1_ids": [
+        "MG-02",
+        "MG-03",
+        "MG-04",
+        "MG-05",
+        "MG-06",
+        "MG-07"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "ADM-01",
+      "name": "Administrator setup home",
+      "route": "/clinic/admin",
+      "roles": [
+        "ADM"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "readiness",
+        "setup shortcuts",
+        "role/language defaults"
+      ],
+      "legacy_v1_ids": [
+        "AD-01"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "ADM-02",
+      "name": "Staff user and role management",
+      "route": "/clinic/admin/users",
+      "roles": [
+        "ADM"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "users",
+        "roles",
+        "practitioner mapping",
+        "locale preference"
+      ],
+      "legacy_v1_ids": [
+        "AD-02"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "ADM-03",
+      "name": "Clinical master configuration",
+      "route": "/clinic/admin/clinical",
+      "roles": [
+        "ADM"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "practitioners",
+        "schedules",
+        "appointment type",
+        "procedure template",
+        "rooms",
+        "lab templates"
+      ],
+      "legacy_v1_ids": [
+        "AD-03",
+        "AD-04",
+        "AD-05",
+        "AD-06",
+        "AD-07",
+        "AD-10"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "ADM-04",
+      "name": "Inventory, pricing and clinic settings",
+      "route": "/clinic/admin/settings",
+      "roles": [
+        "ADM",
+        "MGR-AUTHORIZED"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "items",
+        "prices",
+        "stock settings",
+        "cash/card accounts",
+        "bilingual default"
+      ],
+      "legacy_v1_ids": [
+        "AD-08",
+        "AD-09",
+        "AD-11"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    },
+    {
+      "id": "ADM-05",
+      "name": "Audit, support and backend readiness",
+      "route": "/clinic/admin/system",
+      "roles": [
+        "ADM"
+      ],
+      "default_priority": "P0",
+      "states_and_tabs": [
+        "audit",
+        "version/metadata checks",
+        "integration errors"
+      ],
+      "legacy_v1_ids": [
+        "AD-12",
+        "AD-13"
+      ],
+      "locale_variants": [
+        "th",
+        "en"
+      ],
+      "responsive_targets_px": [
+        390,
+        834,
+        1440
+      ],
+      "required_design_states": [
+        "populated",
+        "empty",
+        "loading",
+        "validation",
+        "error",
+        "success",
+        "permission-denied",
+        "unsaved/submit-confirmation"
+      ]
+    }
+  ],
+  "legacy_coverage": {
+    "SH-01": "APP-01",
+    "SH-02": "APP-02",
+    "SH-04": "APP-02",
+    "SH-05": "APP-02",
+    "SH-03": "APP-03",
+    "SYS-01": "APP-04",
+    "SYS-02": "APP-04",
+    "SYS-03": "APP-04",
+    "SYS-04": "APP-04",
+    "SH-06": "PAT-01",
+    "SH-07": "PAT-02",
+    "SH-09": "PAT-02",
+    "SH-08": "PAT-03",
+    "SH-10": "PAT-03",
+    "SH-11": "PAT-03",
+    "SH-12": "PAT-04",
+    "SH-13": "PAT-04",
+    "SH-14": "PAT-04",
+    "SH-15": "PAT-05",
+    "SH-16": "PAT-05",
+    "RC-01": "REC-01",
+    "RC-02": "REC-02",
+    "RC-08": "REC-02",
+    "RC-03": "REC-03",
+    "RC-04": "REC-04",
+    "RC-05": "REC-04",
+    "RC-06": "REC-04",
+    "RC-07": "REC-04",
+    "RC-09": "REC-05",
+    "RC-10": "REC-05",
+    "DR-01": "DOC-01",
+    "DR-02": "DOC-01",
+    "DR-03": "DOC-01",
+    "DR-18": "DOC-01",
+    "DR-04": "DOC-02",
+    "DR-05": "DOC-02",
+    "DR-06": "DOC-02",
+    "DR-07": "DOC-02",
+    "DR-08": "DOC-02",
+    "DR-09": "DOC-02",
+    "DR-10": "DOC-02",
+    "DR-11": "DOC-02",
+    "DR-13": "DOC-02",
+    "DR-15": "DOC-02",
+    "DR-16": "DOC-02",
+    "DR-17": "DOC-02",
+    "DR-12": "DOC-03",
+    "DR-14": "DOC-04",
+    "NU-01": "NUR-01",
+    "NU-02": "NUR-02",
+    "NU-03": "NUR-02",
+    "NU-04": "NUR-02",
+    "PH-01": "PHA-01",
+    "PH-02": "PHA-02",
+    "PH-03": "PHA-02",
+    "PH-04": "PHA-03",
+    "PH-05": "PHA-03",
+    "PH-06": "PHA-03",
+    "PH-07": "PHA-04",
+    "PH-08": "PHA-04",
+    "PH-09": "PHA-05",
+    "PH-10": "PHA-06",
+    "PH-11": "PHA-06",
+    "PH-16": "PHA-06",
+    "PH-12": "PHA-07",
+    "PH-13": "PHA-07",
+    "PH-14": "PHA-07",
+    "PH-15": "PHA-07",
+    "CA-01": "CAS-01",
+    "CA-02": "CAS-01",
+    "CA-03": "CAS-02",
+    "CA-04": "CAS-02",
+    "CA-05": "CAS-02",
+    "CA-06": "CAS-03",
+    "CA-07": "CAS-03",
+    "CA-08": "CAS-03",
+    "CA-09": "CAS-03",
+    "MG-01": "MGR-01",
+    "MG-02": "MGR-02",
+    "MG-03": "MGR-02",
+    "MG-04": "MGR-02",
+    "MG-05": "MGR-02",
+    "MG-06": "MGR-02",
+    "MG-07": "MGR-02",
+    "AD-01": "ADM-01",
+    "AD-02": "ADM-02",
+    "AD-03": "ADM-03",
+    "AD-04": "ADM-03",
+    "AD-05": "ADM-03",
+    "AD-06": "ADM-03",
+    "AD-07": "ADM-03",
+    "AD-10": "ADM-03",
+    "AD-08": "ADM-04",
+    "AD-09": "ADM-04",
+    "AD-11": "ADM-04",
+    "AD-12": "ADM-05",
+    "AD-13": "ADM-05"
+  },
+  "coverage_check": {
+    "status": "complete",
+    "mapped_count": 97,
+    "unmapped_ids": [],
+    "duplicated_ids": []
+  }
+}

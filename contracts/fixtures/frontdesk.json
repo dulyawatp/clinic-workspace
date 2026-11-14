@@ -1,0 +1,577 @@
+{
+  "matrix": "unverified",
+  "availability": [
+    {
+      "id": "slot-01",
+      "date": "2026-11-05",
+      "time": "09:00",
+      "practitionerId": "fixture-prac-01",
+      "practitionerName": "Fixture Doctor",
+      "state": "booked",
+      "appointmentId": "fixture-apt-01",
+      "appointmentType": "consultation",
+      "fictional": true
+    },
+    {
+      "id": "slot-02",
+      "date": "2026-11-05",
+      "time": "09:30",
+      "practitionerId": "fixture-prac-01",
+      "practitionerName": "Fixture Doctor",
+      "state": "booked",
+      "appointmentId": "fixture-apt-02",
+      "appointmentType": "follow_up",
+      "fictional": true
+    },
+    {
+      "id": "slot-03",
+      "date": "2026-11-05",
+      "time": "11:00",
+      "practitionerId": "fixture-prac-01",
+      "practitionerName": "Fixture Doctor",
+      "state": "available",
+      "fictional": true
+    },
+    {
+      "id": "slot-04",
+      "date": "2026-11-05",
+      "time": "12:00",
+      "practitionerId": "fixture-prac-01",
+      "practitionerName": "Fixture Doctor",
+      "state": "break",
+      "fictional": true
+    },
+    {
+      "id": "slot-05",
+      "date": "2026-11-05",
+      "time": "13:00",
+      "practitionerId": "fixture-prac-02",
+      "practitionerName": "Fixture Practitioner",
+      "state": "leave",
+      "fictional": true
+    },
+    {
+      "id": "slot-06",
+      "date": "2026-11-06",
+      "time": "10:00",
+      "practitionerId": "fixture-prac-02",
+      "practitionerName": "Fixture Practitioner",
+      "state": "blocked",
+      "fictional": true
+    }
+  ],
+  "patients": [
+    {
+      "id": "fixture-dir-01",
+      "fullName": "สมชาย ใจดี",
+      "mobileMasked": "081-XXX-2233",
+      "dob": "1985-04-12",
+      "lastVisitAt": "2026-10-28",
+      "latestPractitioner": "Fixture Doctor",
+      "fictional": true
+    },
+    {
+      "id": "fixture-dir-02",
+      "fullName": "อารีย์ ใจดี",
+      "mobileMasked": "082-XXX-4411",
+      "dob": "1990-09-02",
+      "lastVisitAt": "2026-10-30",
+      "fictional": true
+    },
+    {
+      "id": "fixture-dir-03",
+      "fullName": "Narin Chaiyaporn",
+      "mobileMasked": "083-XXX-7788",
+      "dob": "1978-01-19",
+      "lastVisitAt": "2026-09-14",
+      "fictional": true
+    },
+    {
+      "id": "fixture-dir-04",
+      "fullName": "กมลรัตน์ วงศ์ทอง",
+      "mobileMasked": "084-XXX-3312",
+      "dob": "1995-06-25",
+      "lastVisitAt": "2026-11-01",
+      "fictional": true
+    },
+    {
+      "id": "fixture-dir-05",
+      "fullName": "Daniel Okafor",
+      "mobileMasked": "085-XXX-9900",
+      "dob": "1988-12-05",
+      "lastVisitAt": "2026-08-22",
+      "fictional": true
+    },
+    {
+      "id": "fixture-dir-06",
+      "fullName": "ปวีณา สุขใจ",
+      "mobileMasked": "086-XXX-1123",
+      "dob": "2000-03-17",
+      "lastVisitAt": "2026-10-12",
+      "fictional": true
+    },
+    {
+      "id": "fixture-dir-07",
+      "fullName": "Pimchanok Srisuk",
+      "mobileMasked": "087-XXX-2201",
+      "lastVisitAt": "2026-06-18",
+      "fictional": true
+    },
+    {
+      "id": "fixture-dir-08",
+      "fullName": "ธนกร พงษ์ไพร",
+      "mobileMasked": "088-XXX-4433",
+      "dob": "1993-02-11",
+      "fictional": true
+    },
+    {
+      "id": "fixture-dir-09",
+      "fullName": "Mali Chai",
+      "mobileMasked": "089-XXX-6677",
+      "dob": "1970-11-29",
+      "lastVisitAt": "2026-05-04",
+      "fictional": true
+    },
+    {
+      "id": "fixture-dir-10",
+      "fullName": "ปรีชา ตั้งใจ",
+      "mobileMasked": "081-XXX-8899",
+      "dob": "1965-08-15",
+      "lastVisitAt": "2026-04-09",
+      "fictional": true
+    },
+    {
+      "id": "fixture-dir-11",
+      "fullName": "Elena Petrova",
+      "mobileMasked": "082-XXX-3344",
+      "dob": "1999-01-23",
+      "lastVisitAt": "2026-03-27",
+      "fictional": true
+    },
+    {
+      "id": "fixture-dir-12",
+      "fullName": "วราภรณ์ ใจกล้า",
+      "mobileMasked": "083-XXX-5561",
+      "dob": "1981-10-08",
+      "lastVisitAt": "2026-02-15",
+      "fictional": true
+    }
+  ],
+  "duplicates": [
+    {
+      "id": "fixture-dir-dup-01",
+      "fullName": "Somchai Jaidee",
+      "mobileMasked": "081-XXX-5566",
+      "dob": "1982-07-07",
+      "lastVisitAt": "2026-07-30",
+      "duplicateCandidate": true,
+      "fictional": true
+    },
+    {
+      "id": "fixture-dir-dup-02",
+      "fullName": "Somchai Jaidee",
+      "mobileMasked": "081-XXX-5566",
+      "dob": "1982-07-08",
+      "lastVisitAt": "2026-09-02",
+      "duplicateCandidate": true,
+      "fictional": true
+    }
+  ],
+  "appointments": [
+    {
+      "id": "fixture-apt-01",
+      "patientId": "fixture-dir-01",
+      "patientName": "สมชาย ใจดี",
+      "practitionerId": "fixture-prac-01",
+      "practitionerName": "Fixture Doctor",
+      "startsAt": "2026-11-05T09:00:00+07:00",
+      "type": "consultation",
+      "status": "scheduled",
+      "fictional": true,
+      "date": "2026-11-05",
+      "checkInEligible": true
+    },
+    {
+      "id": "fixture-apt-02",
+      "patientId": "fixture-dir-02",
+      "patientName": "อารีย์ ใจดี",
+      "practitionerId": "fixture-prac-01",
+      "practitionerName": "Fixture Doctor",
+      "startsAt": "2026-11-05T09:30:00+07:00",
+      "type": "follow_up",
+      "status": "arrived",
+      "checkedInAt": "2026-11-05T09:22:00+07:00",
+      "fictional": true,
+      "date": "2026-11-05",
+      "checkInEligible": false
+    },
+    {
+      "id": "fixture-apt-03",
+      "patientId": "fixture-dir-03",
+      "patientName": "Narin Chaiyaporn",
+      "practitionerId": "fixture-prac-02",
+      "practitionerName": "Fixture Practitioner",
+      "startsAt": "2026-11-05T10:00:00+07:00",
+      "type": "procedure",
+      "status": "waiting",
+      "checkedInAt": "2026-11-05T09:48:00+07:00",
+      "fictional": true,
+      "date": "2026-11-05",
+      "checkInEligible": false
+    },
+    {
+      "id": "fixture-apt-04",
+      "patientId": "fixture-dir-04",
+      "patientName": "กมลรัตน์ วงศ์ทอง",
+      "practitionerId": "fixture-prac-02",
+      "practitionerName": "Fixture Practitioner",
+      "startsAt": "2026-11-05T10:30:00+07:00",
+      "type": "consultation",
+      "status": "cancelled",
+      "fictional": true,
+      "date": "2026-11-05",
+      "checkInEligible": false
+    },
+    {
+      "id": "fixture-apt-05",
+      "patientId": "fixture-dir-05",
+      "patientName": "Daniel Okafor",
+      "practitionerId": "fixture-prac-01",
+      "practitionerName": "Fixture Doctor",
+      "startsAt": "2026-11-05T11:00:00+07:00",
+      "type": "consultation",
+      "status": "completed",
+      "checkedInAt": "2026-11-05T10:51:00+07:00",
+      "fictional": true,
+      "date": "2026-11-05",
+      "checkInEligible": false
+    },
+    {
+      "id": "fixture-apt-06",
+      "patientId": "fixture-dir-06",
+      "patientName": "ปวีณา สุขใจ",
+      "practitionerId": "fixture-prac-02",
+      "practitionerName": "Fixture Practitioner",
+      "startsAt": "2026-11-05T11:30:00+07:00",
+      "type": "follow_up",
+      "status": "no_show",
+      "fictional": true,
+      "date": "2026-11-05",
+      "checkInEligible": false
+    },
+    {
+      "id": "fixture-apt-07",
+      "patientId": "fixture-dir-07",
+      "patientName": "Pimchanok Srisuk",
+      "practitionerId": "fixture-prac-01",
+      "practitionerName": "Fixture Doctor",
+      "startsAt": "2026-11-05T12:00:00+07:00",
+      "type": "consultation",
+      "status": "waiting",
+      "checkedInAt": "2026-11-05T11:52:00+07:00",
+      "fictional": true,
+      "date": "2026-11-05",
+      "checkInEligible": false
+    },
+    {
+      "id": "fixture-apt-08",
+      "patientId": "fixture-dir-08",
+      "patientName": "ธนกร พงษ์ไพร",
+      "practitionerId": "fixture-prac-02",
+      "practitionerName": "Fixture Practitioner",
+      "startsAt": "2026-11-05T12:30:00+07:00",
+      "type": "follow_up",
+      "status": "scheduled",
+      "fictional": true,
+      "date": "2026-11-05",
+      "checkInEligible": false
+    }
+  ],
+  "queue": [
+    {
+      "id": "fixture-queue-01",
+      "appointmentId": "fixture-apt-01",
+      "patientId": "fixture-dir-01",
+      "patientName": "สมชาย ใจดี",
+      "practitionerName": "Fixture Doctor",
+      "type": "consultation",
+      "date": "2026-11-05",
+      "startsAt": "2026-11-05T09:00:00+07:00",
+      "status": "scheduled",
+      "checkInEligible": true,
+      "fictional": true
+    },
+    {
+      "id": "fixture-queue-02",
+      "appointmentId": "fixture-apt-02",
+      "patientId": "fixture-dir-02",
+      "patientName": "อารีย์ ใจดี",
+      "practitionerName": "Fixture Doctor",
+      "type": "follow_up",
+      "date": "2026-11-05",
+      "startsAt": "2026-11-05T09:30:00+07:00",
+      "status": "arrived",
+      "checkInEligible": false,
+      "fictional": true,
+      "checkedInAt": "2026-11-05T09:22:00+07:00"
+    },
+    {
+      "id": "fixture-queue-03",
+      "appointmentId": "fixture-apt-03",
+      "patientId": "fixture-dir-03",
+      "patientName": "Narin Chaiyaporn",
+      "practitionerName": "Fixture Practitioner",
+      "type": "procedure",
+      "date": "2026-11-05",
+      "startsAt": "2026-11-05T10:00:00+07:00",
+      "status": "waiting",
+      "checkInEligible": false,
+      "fictional": true,
+      "checkedInAt": "2026-11-05T09:48:00+07:00"
+    },
+    {
+      "id": "fixture-queue-04",
+      "appointmentId": "fixture-apt-04",
+      "patientId": "fixture-dir-04",
+      "patientName": "กมลรัตน์ วงศ์ทอง",
+      "practitionerName": "Fixture Practitioner",
+      "type": "consultation",
+      "date": "2026-11-05",
+      "startsAt": "2026-11-05T10:30:00+07:00",
+      "status": "cancelled",
+      "checkInEligible": false,
+      "fictional": true
+    },
+    {
+      "id": "fixture-queue-05",
+      "appointmentId": "fixture-apt-05",
+      "patientId": "fixture-dir-05",
+      "patientName": "Daniel Okafor",
+      "practitionerName": "Fixture Doctor",
+      "type": "consultation",
+      "date": "2026-11-05",
+      "startsAt": "2026-11-05T11:00:00+07:00",
+      "status": "completed",
+      "checkInEligible": false,
+      "fictional": true,
+      "checkedInAt": "2026-11-05T10:51:00+07:00"
+    },
+    {
+      "id": "fixture-queue-06",
+      "appointmentId": "fixture-apt-06",
+      "patientId": "fixture-dir-06",
+      "patientName": "ปวีณา สุขใจ",
+      "practitionerName": "Fixture Practitioner",
+      "type": "follow_up",
+      "date": "2026-11-05",
+      "startsAt": "2026-11-05T11:30:00+07:00",
+      "status": "no_show",
+      "checkInEligible": false,
+      "fictional": true
+    },
+    {
+      "id": "fixture-queue-07",
+      "appointmentId": "fixture-apt-07",
+      "patientId": "fixture-dir-07",
+      "patientName": "Pimchanok Srisuk",
+      "practitionerName": "Fixture Doctor",
+      "type": "consultation",
+      "date": "2026-11-05",
+      "startsAt": "2026-11-05T12:00:00+07:00",
+      "status": "waiting",
+      "checkInEligible": false,
+      "fictional": true,
+      "checkedInAt": "2026-11-05T11:52:00+07:00"
+    },
+    {
+      "id": "fixture-queue-08",
+      "appointmentId": "fixture-apt-08",
+      "patientId": "fixture-dir-08",
+      "patientName": "ธนกร พงษ์ไพร",
+      "practitionerName": "Fixture Practitioner",
+      "type": "follow_up",
+      "date": "2026-11-05",
+      "startsAt": "2026-11-05T12:30:00+07:00",
+      "status": "scheduled",
+      "checkInEligible": false,
+      "fictional": true
+    }
+  ],
+  "kpis": [
+    {
+      "id": "fixture-kpi-total",
+      "key": "todayAppointments",
+      "labelKey": "rec.total",
+      "count": 8,
+      "scope": "today",
+      "fictional": true,
+      "date": "2026-11-05"
+    },
+    {
+      "id": "fixture-kpi-checked-in",
+      "key": "checkedIn",
+      "labelKey": "v3.checked",
+      "count": 4,
+      "scope": "today",
+      "fictional": true,
+      "date": "2026-11-05"
+    },
+    {
+      "id": "fixture-kpi-waiting",
+      "key": "waiting",
+      "labelKey": "rec.waiting",
+      "count": 2,
+      "scope": "today",
+      "fictional": true,
+      "date": "2026-11-05"
+    },
+    {
+      "id": "fixture-kpi-upcoming",
+      "key": "upcoming",
+      "labelKey": "v3.upcoming",
+      "count": 2,
+      "scope": "today",
+      "fictional": true,
+      "date": "2026-11-05"
+    }
+  ],
+  "checkouts": [
+    {
+      "id": "fixture-checkout-01",
+      "patientId": "fixture-dir-05",
+      "patientName": "Daniel Okafor",
+      "visitId": "fixture-visit-05",
+      "visitStatus": "complete",
+      "handoff": "invoiced",
+      "fictional": true,
+      "invoiceReference": "INV-FIX-0001",
+      "outstanding": 450,
+      "currency": "THB"
+    },
+    {
+      "id": "fixture-checkout-02",
+      "patientId": "fixture-dir-03",
+      "patientName": "Narin Chaiyaporn",
+      "visitId": "fixture-visit-03",
+      "visitStatus": "incomplete",
+      "handoff": "blocked",
+      "fictional": true
+    },
+    {
+      "id": "fixture-checkout-03",
+      "patientId": "fixture-dir-01",
+      "patientName": "สมชาย ใจดี",
+      "visitId": "fixture-visit-01",
+      "visitStatus": "complete",
+      "handoff": "billing_needed",
+      "fictional": true
+    },
+    {
+      "id": "fixture-checkout-04",
+      "patientId": "fixture-dir-07",
+      "patientName": "Pimchanok Srisuk",
+      "visitId": "fixture-visit-07",
+      "visitStatus": "complete",
+      "handoff": "completed",
+      "fictional": true
+    },
+    {
+      "id": "fixture-checkout-05",
+      "patientId": "fixture-dir-08",
+      "patientName": "ธนกร พงษ์ไพร",
+      "visitId": "fixture-visit-08",
+      "visitStatus": "complete",
+      "handoff": "paid",
+      "fictional": true,
+      "invoiceReference": "INV-FIX-0005",
+      "outstanding": 0,
+      "currency": "THB"
+    },
+    {
+      "id": "fixture-checkout-06",
+      "patientId": "fixture-dir-09",
+      "patientName": "Mali Chai",
+      "visitId": "fixture-visit-09",
+      "visitStatus": "complete",
+      "handoff": "partial",
+      "fictional": true,
+      "invoiceReference": "INV-FIX-0006",
+      "outstanding": 240,
+      "currency": "THB"
+    }
+  ],
+  "vitals": [
+    {
+      "id": "fixture-vitals-01",
+      "patientId": "fixture-dir-01",
+      "measuredAt": "2026-11-03T09:05:00+07:00",
+      "source": "clinic",
+      "recordedBy": "Fixture Nurse",
+      "temp": 38.2,
+      "pulse": 96,
+      "systolic": 118,
+      "diastolic": 76,
+      "respiratory": 18,
+      "height": 172,
+      "weight": 68,
+      "fictional": true
+    }
+  ],
+  "timeline": [
+    {
+      "id": "fixture-timeline-01",
+      "patientId": "fixture-dir-01",
+      "kind": "visit",
+      "at": "2026-10-28T09:00:00+07:00",
+      "reference": "fixture-visit-01",
+      "fictional": true
+    },
+    {
+      "id": "fixture-timeline-02",
+      "patientId": "fixture-dir-01",
+      "kind": "photo",
+      "at": "2026-10-28T09:10:00+07:00",
+      "reference": "fixture-photo-01",
+      "fictional": true
+    },
+    {
+      "id": "fixture-timeline-03",
+      "patientId": "fixture-dir-01",
+      "kind": "lab",
+      "at": "2026-10-28T10:15:00+07:00",
+      "reference": "fixture-lab-01",
+      "fictional": true
+    },
+    {
+      "id": "fixture-timeline-04",
+      "patientId": "fixture-dir-01",
+      "kind": "treatment",
+      "at": "2026-10-28T10:40:00+07:00",
+      "reference": "fixture-treatment-01",
+      "fictional": true
+    }
+  ],
+  "payments": [
+    {
+      "id": "fixture-payment-01",
+      "patientId": "fixture-dir-01",
+      "issuedAt": "2026-10-28T11:00:00+07:00",
+      "status": "paid",
+      "total": 1500,
+      "currency": "THB",
+      "fictional": true
+    }
+  ],
+  "queueKpis": [
+    {
+      "id": "fixture-queue-kpis",
+      "date": "2026-11-05",
+      "asOf": "2026-11-05T12:30:00+07:00",
+      "appointments": 8,
+      "arrivals": 1,
+      "waiting": 2,
+      "inConsultation": 0,
+      "fictional": true
+    }
+  ]
+}

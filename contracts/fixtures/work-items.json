@@ -1,0 +1,125 @@
+[
+  {
+    "role": "REC",
+    "items": [
+      {
+        "id": "fixture-work-rec-pending",
+        "kind": "count",
+        "labelKey": "nav.pending",
+        "count": 3,
+        "routeKey": "home"
+      },
+      {
+        "id": "fixture-work-rec-tasks",
+        "kind": "status",
+        "labelKey": "nav.tasks",
+        "count": 2,
+        "routeKey": "home"
+      }
+    ]
+  },
+  {
+    "role": "DOC",
+    "items": [
+      {
+        "id": "fixture-work-doc-appointments",
+        "kind": "count",
+        "labelKey": "nav.appointments",
+        "count": 5,
+        "routeKey": "home"
+      },
+      {
+        "id": "fixture-work-doc-assigned",
+        "kind": "count",
+        "labelKey": "nav.assigned",
+        "count": 4,
+        "routeKey": "home",
+        "requiredCapability": "read.patient"
+      }
+    ]
+  },
+  {
+    "role": "NUR",
+    "items": [
+      {
+        "id": "fixture-work-nur-queue",
+        "kind": "count",
+        "labelKey": "nav.queue",
+        "count": 6,
+        "routeKey": "home"
+      },
+      {
+        "id": "fixture-work-nur-assigned",
+        "kind": "count",
+        "labelKey": "nav.assigned",
+        "count": 3,
+        "routeKey": "home",
+        "requiredCapability": "read.patient"
+      }
+    ]
+  },
+  {
+    "role": "PHA",
+    "items": [
+      {
+        "id": "fixture-work-pha-low-stock",
+        "kind": "status",
+        "labelKey": "status.lowStock",
+        "count": 2,
+        "routeKey": "home",
+        "requiredCapability": "read.inventory"
+      }
+    ]
+  },
+  {
+    "role": "CAS",
+    "items": [
+      {
+        "id": "fixture-work-cas-pending",
+        "kind": "count",
+        "labelKey": "nav.pending",
+        "count": 4,
+        "routeKey": "home",
+        "requiredCapability": "read.billing"
+      }
+    ]
+  },
+  {
+    "role": "MGR",
+    "items": [
+      {
+        "id": "fixture-work-mgr-reports",
+        "kind": "status",
+        "labelKey": "nav.reports",
+        "count": 1,
+        "requiredCapability": "read.report"
+      },
+      {
+        "id": "fixture-work-mgr-pending",
+        "kind": "count",
+        "labelKey": "nav.pending",
+        "count": 5,
+        "routeKey": "home"
+      }
+    ]
+  },
+  {
+    "role": "ADM",
+    "items": [
+      {
+        "id": "fixture-work-adm-system",
+        "kind": "status",
+        "labelKey": "nav.system",
+        "count": 1,
+        "routeKey": "system",
+        "requiredCapability": "read.admin"
+      },
+      {
+        "id": "fixture-work-adm-staff",
+        "kind": "count",
+        "labelKey": "nav.staff",
+        "count": 7
+      }
+    ]
+  }
+]

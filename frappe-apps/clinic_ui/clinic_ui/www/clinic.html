@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex" />
+    <title>{{ title }}</title>
+    {%- for href in ui_styles %}
+    <link rel="stylesheet" crossorigin href="{{ href }}" />
+    {%- endfor %}
+  </head>
+  <body>
+    <div id="root"></div>
+    {%- if ui_available %}
+      {%- for src in ui_scripts %}
+    <script type="module" crossorigin src="{{ src }}"></script>
+      {%- endfor %}
+    {%- else %}
+    <p>Clinic UI is unavailable: no native build was found.</p>
+    {%- endif %}
+  </body>
+</html>

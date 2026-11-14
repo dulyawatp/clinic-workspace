@@ -1,0 +1,181 @@
+.signin-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-height: 100dvh;
+  background: var(--canvas);
+}
+.signin-brand {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+  padding: 40px clamp(24px, 5vw, 64px);
+  overflow: hidden;
+  border-inline-end: 1px solid var(--border);
+  background: color-mix(in srgb, var(--primary) 3%, var(--canvas));
+}
+.signin-brand::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  pointer-events: none;
+  background: repeating-radial-gradient(
+    circle at 100% 100%,
+    transparent 0 79px,
+    color-mix(in srgb, var(--primary) 9%, transparent) 80px 81px,
+    transparent 82px 140px
+  );
+}
+.signin-brand > * {
+  position: relative;
+  z-index: 1;
+}
+.signin-brand .shell-brand {
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+}
+.signin-statement {
+  max-width: 34ch;
+  margin-block: auto;
+}
+.signin-statement h2 {
+  margin: 0;
+  font-size: clamp(28px, 2.6vw, 40px);
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+.signin-statement p {
+  margin: 16px 0 0;
+  line-height: 1.7;
+}
+.signin-language-note {
+  margin: 0;
+  max-width: 44ch;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.signin-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 32px clamp(20px, 4vw, 48px) 48px;
+  background: var(--surface);
+  outline-offset: -3px;
+}
+.signin-panel-head {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 40px;
+}
+.signin-form-wrap {
+  width: 100%;
+  max-width: 34rem;
+  margin: auto;
+  overflow-wrap: anywhere;
+}
+.signin-form-wrap h1 {
+  margin: 0;
+  font-size: 23px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: -0.02em;
+}
+.signin-lead {
+  margin: 8px 0 24px;
+  line-height: 1.7;
+}
+.signin-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.signin-field label {
+  font-weight: 500;
+}
+.signin-field input {
+  min-height: var(--target-min);
+  min-width: 0;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+.signin-field input:disabled {
+  background: var(--canvas);
+}
+.signin-submit {
+  width: 100%;
+  margin-top: 4px;
+}
+.signin-banner {
+  padding: 16px;
+  margin-bottom: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--ink);
+  line-height: 1.7;
+}
+.signin-banner p {
+  margin: 4px 0 0;
+}
+.signin-banner--expired {
+  border-inline-start: 4px solid var(--warning);
+}
+.signin-banner--error {
+  border-inline-start: 4px solid var(--danger);
+}
+.signin-help {
+  margin: 20px 0;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.signin-evaluation {
+  padding-top: 16px;
+  margin: 0;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.signin-page :is(a, button, input, [tabindex="-1"]):focus-visible {
+  outline: 3px solid var(--primary);
+  outline-offset: 3px;
+}
+
+@media (max-width: 1023px) {
+  .signin-page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .signin-brand {
+    gap: 24px;
+    padding: 24px;
+    border-inline-end: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .signin-brand::after {
+    display: none;
+  }
+  .signin-statement {
+    max-width: 60ch;
+    margin: 0;
+  }
+  .signin-statement h2 {
+    font-size: 24px;
+  }
+  .signin-language-note {
+    display: none;
+  }
+  .signin-panel {
+    padding: 24px 16px 40px;
+  }
+  .signin-panel-head {
+    margin-bottom: 24px;
+  }
+}

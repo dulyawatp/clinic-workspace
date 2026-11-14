@@ -1,0 +1,12 @@
+@import "./base.css";
+@import "../ui/tokens.css";
+@import "../ui/ui.css";
+@import "../features/shell/shell.css";
+@import "../features/auth/signin.css";
+@import "../features/profile/profile.css";
+@import "../features/patients/patients.css";
+@import "../features/reception/reception.css";
+@import "../features/appointments/appointments.css";
+@import "../features/search/search.css";
+@import "../features/system/system.css";
+@import "../features/clinical/clinical.css";

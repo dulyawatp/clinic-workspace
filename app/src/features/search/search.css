@@ -1,0 +1,104 @@
+.search-card {
+  padding: clamp(16px, 2.5vw, 28px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  min-width: 0;
+}
+.search-card h2 {
+  margin: 0 0 24px;
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+.search-toolbar {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.search-field {
+  flex: 1 1 18rem;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.search-field label {
+  font-weight: 500;
+}
+.search-field input {
+  min-height: var(--target-min);
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+.search-hint {
+  margin: 12px 0 24px;
+  font-size: 0.875rem;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.search-results-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.search-results-table {
+  width: 100%;
+  min-width: 40rem;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  text-align: start;
+}
+.search-results-table :is(th, td) {
+  padding: 16px;
+  text-align: start;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.search-results-table th {
+  background: var(--canvas);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.search-results-table td {
+  border-top: 1px solid var(--border);
+}
+.search-patient-name {
+  font-weight: 500;
+}
+.search-patient-number,
+.search-results-table time {
+  font-variant-numeric: tabular-nums;
+}
+.search-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 20px;
+}
+.search-pagination [role="status"] {
+  margin-inline-end: auto;
+  font-size: 0.875rem;
+}
+.search-field input:focus-visible,
+.search-results-scroll:focus-visible {
+  outline: 3px solid var(--primary);
+  outline-offset: 3px;
+}
+@media (max-width: 479px) {
+  .search-pagination {
+    justify-content: space-between;
+  }
+  .search-pagination [role="status"] {
+    order: -1;
+    flex-basis: 100%;
+  }
+}

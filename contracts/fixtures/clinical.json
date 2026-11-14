@@ -1,0 +1,223 @@
+{
+  "visits": [
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "patientName": "สมชาย ใจดี",
+      "appointmentId": "APT-1",
+      "practitionerName": "Dr. Fictional",
+      "startedAt": "2026-11-05T02:00:00Z",
+      "state": "open"
+    },
+    {
+      "encounterId": "ENC-2",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "patientName": "สมชาย ใจดี",
+      "appointmentId": "APT-2",
+      "practitionerName": "Dr. Fictional",
+      "startedAt": "2026-11-05T06:00:00Z",
+      "state": "open"
+    }
+  ],
+  "sections": [
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "section": "history",
+      "chiefComplaint": "Fictional consultation",
+      "hpi": "Example history",
+      "past": "Example prior record",
+      "allergies": "unknown"
+    },
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "section": "exam",
+      "findings": "Example examination"
+    },
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "section": "note",
+      "state": "draft",
+      "savedAt": "2026-11-05T02:30:00Z",
+      "assessment": "Example assessment",
+      "plan": "Example plan"
+    },
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "section": "review",
+      "missing": ["exam", "note"]
+    }
+  ],
+  "vitals": [
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "id": "VIT-1",
+      "kind": "weight",
+      "value": 62,
+      "unit": "kg",
+      "measuredAt": "2026-11-05T02:05:00Z",
+      "source": "nurse"
+    },
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "id": "VIT-2",
+      "kind": "temperature",
+      "value": 98.6,
+      "unit": "°F",
+      "measuredAt": "2026-11-05T02:05:00Z",
+      "source": "nurse"
+    }
+  ],
+  "diagnoses": [
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "id": "DX-1",
+      "code": "Z00.0",
+      "description": "Example examination"
+    }
+  ],
+  "medications": [
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "id": "MED-1",
+      "name": "Example medication",
+      "state": "ordered"
+    }
+  ],
+  "photos": [
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "id": "PH-1",
+      "category": "before",
+      "bodyArea": "face",
+      "viewpoint": "synthetic-frame-v1",
+      "takenAt": "2026-11-05T02:10:00Z",
+      "consentStatus": "missing",
+      "url": "/api/files/fixture-photo-1",
+      "version": 1,
+      "contentType": "image/png",
+      "bytes": 220,
+      "sha256": "7eae15f049f13532aea3c50a7cf98e3b7a78f510cfa43cc1665c4d74754d63d3",
+      "width": 48,
+      "height": 32
+    },
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "id": "PH-2",
+      "category": "after",
+      "bodyArea": "face",
+      "viewpoint": "synthetic-frame-v1",
+      "takenAt": "2026-11-05T02:40:00Z",
+      "consentStatus": "recorded",
+      "url": "/api/files/fixture-photo-2",
+      "version": 1,
+      "contentType": "image/png",
+      "bytes": 528,
+      "sha256": "db297368ee74119d967fd0d3b34803e5dc336c907874398c72f96d3c57ebba4b",
+      "width": 48,
+      "height": 32
+    }
+  ],
+  "labs": [
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "id": "LAB-1",
+      "kind": "external",
+      "state": "reviewed",
+      "reviewer": null,
+      "files": ["a.pdf"]
+    },
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "id": "LAB-2",
+      "kind": "in-house",
+      "state": "received",
+      "reviewer": null,
+      "files": []
+    }
+  ],
+  "nurseTasks": [
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "id": "TASK-1",
+      "patientName": "สมชาย ใจดี",
+      "kind": "vitals",
+      "state": "pending"
+    },
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "id": "TASK-2",
+      "patientName": "สมชาย ใจดี",
+      "kind": "prep",
+      "state": "pending"
+    }
+  ],
+  "procedures": [
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "id": "PROC-1",
+      "name": "Example procedure",
+      "state": "planned",
+      "lines": [
+        {
+          "item": "Example supply",
+          "qty": 1,
+          "uom": "pcs",
+          "batch": "LOT-1",
+          "expiry": "2027-01-31",
+          "warehouse": "Example warehouse"
+        }
+      ]
+    }
+  ],
+  "myDayCounts": [
+    {
+      "myAppointmentsToday": 2,
+      "openDrafts": 1,
+      "labsAwaitingReview": 1,
+      "followUps": 0,
+      "fictional": true
+    }
+  ],
+  "nextPatients": [
+    {
+      "encounterId": "ENC-1",
+      "patientId": "PAT-1",
+      "fictional": true,
+      "patientName": "สมชาย ใจดี",
+      "appointmentId": "APT-1",
+      "draft": true
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+[
+  {
+    "id": "fixture-appointment-01",
+    "patientId": "fixture-patient-01",
+    "patientName": "สมชาย Smith",
+    "scheduledAt": "2026-11-05T09:00:00+07:00",
+    "status": "confirmed",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  },
+  {
+    "id": "fixture-appointment-02",
+    "patientId": "fixture-patient-02",
+    "patientName": "อารีย์ ใจดี",
+    "scheduledAt": "2026-11-05T09:30:00+07:00",
+    "status": "checked_in",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  },
+  {
+    "id": "fixture-appointment-03",
+    "patientId": "fixture-patient-03",
+    "patientName": "Narin Chaiyaporn",
+    "scheduledAt": "2026-11-05T10:00:00+07:00",
+    "status": "pending",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  },
+  {
+    "id": "fixture-appointment-04",
+    "patientId": "fixture-patient-04",
+    "patientName": "กมลรัตน์ วงศ์ทอง",
+    "scheduledAt": "2026-11-05T10:30:00+07:00",
+    "status": "confirmed",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  },
+  {
+    "id": "fixture-appointment-05",
+    "patientId": "fixture-patient-05",
+    "patientName": "Daniel Okafor",
+    "scheduledAt": "2026-11-05T11:00:00+07:00",
+    "status": "completed",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  },
+  {
+    "id": "fixture-appointment-06",
+    "patientId": "fixture-patient-06",
+    "patientName": "ปรีชา สุขสม",
+    "scheduledAt": "2026-11-05T13:00:00+07:00",
+    "status": "cancelled",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  },
+  {
+    "id": "fixture-appointment-07",
+    "patientId": "fixture-patient-07",
+    "patientName": "Mei Ling Tan",
+    "scheduledAt": "2026-11-05T13:30:00+07:00",
+    "status": "pending",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  },
+  {
+    "id": "fixture-appointment-08",
+    "patientId": "fixture-patient-08",
+    "patientName": "วิชัย พูลผล",
+    "scheduledAt": "2026-11-05T14:00:00+07:00",
+    "status": "confirmed",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  },
+  {
+    "id": "fixture-appointment-09",
+    "patientId": "fixture-patient-09",
+    "patientName": "สุนิสา แก้วมณี",
+    "scheduledAt": "2026-11-06T09:00:00+07:00",
+    "status": "pending",
+    "clinician": "Fixture Doctor",
+    "fictional": true
+  },
+  {
+    "id": "fixture-appointment-10",
+    "patientId": "fixture-patient-10",
+    "patientName": "Anucha Srisuk",
+    "scheduledAt": "2026-11-06T09:30:00+07:00",
+    "status": "confirmed",
+    "clinician": "Fixture Nurse",
+    "fictional": true
+  }
+]

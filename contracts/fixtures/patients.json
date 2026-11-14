@@ -1,0 +1,195 @@
+[
+  {
+    "id": "fixture-patient-01",
+    "hn": "FX-0001",
+    "fullName": "สมชาย Smith",
+    "phone": "08-FIXTURE-0001",
+    "lastVisit": "2026-10-28",
+    "internal_notes": "Fixture-only note: the proxy strips this field before the client sees it.",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-02",
+    "hn": "FX-0002",
+    "fullName": "อารีย์ ใจดี",
+    "phone": "08-FIXTURE-0002",
+    "lastVisit": "2026-10-27",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-03",
+    "hn": "FX-0003",
+    "fullName": "Narin Chaiyaporn",
+    "phone": "08-FIXTURE-0003",
+    "lastVisit": "2026-10-26",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-04",
+    "hn": "FX-0004",
+    "fullName": "กมลรัตน์ วงศ์ทอง",
+    "phone": "08-FIXTURE-0004",
+    "lastVisit": "2026-10-25",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-05",
+    "hn": "FX-0005",
+    "fullName": "Daniel Okafor",
+    "phone": "08-FIXTURE-0005",
+    "lastVisit": "2026-10-24",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-06",
+    "hn": "FX-0006",
+    "fullName": "ปรีชา สุขสม",
+    "phone": "08-FIXTURE-0006",
+    "lastVisit": "2026-10-23",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-07",
+    "hn": "FX-0007",
+    "fullName": "Mei Ling Tan",
+    "phone": "08-FIXTURE-0007",
+    "lastVisit": "2026-10-22",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-08",
+    "hn": "FX-0008",
+    "fullName": "วิชัย พูลผล",
+    "phone": "08-FIXTURE-0008",
+    "lastVisit": "2026-10-21",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-09",
+    "hn": "FX-0009",
+    "fullName": "สุนิสา แก้วมณี",
+    "phone": "08-FIXTURE-0009",
+    "lastVisit": "2026-10-20",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-10",
+    "hn": "FX-0010",
+    "fullName": "Anucha Srisuk",
+    "phone": "08-FIXTURE-0010",
+    "lastVisit": "2026-10-19",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-11",
+    "hn": "FX-0011",
+    "fullName": "ณัฐพล ใจกล้า",
+    "phone": "08-FIXTURE-0011",
+    "lastVisit": "2026-10-18",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-12",
+    "hn": "FX-0012",
+    "fullName": "Priya Raman",
+    "phone": "08-FIXTURE-0012",
+    "lastVisit": "2026-10-17",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-13",
+    "hn": "FX-0013",
+    "fullName": "จันทร์เพ็ญ ศรีสม",
+    "phone": "08-FIXTURE-0013",
+    "lastVisit": "2026-10-16",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-14",
+    "hn": "FX-0014",
+    "fullName": "Thomas Weber",
+    "phone": "08-FIXTURE-0014",
+    "lastVisit": "2026-10-15",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-15",
+    "hn": "FX-0015",
+    "fullName": "พิมพ์ชนก ดีเลิศ",
+    "phone": "08-FIXTURE-0015",
+    "lastVisit": "2026-10-14",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-16",
+    "hn": "FX-0016",
+    "fullName": "Kanya Wattana",
+    "phone": "08-FIXTURE-0016",
+    "lastVisit": "2026-10-13",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-17",
+    "hn": "FX-0017",
+    "fullName": "อภิสิทธิ์ บุญมี",
+    "phone": "08-FIXTURE-0017",
+    "lastVisit": "2026-10-12",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-18",
+    "hn": "FX-0018",
+    "fullName": "Hiroshi Sato",
+    "phone": "08-FIXTURE-0018",
+    "lastVisit": "2026-10-11",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-19",
+    "hn": "FX-0019",
+    "fullName": "รัตนา ทองคำ",
+    "phone": "08-FIXTURE-0019",
+    "lastVisit": "2026-10-10",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-20",
+    "hn": "FX-0020",
+    "fullName": "Malee Somsri",
+    "phone": "08-FIXTURE-0020",
+    "lastVisit": "2026-10-09",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-21",
+    "hn": "FX-0021",
+    "fullName": "วีระชัย ยอดเยี่ยม",
+    "phone": "08-FIXTURE-0021",
+    "lastVisit": "2026-10-08",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-22",
+    "hn": "FX-0022",
+    "fullName": "Sofia Martinez",
+    "phone": "08-FIXTURE-0022",
+    "lastVisit": "2026-10-07",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-23",
+    "hn": "FX-0023",
+    "fullName": "ดวงใจ ภูผา",
+    "phone": "08-FIXTURE-0023",
+    "lastVisit": "2026-10-06",
+    "fictional": true
+  },
+  {
+    "id": "fixture-patient-24",
+    "hn": "FX-0024",
+    "fullName": "Chaiwat Rojana",
+    "phone": "08-FIXTURE-0024",
+    "lastVisit": "2026-10-05",
+    "fictional": true
+  }
+]

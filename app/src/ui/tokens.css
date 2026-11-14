@@ -1,0 +1,19 @@
+:root {
+  --canvas: #f5f6f8;
+  --surface: #ffffff;
+  --ink: #0a1b39;
+  --muted: #6c7688;
+  --border: #e7e8eb;
+  --primary: #2e37a4;
+  --accent: #00d3c7;
+  --success: #27ae60;
+  --warning: #fdaf22;
+  --danger: #ef1e1e;
+  --info: #2f80ed;
+  --neutral: #6c7688;
+  --radius-card: 10px;
+  --target-min: 44px;
+  --font-sans:
+    "Inter", "IBM Plex Sans Thai", "Sukhumvit Set", Thonburi, "Noto Sans Thai",
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
