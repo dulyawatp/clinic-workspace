@@ -48,7 +48,7 @@ Installed field names are resolved from the site's own metadata; a missing
 DocType or required field refuses the write pre-fence. The two controllers are
 driven only through their public insert/submit lifecycle, so the reviewed
 boundary is the pinned versions and controller source hashes, the controller
-MRO, the submittable flags, the absence of class overrides and doc events, and
+MRO, the submittable flags, the reviewed class overrides and doc events, and
 our own fence kinds.
 """
 
@@ -153,6 +153,19 @@ REVIEWED_MRO = {
         "frappe.model.document._DocumentBase",
         "builtins.object",
     ),
+}
+
+# Reviewed per-doctype class overrides: ``override_doctype_class`` plus
+# ``extend_doctype_class`` as the collector aggregates them. The installed
+# healthcare app mixes its SalesInvoiceMixin into the invoice controller (the
+# same extension the pinned MRO above records); Payment Entry has none. The
+# comparison is closed-world: any added, removed or foreign override fails
+# closed.
+REVIEWED_CLASS_OVERRIDES = {
+    INVOICE_DOCTYPE: (
+        "healthcare.healthcare.custom_doctype.sales_invoice.SalesInvoiceMixin",
+    ),
+    PAYMENT_DOCTYPE: (),
 }
 
 # Site-global wildcard hooks: identical to the reviewed appointment pin on the
@@ -564,7 +577,10 @@ def boundary_problem(snapshot):
     if not isinstance(overrides, dict):
         return "class overrides unreadable"
     for doctype in GUARDED_DOCTYPES:
-        if tuple(overrides.get(doctype) or ()):
+        if (
+            tuple(overrides.get(doctype) or ())
+            != REVIEWED_CLASS_OVERRIDES[doctype]
+        ):
             return f"class override drift for {doctype}"
     if tuple(snapshot.get("fence_kinds") or ()) != FINANCE_KINDS:
         return "fence kinds are not the reviewed finance set"

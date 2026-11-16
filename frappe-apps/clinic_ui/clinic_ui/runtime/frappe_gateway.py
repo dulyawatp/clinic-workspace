@@ -5348,7 +5348,7 @@ class Gateway:
         The two controllers are driven only through their public insert/submit
         lifecycle, so the reviewed boundary is the pinned versions, the
         controller source hashes, the controller MRO, the submittable flags, the
-        absence of class overrides and document events, the wildcard hooks and
+        reviewed class overrides and document events, the wildcard hooks and
         our own fence kinds.
         """
 

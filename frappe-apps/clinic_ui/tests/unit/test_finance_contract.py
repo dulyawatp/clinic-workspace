@@ -45,8 +45,10 @@ PINNED = {
     },
     "scheduler_finance_jobs": (),
     "class_overrides": {
-        doctype: ()
-        for doctype in finance_contract.GUARDED_DOCTYPES
+        doctype: tuple(expected)
+        for doctype, expected in (
+            finance_contract.REVIEWED_CLASS_OVERRIDES.items()
+        )
     },
     "fence_kinds": finance_contract.FINANCE_KINDS,
 }
@@ -297,14 +299,65 @@ class BoundaryTests(unittest.TestCase):
             "MRO drift", finance_contract.boundary_problem(drift)
         )
 
-    def test_a_class_override_fails_closed(self):
+    def test_the_installed_class_overrides_are_pinned(self):
+        self.assertEqual(
+            tuple(
+                finance_contract.REVIEWED_CLASS_OVERRIDES[
+                    finance_contract.INVOICE_DOCTYPE
+                ]
+            ),
+            (
+                "healthcare.healthcare.custom_doctype.sales_invoice."
+                "SalesInvoiceMixin",
+            ),
+        )
+        self.assertEqual(
+            tuple(
+                finance_contract.REVIEWED_CLASS_OVERRIDES[
+                    finance_contract.PAYMENT_DOCTYPE
+                ]
+            ),
+            (),
+        )
+        self.assertIsNone(finance_contract.boundary_problem(PINNED))
+
+    def test_a_foreign_class_override_fails_closed(self):
         drift = dict(PINNED)
         drift["class_overrides"] = dict(
             PINNED["class_overrides"],
             **{finance_contract.PAYMENT_DOCTYPE: ("app.payments.Payment",)},
         )
-        self.assertIn(
-            "override drift", finance_contract.boundary_problem(drift)
+        self.assertEqual(
+            finance_contract.boundary_problem(drift),
+            "class override drift for Payment Entry",
+        )
+
+    def test_an_appended_class_override_fails_closed(self):
+        drift = dict(PINNED)
+        drift["class_overrides"] = dict(
+            PINNED["class_overrides"],
+            **{
+                finance_contract.INVOICE_DOCTYPE: (
+                    "healthcare.healthcare.custom_doctype.sales_invoice."
+                    "SalesInvoiceMixin",
+                    "app.invoices.SalesInvoice",
+                ),
+            },
+        )
+        self.assertEqual(
+            finance_contract.boundary_problem(drift),
+            "class override drift for Sales Invoice",
+        )
+
+    def test_a_removed_installed_override_fails_closed(self):
+        drift = dict(PINNED)
+        drift["class_overrides"] = dict(
+            PINNED["class_overrides"],
+            **{finance_contract.INVOICE_DOCTYPE: ()},
+        )
+        self.assertEqual(
+            finance_contract.boundary_problem(drift),
+            "class override drift for Sales Invoice",
         )
 
     def test_a_scheduler_job_on_the_family_is_refused(self):
