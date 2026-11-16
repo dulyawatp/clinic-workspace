@@ -24,6 +24,7 @@ import {
   SourceNote,
   useOpsFormat,
 } from "../operations/ops-ui";
+import { AdminMasterWriteForm } from "./admin-write";
 
 const TABS = [
   { id: "types", th: "ประเภทนัด", en: "Appointment type" },
@@ -141,24 +142,27 @@ export function AdminClinicalPage() {
           ) : null}
 
           {tab === "procedures" ? (
-            <DataTable
-              caption={copy("หัตถการ", "Procedure")}
-              columns={[
-                { key: "procedure", label: copy("หัตถการ", "Procedure") },
-                { key: "minutes", label: copy("นาที", "Minutes"), align: "end" },
-                { key: "price", label: copy("ราคา", "Price"), align: "end" },
-                { key: "supplies", label: copy("เวชภัณฑ์", "Supplies") },
-              ]}
-              rows={opsData.procedureTemplates.map((row) => [
-                row.name[locale],
-                row.minutes,
-                formatMoney(row.price, locale),
-                row.consumables
-                  .map((itemId) => opsData.itemById(itemId)?.name[locale] ?? itemId)
-                  .join(", "),
-              ])}
-              empty={copy("ไม่พบรายการตามตัวกรอง", "No records match these filters")}
-            />
+            <>
+              <DataTable
+                caption={copy("หัตถการ", "Procedure")}
+                columns={[
+                  { key: "procedure", label: copy("หัตถการ", "Procedure") },
+                  { key: "minutes", label: copy("นาที", "Minutes"), align: "end" },
+                  { key: "price", label: copy("ราคา", "Price"), align: "end" },
+                  { key: "supplies", label: copy("เวชภัณฑ์", "Supplies") },
+                ]}
+                rows={opsData.procedureTemplates.map((row) => [
+                  row.name[locale],
+                  row.minutes,
+                  formatMoney(row.price, locale),
+                  row.consumables
+                    .map((itemId) => opsData.itemById(itemId)?.name[locale] ?? itemId)
+                    .join(", "),
+                ])}
+                empty={copy("ไม่พบรายการตามตัวกรอง", "No records match these filters")}
+              />
+              <AdminMasterWriteForm masterType="procedure_template" />
+            </>
           ) : null}
 
           {tab === "labs" ? (

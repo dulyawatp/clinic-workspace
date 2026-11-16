@@ -28,6 +28,7 @@ import {
   SourceNote,
   useOpsFormat,
 } from "../operations/ops-ui";
+import { AdminMasterWriteForm } from "./admin-write";
 
 const TABS = [
   { id: "thresholds", th: "จุดสั่งซื้อ", en: "Reorder threshold" },
@@ -122,37 +123,45 @@ export function AdminSettingsPage() {
           ) : null}
 
           {tab === "warehouses" ? (
-            <DataTable
-              caption={copy("คลังและรายการ", "Warehouses & items")}
-              columns={[
-                { key: "warehouse", label: copy("คลัง", "Warehouse") },
-                { key: "id", label: copy("รหัส", "Code") },
-              ]}
-              rows={opsData.warehouses.map((row) => [
-                row.name[locale],
-                <span key="id" className="ops-mono">
-                  {row.id}
-                </span>,
-              ])}
-              empty={copy("ไม่พบรายการตามตัวกรอง", "No records match these filters")}
-            />
+            <>
+              <DataTable
+                caption={copy("คลังและรายการ", "Warehouses & items")}
+                columns={[
+                  { key: "warehouse", label: copy("คลัง", "Warehouse") },
+                  { key: "id", label: copy("รหัส", "Code") },
+                ]}
+                rows={opsData.warehouses.map((row) => [
+                  row.name[locale],
+                  <span key="id" className="ops-mono">
+                    {row.id}
+                  </span>,
+                ])}
+                empty={copy("ไม่พบรายการตามตัวกรอง", "No records match these filters")}
+              />
+              <AdminMasterWriteForm masterType="warehouse" />
+              <AdminMasterWriteForm masterType="supplier" />
+            </>
           ) : null}
 
           {tab === "pricing" ? (
-            <DataTable
-              caption={copy("ราคา", "Pricing")}
-              columns={[
-                { key: "item", label: copy("รายการสินค้า", "Item") },
-                { key: "uom", label: copy("หน่วย", "UOM") },
-                { key: "price", label: copy("ราคา", "Price"), align: "end" },
-              ]}
-              rows={opsData.items.map((row) => [
-                row.name[locale],
-                row.uom,
-                formatMoney(row.price, locale),
-              ])}
-              empty={copy("ไม่พบรายการตามตัวกรอง", "No records match these filters")}
-            />
+            <>
+              <DataTable
+                caption={copy("ราคา", "Pricing")}
+                columns={[
+                  { key: "item", label: copy("รายการสินค้า", "Item") },
+                  { key: "uom", label: copy("หน่วย", "UOM") },
+                  { key: "price", label: copy("ราคา", "Price"), align: "end" },
+                ]}
+                rows={opsData.items.map((row) => [
+                  row.name[locale],
+                  row.uom,
+                  formatMoney(row.price, locale),
+                ])}
+                empty={copy("ไม่พบรายการตามตัวกรอง", "No records match these filters")}
+              />
+              <AdminMasterWriteForm masterType="price_list" />
+              <AdminMasterWriteForm masterType="item" />
+            </>
           ) : null}
 
           {tab === "accounts" ? (
@@ -185,6 +194,7 @@ export function AdminSettingsPage() {
                   "Sample codes do not verify actual chart of accounts. Verify mappings before real payments.",
                 )}
               </OpsNote>
+              <AdminMasterWriteForm masterType="mode_of_payment" />
             </>
           ) : null}
 

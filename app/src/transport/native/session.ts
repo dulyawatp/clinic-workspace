@@ -99,6 +99,8 @@ const NATIVE_ENABLEABLE = new Set<string>([
   "write.procedure.complete",
   "write.invoice.void_amend",
   "write.stock.consume",
+  "write.admin.user",
+  "write.admin.master",
 ]);
 
 function nativeCapabilities(value: unknown): CapabilityMap {

@@ -285,3 +285,45 @@
     width: 100%;
   }
 }
+
+/* Admin user/master write surfaces (ADM-02..04). The forms are rendered only
+   when the deployment advertises the matching admin capability. */
+.admin-write {
+  display: grid;
+  gap: var(--pc-sp-3);
+  margin: var(--pc-sp-3) 0;
+}
+
+.admin-write-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: var(--pc-sp-3);
+  margin: var(--pc-sp-3) 0;
+}
+
+.admin-write-field {
+  display: grid;
+  gap: var(--pc-sp-1);
+}
+
+.admin-write-field label {
+  font-size: var(--pc-fs-small);
+  color: var(--pc-fg-muted);
+}
+
+.admin-write-field input,
+.admin-write-field select {
+  min-height: 2.25rem;
+  padding: 0 var(--pc-sp-2);
+  border: 1px solid var(--pc-border);
+  border-radius: var(--pc-radius-sm);
+  background: var(--pc-bg);
+  color: var(--pc-fg);
+  font: inherit;
+}
+
+.admin-write-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--pc-sp-2);
+}

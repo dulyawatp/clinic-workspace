@@ -13,6 +13,7 @@ import { staff } from "../../fixtures/data-ops";
 import { useLocale } from "../../i18n/LocaleProvider";
 import { useOpsCopy } from "../operations/ops-copy";
 import { OpsNote, SourceNote } from "../operations/ops-ui";
+import { AdminUserWriteForm } from "./admin-write";
 
 const RIGHTS = [
   "read",
@@ -59,6 +60,8 @@ export function AdminUsersPage() {
           )}
         />
         <SourceNote />
+
+        <AdminUserWriteForm />
 
         <Card
           title={copy(
