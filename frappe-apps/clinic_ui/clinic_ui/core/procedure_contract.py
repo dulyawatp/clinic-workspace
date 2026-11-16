@@ -105,6 +105,53 @@ REVIEWED_WILDCARD_EVENTS = {
         "evaluate_milestone",
     ),
 }
+
+# Reviewed ``doc_events`` per driven doctype: the exact event->handler set the
+# pinned stack registers. ``Stock Entry`` carries erpnext's own material-request
+# progress hooks (erpnext/hooks.py); they are reviewed-builtin, not this app's.
+# This app registers no doc_events on these doctypes, so the pins below are the
+# builtin set only. Any extra event, handler or doctype refuses the family.
+STOCK_ENTRY_DOC_EVENTS = {
+    "on_cancel": (
+        "erpnext.stock.doctype.material_request.material_request."
+        "update_completed_and_requested_qty",
+    ),
+    "on_submit": (
+        "erpnext.stock.doctype.material_request.material_request."
+        "update_completed_and_requested_qty",
+    ),
+}
+
+REVIEWED_DOC_EVENTS = {
+    PROCEDURE_DOCTYPE: {},
+    STOCK_ENTRY_DOCTYPE: STOCK_ENTRY_DOC_EVENTS,
+}
+
+
+def doc_events_problem(doc_events, reviewed):
+    """First doctype whose reviewed doc_events set does not match exactly.
+
+    Fails closed on any doctype, event or handler outside ``reviewed``: the
+    reviewed set is our hooks union the builtin hooks for that doctype, nothing
+    else. Unreadable input is named rather than treated as empty.
+    """
+
+    if not isinstance(doc_events, dict):
+        return "doc_events unreadable"
+    normalized = {}
+    for doctype, mapping in doc_events.items():
+        if mapping is not None and not isinstance(mapping, dict):
+            return "doc_events unreadable"
+        normalized[doctype] = {
+            event: tuple(handlers or ())
+            for event, handlers in (mapping or {}).items()
+        }
+    for doctype in sorted(set(normalized) | set(reviewed)):
+        if normalized.get(doctype, {}) != reviewed.get(doctype, {}):
+            return f"unreviewed doc_events for {doctype}"
+    return None
+
+
 # A scheduled job whose dotted path names the procedure doctype would run outside
 # this contract; none may exist for the family.
 SCHEDULER_PROCEDURE_TOKEN = "clinical_procedure"
@@ -229,12 +276,9 @@ def boundary_problem(snapshot):
         return "Stock Entry is not submittable"
     if snapshot.get("enabled_server_scripts") != 0:
         return "server scripts are enabled"
-    doc_events = snapshot.get("doc_events")
-    if not isinstance(doc_events, dict):
-        return "doc_events unreadable"
-    for doctype in (PROCEDURE_DOCTYPE, STOCK_ENTRY_DOCTYPE):
-        if tuple(doc_events.get(doctype) or ()):
-            return f"unreviewed doc_events for {doctype}"
+    problem = doc_events_problem(snapshot.get("doc_events"), REVIEWED_DOC_EVENTS)
+    if problem:
+        return problem
     wildcard = snapshot.get("wildcard_doc_events")
     if not isinstance(wildcard, dict):
         return "wildcard doc_events unreadable"

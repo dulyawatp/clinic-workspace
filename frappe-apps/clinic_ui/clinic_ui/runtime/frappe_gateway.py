@@ -3065,7 +3065,12 @@ class Gateway:
             ),
             "enabled_server_scripts": len(server_scripts),
             "doc_events": {
-                doctype: tuple(doc_events.get(doctype) or ())
+                doctype: {
+                    event: tuple(handlers or ())
+                    for event, handlers in (
+                        doc_events.get(doctype) or {}
+                    ).items()
+                }
                 for doctype in (
                     procedure_contract.PROCEDURE_DOCTYPE,
                     procedure_contract.STOCK_ENTRY_DOCTYPE,
@@ -4182,7 +4187,12 @@ class Gateway:
             },
             "enabled_server_scripts": len(server_scripts),
             "doc_events": {
-                doctype: tuple(doc_events.get(doctype) or ())
+                doctype: {
+                    event: tuple(handlers or ())
+                    for event, handlers in (
+                        doc_events.get(doctype) or {}
+                    ).items()
+                }
                 for doctype in stock_contract.GUARDED_DOCTYPES
             },
             "wildcard_doc_events": {
@@ -5351,6 +5361,7 @@ class Gateway:
             return "boundary unreadable"
 
     def _collect_finance_boundary_snapshot(self):
+        import hashlib
         import importlib
 
         frappe = self.frappe
@@ -5419,7 +5430,12 @@ class Gateway:
             },
             "enabled_server_scripts": len(server_scripts),
             "doc_events": {
-                doctype: tuple(doc_events.get(doctype) or ())
+                doctype: {
+                    event: tuple(handlers or ())
+                    for event, handlers in (
+                        doc_events.get(doctype) or {}
+                    ).items()
+                }
                 for doctype in finance_contract.GUARDED_DOCTYPES
             },
             "wildcard_doc_events": {

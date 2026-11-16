@@ -33,8 +33,16 @@ def snapshot(**overrides):
         "stock_entry_submittable": 1,
         "enabled_server_scripts": 0,
         "doc_events": {
-            contract.PROCEDURE_DOCTYPE: (),
-            contract.STOCK_ENTRY_DOCTYPE: (),
+            doctype: {
+                event: tuple(handlers)
+                for event, handlers in contract.REVIEWED_DOC_EVENTS[
+                    doctype
+                ].items()
+            }
+            for doctype in (
+                contract.PROCEDURE_DOCTYPE,
+                contract.STOCK_ENTRY_DOCTYPE,
+            )
         },
         "wildcard_doc_events": {
             event: tuple(handlers)
@@ -167,15 +175,38 @@ class BoundaryTests(unittest.TestCase):
             contract.boundary_problem(values), "driven method is not callable"
         )
 
+    def test_erpnext_builtin_doc_events_are_reviewed(self):
+        entry = (
+            "erpnext.stock.doctype.material_request.material_request."
+            "update_completed_and_requested_qty"
+        )
+        self.assertEqual(
+            contract.REVIEWED_DOC_EVENTS[contract.STOCK_ENTRY_DOCTYPE],
+            {"on_cancel": (entry,), "on_submit": (entry,)},
+        )
+        self.assertIsNone(contract.boundary_problem(snapshot()))
+
     def test_unreviewed_doc_events_and_overrides_are_refused(self):
         values = snapshot()
         values["doc_events"] = {
-            contract.PROCEDURE_DOCTYPE: ("healthcare.hooks.after_save",),
-            contract.STOCK_ENTRY_DOCTYPE: (),
+            contract.PROCEDURE_DOCTYPE: {
+                "after_save": ("healthcare.hooks.after_save",)
+            },
+            contract.STOCK_ENTRY_DOCTYPE: {},
         }
         self.assertEqual(
             contract.boundary_problem(values),
             f"unreviewed doc_events for {contract.PROCEDURE_DOCTYPE}",
+        )
+        values = snapshot()
+        values["doc_events"][contract.STOCK_ENTRY_DOCTYPE]["on_submit"] = (
+            "erpnext.stock.doctype.material_request.material_request."
+            "update_completed_and_requested_qty",
+            "clinic_ui.hooks.sneaky",
+        )
+        self.assertEqual(
+            contract.boundary_problem(values),
+            f"unreviewed doc_events for {contract.STOCK_ENTRY_DOCTYPE}",
         )
         values = snapshot(
             wildcard_doc_events={

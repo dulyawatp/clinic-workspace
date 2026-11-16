@@ -111,7 +111,13 @@ def pinned_snapshot():
         },
         "enabled_server_scripts": 0,
         "doc_events": {
-            doctype: () for doctype in stock_contract.GUARDED_DOCTYPES
+            doctype: {
+                event: tuple(handlers)
+                for event, handlers in stock_contract.REVIEWED_DOC_EVENTS[
+                    doctype
+                ].items()
+            }
+            for doctype in stock_contract.GUARDED_DOCTYPES
         },
         "wildcard_doc_events": {
             event: tuple(handlers)
@@ -166,8 +172,8 @@ class BoundaryTests(unittest.TestCase):
             "server scripts": lambda snap: snap.update(
                 {"enabled_server_scripts": 1}
             ),
-            "doc events": lambda snap: snap["doc_events"].update(
-                {"Stock Entry": ("app.hooks.patch",)}
+            "doc events": lambda snap: snap["doc_events"]["Stock Entry"].update(
+                {"before_save": ("app.hooks.patch",)}
             ),
             "wildcard": lambda snap: snap["wildcard_doc_events"].update(
                 {"validate": ("app.hooks.check",)}
@@ -185,6 +191,37 @@ class BoundaryTests(unittest.TestCase):
                 snapshot = pinned_snapshot()
                 mutate(snapshot)
                 self.assertIsNotNone(stock_contract.boundary_problem(snapshot))
+
+    def test_erpnext_builtin_doc_events_are_reviewed(self):
+        entry = (
+            "erpnext.stock.doctype.material_request.material_request."
+            "update_completed_and_requested_qty"
+        )
+        self.assertEqual(
+            stock_contract.REVIEWED_DOC_EVENTS["Stock Entry"],
+            {"on_cancel": (entry,), "on_submit": (entry,)},
+        )
+        self.assertIsNone(stock_contract.boundary_problem(pinned_snapshot()))
+
+    def test_foreign_doc_events_still_fail_closed(self):
+        snapshot = pinned_snapshot()
+        snapshot["doc_events"]["Stock Entry"]["on_submit"] = (
+            "erpnext.stock.doctype.material_request.material_request."
+            "update_completed_and_requested_qty",
+            "clinic_ui.hooks.sneaky",
+        )
+        self.assertEqual(
+            stock_contract.boundary_problem(snapshot),
+            "unreviewed doc_events for Stock Entry",
+        )
+        snapshot = pinned_snapshot()
+        snapshot["doc_events"]["Stock Entry"]["before_save"] = (
+            "app.hooks.patch",
+        )
+        self.assertEqual(
+            stock_contract.boundary_problem(snapshot),
+            "unreviewed doc_events for Stock Entry",
+        )
 
     def test_an_unreadable_snapshot_fails_closed(self):
         for snapshot in (None, {}, {"versions": {}}):

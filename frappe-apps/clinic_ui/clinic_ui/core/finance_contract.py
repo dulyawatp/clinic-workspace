@@ -152,6 +152,40 @@ REVIEWED_MRO = {
 # same stack, so they are read from that module instead of a second list.
 REVIEWED_WILDCARD_EVENTS = procedure_contract.REVIEWED_WILDCARD_EVENTS
 
+# Reviewed per-doctype doc_events: the exact event->handler set the pinned stack
+# registers on the two accounting controllers. These are erpnext's regional
+# hooks and healthcare's invoice/payment hooks -- reviewed-builtin, not ours.
+# Our app registers no doc_events on either doctype; anything else fails closed.
+REVIEWED_DOC_EVENTS = {
+    INVOICE_DOCTYPE: {
+        "on_cancel": (
+            "erpnext.regional.italy.utils.sales_invoice_on_cancel",
+            "healthcare.healthcare.utils.manage_invoice_submit_cancel",
+        ),
+        "on_submit": (
+            "erpnext.regional.italy.utils.sales_invoice_on_submit",
+            "healthcare.healthcare.utils.manage_invoice_submit_cancel",
+        ),
+        "on_trash": ("erpnext.regional.check_deletion_permission",),
+        "validate": ("healthcare.healthcare.utils.manage_invoice_validate",),
+    },
+    PAYMENT_DOCTYPE: {
+        "on_cancel": (
+            "healthcare.healthcare.custom_doctype.payment_entry."
+            "manage_payment_entry_submit_cancel",
+        ),
+        "on_submit": (
+            "healthcare.healthcare.custom_doctype.payment_entry."
+            "manage_payment_entry_submit_cancel",
+        ),
+        "on_trash": ("erpnext.regional.check_deletion_permission",),
+        "validate": (
+            "healthcare.healthcare.doctype.insurance_claim.insurance_claim."
+            "validate_payment_entry_and_set_claim_fields",
+        ),
+    },
+}
+
 # A scheduler job whose dotted path names one of these modules would post
 # accounting documents outside this contract; none may exist for the family.
 SCHEDULER_FINANCE_TOKENS = ("sales_invoice", "payment_entry")
@@ -503,13 +537,19 @@ def boundary_problem(snapshot):
     if not isinstance(events, dict):
         return "document events unreadable"
     for doctype in GUARDED_DOCTYPES:
-        if tuple(events.get(doctype) or ()):
+        actual = events.get(doctype) or {}
+        if not isinstance(actual, dict):
+            return "document events unreadable"
+        if {
+            event: tuple(handlers or ())
+            for event, handlers in actual.items()
+        } != REVIEWED_DOC_EVENTS[doctype]:
             return f"document event drift for {doctype}"
     wildcard = snapshot.get("wildcard_doc_events")
     if not isinstance(wildcard, dict):
         return "wildcard events unreadable"
-    for event in REVIEWED_WILDCARD_EVENTS:
-        if tuple(wildcard.get(event) or ()):
+    for event, reviewed in REVIEWED_WILDCARD_EVENTS.items():
+        if tuple(wildcard.get(event) or ()) != reviewed:
             return f"wildcard event drift for {event}"
     if tuple(snapshot.get("scheduler_finance_jobs") or ()):
         return "a scheduler job posts finance documents"

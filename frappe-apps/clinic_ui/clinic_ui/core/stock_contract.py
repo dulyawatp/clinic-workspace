@@ -133,6 +133,14 @@ REVIEWED_MRO = {
 # same stack, so they are read from that module instead of a second list.
 REVIEWED_WILDCARD_EVENTS = procedure_contract.REVIEWED_WILDCARD_EVENTS
 
+# Reviewed per-doctype doc_events: only erpnext's own Stock Entry hooks exist on
+# this stack (material-request progress); the other guarded doctypes carry none.
+# Our app registers no doc_events here. Anything else fails closed.
+REVIEWED_DOC_EVENTS = {
+    doctype: procedure_contract.REVIEWED_DOC_EVENTS.get(doctype, {})
+    for doctype in GUARDED_DOCTYPES
+}
+
 # A scheduler job whose dotted path names one of these modules would post stock
 # outside this contract; none may exist for the family.
 SCHEDULER_STOCK_TOKENS = (
@@ -391,12 +399,11 @@ def boundary_problem(snapshot):
             return f"{doctype} is not submittable"
     if snapshot.get("enabled_server_scripts") != 0:
         return "server scripts are enabled"
-    doc_events = snapshot.get("doc_events")
-    if not isinstance(doc_events, dict):
-        return "doc_events unreadable"
-    for doctype in GUARDED_DOCTYPES:
-        if tuple(doc_events.get(doctype) or ()):
-            return f"unreviewed doc_events for {doctype}"
+    problem = procedure_contract.doc_events_problem(
+        snapshot.get("doc_events"), REVIEWED_DOC_EVENTS
+    )
+    if problem:
+        return problem
     wildcard = snapshot.get("wildcard_doc_events")
     if not isinstance(wildcard, dict):
         return "wildcard doc_events unreadable"

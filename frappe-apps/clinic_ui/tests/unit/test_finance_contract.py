@@ -31,11 +31,17 @@ PINNED = {
     },
     "enabled_server_scripts": 0,
     "doc_events": {
-        doctype: ()
+        doctype: {
+            event: tuple(handlers)
+            for event, handlers in finance_contract.REVIEWED_DOC_EVENTS[
+                doctype
+            ].items()
+        }
         for doctype in finance_contract.GUARDED_DOCTYPES
     },
     "wildcard_doc_events": {
-        event: () for event in finance_contract.REVIEWED_WILDCARD_EVENTS
+        event: tuple(handlers)
+        for event, handlers in finance_contract.REVIEWED_WILDCARD_EVENTS.items()
     },
     "scheduler_finance_jobs": (),
     "class_overrides": {
@@ -188,6 +194,43 @@ class InstallPreflightTests(unittest.TestCase):
 class BoundaryTests(unittest.TestCase):
     def test_the_pinned_snapshot_passes(self):
         self.assertIsNone(finance_contract.boundary_problem(PINNED))
+
+    def test_erpnext_and_healthcare_builtin_doc_events_are_reviewed(self):
+        invoice = finance_contract.REVIEWED_DOC_EVENTS[
+            finance_contract.INVOICE_DOCTYPE
+        ]
+        self.assertEqual(
+            sorted(invoice["on_submit"]),
+            [
+                "erpnext.regional.italy.utils.sales_invoice_on_submit",
+                "healthcare.healthcare.utils.manage_invoice_submit_cancel",
+            ],
+        )
+        self.assertIsNone(finance_contract.boundary_problem(PINNED))
+
+    def test_foreign_doc_events_still_fail_closed(self):
+        drift = dict(PINNED)
+        drift["doc_events"] = {
+            **PINNED["doc_events"],
+            finance_contract.INVOICE_DOCTYPE: {
+                **PINNED["doc_events"][finance_contract.INVOICE_DOCTYPE],
+                "before_save": ("app.hooks.patch",),
+            },
+        }
+        self.assertEqual(
+            finance_contract.boundary_problem(drift),
+            "document event drift for Sales Invoice",
+        )
+
+    def test_wildcard_event_drift_is_named(self):
+        drift = dict(PINNED)
+        drift["wildcard_doc_events"] = dict(
+            PINNED["wildcard_doc_events"], validate=("app.hooks.check",)
+        )
+        self.assertEqual(
+            finance_contract.boundary_problem(drift),
+            "wildcard event drift for validate",
+        )
 
     def test_version_drift_is_named(self):
         drift = dict(PINNED)
