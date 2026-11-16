@@ -37,7 +37,12 @@ function preview() {
 }
 
 function submitted() {
-  return json({ status: "submitted", invoice: "SINV-1", total: 20, ackToken: TOKEN });
+  return json({
+    status: "submitted",
+    invoice: "SINV-1",
+    total: 20,
+    ackToken: TOKEN,
+  });
 }
 
 function received(outstanding = 0) {

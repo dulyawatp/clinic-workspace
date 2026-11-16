@@ -32,6 +32,7 @@ import {
   SourceNote,
   useOpsFormat,
 } from "../operations/ops-ui";
+import { InvoiceSubmitForm } from "./finance-write";
 
 const TONES = {
   draft: "neutral",
@@ -112,6 +113,8 @@ export function InvoicesPage() {
           )}
         />
         <SourceNote />
+
+        <InvoiceSubmitForm />
 
         {scopeVisit && visitInvoice === null ? (
           <OpsNote>

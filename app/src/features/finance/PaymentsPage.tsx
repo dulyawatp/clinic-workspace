@@ -27,6 +27,7 @@ import {
   SourceNote,
   useOpsFormat,
 } from "../operations/ops-ui";
+import { PaymentReceiveForm } from "./finance-write";
 
 /**
  * CAS-03 payments. The form is the designed control set, but this build has no
@@ -238,6 +239,8 @@ export function PaymentsPage() {
             </OpsNote>
           </div>
         </Card>
+
+        <PaymentReceiveForm />
 
         <Card
           title={copy(

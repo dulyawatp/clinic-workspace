@@ -156,7 +156,8 @@ function persistLock(kind: FinanceWriteKind): void {
 function clearLock(kind: FinanceWriteKind): void {
   try {
     localStorage.removeItem(LOCKS[kind]);
-    if (financeWriteLocked(kind)) throw new NativeFinanceWriteError("uncertain");
+    if (financeWriteLocked(kind))
+      throw new NativeFinanceWriteError("uncertain");
   } catch {
     throw new NativeFinanceWriteError("uncertain");
   }
@@ -341,8 +342,7 @@ async function submit(
   input: Record<string, unknown>,
 ): Promise<FinanceWriteResult> {
   const operationKey = input.operation_key;
-  if (!isText(operationKey))
-    throw new NativeFinanceWriteError("validation");
+  if (!isText(operationKey)) throw new NativeFinanceWriteError("validation");
 
   const token = nativeCsrfToken();
   if (!token || financeWriteLocked(kind))
