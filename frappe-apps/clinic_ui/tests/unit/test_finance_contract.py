@@ -20,6 +20,7 @@ PINNED = {
         "erpnext": "16.52.1",
         "healthcare": "16.6.1",
     },
+    "source_sha256": dict(finance_contract.REVIEWED_SOURCE_SHA256),
     "controller_mro": {
         doctype: tuple(expected)
         for doctype, expected in finance_contract.REVIEWED_MRO.items()
@@ -194,6 +195,32 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(
             finance_contract.boundary_problem(drift),
             "versions drift for erpnext",
+        )
+
+    def test_the_two_controller_sources_are_pinned(self):
+        self.assertEqual(
+            sorted(finance_contract.REVIEWED_SOURCE_SHA256),
+            ["payment_entry", "sales_invoice"],
+        )
+        for name, value in finance_contract.REVIEWED_SOURCE_SHA256.items():
+            self.assertEqual(len(value), 64, name)
+
+    def test_source_hash_drift_is_named(self):
+        drift = dict(PINNED)
+        drift["source_sha256"] = dict(
+            PINNED["source_sha256"], sales_invoice="0" * 64
+        )
+        self.assertEqual(
+            finance_contract.boundary_problem(drift),
+            "source drift for sales_invoice",
+        )
+
+    def test_unreadable_source_hashes_fail_closed(self):
+        drift = dict(PINNED)
+        drift["source_sha256"] = None
+        self.assertEqual(
+            finance_contract.boundary_problem(drift),
+            "source hashes unreadable",
         )
 
     def test_controller_mro_drift_is_named(self):

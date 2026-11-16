@@ -5337,8 +5337,9 @@ class Gateway:
 
         The two controllers are driven only through their public insert/submit
         lifecycle, so the reviewed boundary is the pinned versions, the
-        controller MRO, the submittable flags, the absence of class overrides
-        and document events, the wildcard hooks and our own fence kinds.
+        controller source hashes, the controller MRO, the submittable flags, the
+        absence of class overrides and document events, the wildcard hooks and
+        our own fence kinds.
         """
 
         try:
@@ -5371,6 +5372,26 @@ class Gateway:
                 f"{base.__module__}.{base.__name__}" for base in controller.__mro__
             )
 
+        sources = {
+            "sales_invoice": (
+                "accounts",
+                "doctype",
+                "sales_invoice",
+                "sales_invoice.py",
+            ),
+            "payment_entry": (
+                "accounts",
+                "doctype",
+                "payment_entry",
+                "payment_entry.py",
+            ),
+        }
+        source_sha256 = {}
+        for key, parts in sources.items():
+            path = frappe.get_app_path("erpnext", *parts)
+            with open(path, "rb") as handle:
+                source_sha256[key] = hashlib.sha256(handle.read()).hexdigest()
+
         hooks = frappe.get_hooks() or {}
         doc_events = hooks.get("doc_events") or {}
         wildcard = doc_events.get("*") or {}
@@ -5385,6 +5406,7 @@ class Gateway:
                 "erpnext": version("erpnext"),
                 "healthcare": version("healthcare"),
             },
+            "source_sha256": source_sha256,
             "controller_mro": mro,
             "submittable": {
                 doctype: (

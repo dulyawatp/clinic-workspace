@@ -47,8 +47,9 @@ Design rulings encoded here (they are not re-decided):
 Installed field names are resolved from the site's own metadata; a missing
 DocType or required field refuses the write pre-fence. The two controllers are
 driven only through their public insert/submit lifecycle, so the reviewed
-boundary is the pinned versions, the controller MRO, the submittable flags, the
-absence of class overrides and doc events, and our own fence kinds.
+boundary is the pinned versions and controller source hashes, the controller
+MRO, the submittable flags, the absence of class overrides and doc events, and
+our own fence kinds.
 """
 
 from __future__ import annotations
@@ -103,11 +104,25 @@ REFUSED_PAYMENT_MODES = ("Bank Transfer",)
 PINNED_UPDATE_STOCK = 0
 
 # Reviewed executable boundary: the two accounting controllers this family
-# drives, pinned by version (the same image as the other families) and MRO.
+# drives, pinned by version (the same image as the other families), source
+# sha256 and MRO. The two hashes were derived from the erpnext v16.52.1 tag and
+# cross-validated by re-deriving the already-reviewed stock/purchase pins
+# (purchase_receipt, stock_entry, purchase_order, batch) from the same tag
+# byte-identically; the on-site preflight re-hashes the installed files and
+# fails closed on drift.
 REVIEWED_VERSIONS = {
     "frappe": "16.54.0",
     "erpnext": "16.52.1",
     "healthcare": "16.6.1",
+}
+
+REVIEWED_SOURCE_SHA256 = {
+    "sales_invoice": (
+        "d429600bec1abb62bd45c28a5a198e01d3ccb72841340f7db4b3693e2bc4343f"
+    ),
+    "payment_entry": (
+        "f844d725fa548b4f126503c0c8f231d1040440152819925f2dd7a8656a194c2f"
+    ),
 }
 
 REVIEWED_MRO = {
@@ -464,6 +479,12 @@ def boundary_problem(snapshot):
     for name, value in REVIEWED_VERSIONS.items():
         if versions.get(name) != value:
             return f"versions drift for {name}"
+    source = snapshot.get("source_sha256")
+    if not isinstance(source, dict):
+        return "source hashes unreadable"
+    for name, value in REVIEWED_SOURCE_SHA256.items():
+        if source.get(name) != value:
+            return f"source drift for {name}"
     mro = snapshot.get("controller_mro")
     if not isinstance(mro, dict):
         return "controller MRO unreadable"
