@@ -174,6 +174,28 @@ def authorize_stock_write(gateway, allowed_codes, csrf_token=None):
     return settings, view, role
 
 
+def authorize_purchase_write(gateway, allowed_codes, csrf_token=None):
+    """Read gate, explicit CSRF, and the separate purchasing-write gate.
+
+    The purchasing gate is independent of the stock, clinical and admin flags.
+    It requires the exact approved site, the purchasing flag and the same
+    private deployment marker bound to the fence store. Masters, the purchase
+    order target and native authority are decided per request; no configuration
+    value is authority on its own.
+    """
+
+    settings, view, role = authorize(gateway, allowed_codes)
+    if view.user == write_fence.LATCH_ACTOR:
+        gateway.deny()
+    if not gateway.csrf_token_valid(csrf_token):
+        gateway.deny()
+    if not settings.purchase_write_enabled:
+        gateway.deny()
+    if not gateway.write_deployment_approved():
+        gateway.deny()
+    return settings, view, role
+
+
 def authorize_admin_write(gateway, allowed_codes, csrf_token=None):
     """Read gate, explicit CSRF, and the separate admin-write gate.
 

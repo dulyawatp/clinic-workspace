@@ -1792,6 +1792,9 @@ class AppointmentKindTests(FenceTestCase):
                     "stock_receive",
                     "stock_transfer",
                     "stock_adjust",
+                    "purchase_order_draft",
+                    "purchase_order_submit",
+                    "purchase_receipt",
                 }
             ),
         )

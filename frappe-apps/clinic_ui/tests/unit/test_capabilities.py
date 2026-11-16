@@ -202,6 +202,8 @@ class BootstrapCapabilityTests(unittest.TestCase):
             "write.stock.receive",
             "write.stock.transfer",
             "write.stock.adjust",
+            "write.purchase_order.draft",
+            "write.purchase_order.submit",
             "write.admin.user",
             "write.admin.master",
             *NEW_WRITE_NAMES,

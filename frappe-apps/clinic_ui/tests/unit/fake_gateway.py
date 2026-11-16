@@ -355,6 +355,41 @@ class FakeGateway:
         self.stock_fence_claim = FakeClaim()
         self.stock_fence_error = None
 
+        # -- purchasing (PO draft/submit + receipt) surface -----------------
+        self.purchase_boundary_problem = None
+        self.purchase_install_problem = None
+        self.purchase_create_authority = {}
+        self.purchase_draft_detail = None
+        self.purchase_submit_detail = None
+        self.purchase_receipt_detail = None
+        self.purchase_detail_calls = []
+        self.purchase_detail_sequence = []
+        self.purchase_baseline_value = {
+            "stock_ledger_rows": 0,
+            "gl_rows": 0,
+            "bins": {},
+            "po_received": 0.0,
+        }
+        self.purchase_baseline_calls = []
+        self.purchase_draft_id = "PO-DRAFT-1"
+        self.purchase_submit_id = "PO-SUBMITTED-1"
+        self.purchase_receipt_id = "PR-1"
+        self.purchase_draft_calls = []
+        self.purchase_submit_order_calls = []
+        self.purchase_receipt_calls = []
+        self.purchase_mutation_error = None
+        self.purchase_facts = {}
+        self.purchase_facts_calls = []
+        self.purchase_receipt_records = []
+        self.purchase_receipt_list_calls = []
+        self.purchase_receipt_list_error = None
+        self.purchase_ack_calls = []
+        self.purchase_ack_status = "acked"
+        self.purchase_ack_error = None
+        self.purchase_fence_calls = []
+        self.purchase_fence_claim = FakeClaim()
+        self.purchase_fence_error = None
+
     def setting(self, key):
         sequence = self.setting_sequences.get(key)
         if sequence:
@@ -1296,6 +1331,160 @@ class FakeGateway:
         self.stock_fence_calls.append((actor, kind, operation_key, payload_digest))
         return FakeFence(self.stock_fence_claim, self.stock_fence_error)
 
+    # -- purchasing (PO draft/submit + receipt) surface --------------------
+
+    def native_purchase_boundary_problem(self):
+        return self.purchase_boundary_problem
+
+    def native_purchase_install_problem(self):
+        return self.purchase_install_problem
+
+    def native_purchase_can_create(self, doctype):
+        return self.purchase_create_authority.get(doctype, True)
+
+    def _purchase_detail(self, detail, payload):
+        self.purchase_detail_calls.append(dict(payload))
+        if self.purchase_detail_sequence:
+            return dict(self.purchase_detail_sequence.pop(0))
+        return None if detail is None else dict(detail)
+
+    def native_purchase_order_draft_detail(self, payload):
+        return self._purchase_detail(self.purchase_draft_detail, payload)
+
+    def native_purchase_order_submit_detail(self, payload):
+        return self._purchase_detail(self.purchase_submit_detail, payload)
+
+    def native_purchase_receipt_detail(self, payload):
+        return self._purchase_detail(self.purchase_receipt_detail, payload)
+
+    def native_purchase_baseline(
+        self, kind, warehouses, item_code, purchase_order=None
+    ):
+        self.purchase_baseline_calls.append(
+            (kind, tuple(warehouses), item_code, purchase_order)
+        )
+        return dict(self.purchase_baseline_value)
+    def _purchase_mutation(self, kind, calls, prepared, name):
+        """Validate the prepared body exactly as the real gateway reads it.
+
+        The real creators read ``prepared["company"]`` and
+        ``prepared["currency"]`` (both server-resolved) plus the kind's own
+        route; a missing key there is a KeyError inside the fence. Asserting the
+        same contract here keeps the fake from hiding that class of drift.
+        """
+
+        from clinic_ui.core import purchase_contract
+
+        problem = purchase_contract.prepared_problem(kind, prepared)
+        if problem is not None:
+            raise AssertionError(problem)
+        for field in ("company", "currency"):
+            if not isinstance(prepared.get(field), str) or not prepared[
+                field
+            ].strip():
+                raise AssertionError(f"prepared body has no {field}")
+        if kind == "purchase_order_draft" and prepared.get("docstatus") is not None:
+            raise AssertionError("a draft may not carry a docstatus")
+        if self.purchase_mutation_error is not None:
+            raise self.purchase_mutation_error
+        calls.append(dict(prepared))
+        return name
+
+    def create_native_purchase_order_draft(self, prepared):
+        return self._purchase_mutation(
+            "purchase_order_draft",
+            self.purchase_draft_calls,
+            prepared,
+            self.purchase_draft_id,
+        )
+
+    def submit_native_purchase_order(self, prepared):
+        return self._purchase_mutation(
+            "purchase_order_submit",
+            self.purchase_submit_order_calls,
+            prepared,
+            self.purchase_submit_id,
+        )
+
+    def create_native_purchase_receipt(self, prepared):
+        return self._purchase_mutation(
+            "purchase_receipt",
+            self.purchase_receipt_calls,
+            prepared,
+            self.purchase_receipt_id,
+        )
+
+    def _purchase_side_effect_facts(
+        self, reference, expected, baseline, doctype
+    ):
+        self.purchase_facts_calls.append((reference, expected, baseline))
+        if self.purchase_facts:
+            return dict(self.purchase_facts)
+        return {
+            "docstatus": expected["docstatus"],
+            "doctype": doctype,
+            "status": expected.get("status"),
+            "sle_rows": expected["sle_rows"],
+            "gl_rows": expected["gl_rows_max"],
+            "bins": dict(expected["bins"]),
+            "po_received_delta": expected.get("po_received_delta"),
+            "po_status": expected.get("po_status"),
+        }
+
+    def native_purchase_order_facts(self, reference, expected, baseline):
+        return self._purchase_side_effect_facts(
+            reference, expected, baseline, "Purchase Order"
+        )
+
+    def native_purchase_receipt_facts(self, reference, expected, baseline):
+        return self._purchase_side_effect_facts(
+            reference, expected, baseline, "Purchase Receipt"
+        )
+
+    def list_committed_purchase_receipts(
+        self, limit, kind=None, operation_key=None
+    ):
+        self.purchase_receipt_list_calls.append((limit, kind, operation_key))
+        if self.purchase_receipt_list_error is not None:
+            raise self.purchase_receipt_list_error
+        from clinic_ui.core import purchase_contract
+
+        records = [
+            record
+            for record in self.purchase_receipt_records
+            if (kind is None or record.kind == kind)
+            and (operation_key is None or record.operation_key == operation_key)
+        ]
+        if len(records) > limit:
+            raise purchase_contract.PurchaseBudgetExhausted()
+        return records
+
+    def acknowledge_purchase_write(
+        self, secret, actor, kind, operation_key, ack_token
+    ):
+        self.purchase_ack_calls.append((actor, kind, operation_key, ack_token))
+        if self.purchase_ack_error is not None:
+            raise self.purchase_ack_error
+        return self.purchase_ack_status
+
+    def purchase_write_fence(self, actor, kind, operation_key, payload_digest):
+        self.call_order.append("purchase_fence")
+        self.purchase_fence_calls.append(
+            (actor, kind, operation_key, payload_digest)
+        )
+        return FakeFence(
+            self.purchase_fence_claim, self.purchase_fence_error
+        )
+
+
+class FakePurchaseReceipt:
+    """One committed purchasing row as the gateway would enumerate it."""
+
+    def __init__(self, kind, actor, operation_key, receipt):
+        self.kind = kind
+        self.actor = actor
+        self.operation_key = operation_key
+        self.receipt = receipt
 
 
 class FakeStockReceipt:

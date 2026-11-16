@@ -118,6 +118,12 @@ ADMIN_WRITE_SITE_KEY = "clinic_ui_native_admin_write_site"
 # Masters, batches and native authority are decided per request.
 STOCK_WRITE_ENABLED_KEY = "clinic_ui_native_stock_write_enabled"
 STOCK_WRITE_SITE_KEY = "clinic_ui_native_stock_write_site"
+# Separate, default-off purchasing (draft/submit + PO-referenced receipt) gate.
+# Independent of the stock and clinical flags: every purchasing operation needs
+# this flag and the exact approved site. Masters, the PO target and native
+# authority are decided per request.
+PURCHASE_WRITE_ENABLED_KEY = "clinic_ui_native_purchase_write_enabled"
+PURCHASE_WRITE_SITE_KEY = "clinic_ui_native_purchase_write_site"
 
 # The one and only site identity on which this local experiment may run. Exact
 # string equality against the resolved current site is required; the configured
@@ -167,6 +173,7 @@ class Settings:
     procedure_allowlist: tuple = ()
     admin_write_enabled: bool = False
     stock_write_enabled: bool = False
+    purchase_write_enabled: bool = False
 
     def as_role_map(self):
         return {code: tuple(roles) for code, roles in self.role_map}
@@ -489,6 +496,25 @@ def _stock_write_settings(getter, site):
     return True
 
 
+def _purchase_write_settings(getter, site):
+    """Return ``True`` when the purchasing draft/submit/receipt gate is open.
+
+    The gate needs the exact approved site and its own flag. Masters, the
+    purchase-order target, quantities and native authority are decided per
+    request by the purchase contract and endpoint, never from configuration
+    alone.
+    """
+
+    if site != APPROVED_WRITE_SITE or site in DISALLOWED_WRITE_SITES:
+        return False
+    if not _enabled(getter(PURCHASE_WRITE_ENABLED_KEY)):
+        return False
+    configured = getter(PURCHASE_WRITE_SITE_KEY)
+    if not isinstance(configured, str) or configured != APPROVED_WRITE_SITE:
+        return False
+    return True
+
+
 def load_settings(getter, site):
     """Return validated settings, or ``None`` when the feature is unavailable."""
 
@@ -564,4 +590,5 @@ def load_settings(getter, site):
         procedure_allowlist=procedure_allowlist,
         admin_write_enabled=_admin_write_settings(getter, site),
         stock_write_enabled=_stock_write_settings(getter, site),
+        purchase_write_enabled=_purchase_write_settings(getter, site),
     )

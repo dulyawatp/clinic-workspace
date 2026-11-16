@@ -37,6 +37,7 @@ from clinic_ui.core import (
     patient_write,
     procedure_contract,
     procedure_write,
+    purchase_contract,
     stock_contract,
     write_fence,
 )
@@ -4630,6 +4631,624 @@ class Gateway:
     @contextmanager
     def stock_write_fence(self, actor, kind, operation_key, payload_digest):
         if kind not in write_fence.STOCK_OPERATION_KINDS:
+            raise patient_write.WriteUncertain()
+        ledger = self._ledger()
+        try:
+            with ledger.fence(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                payload_digest=payload_digest,
+            ) as claim:
+                yield claim
+        except write_fence.OperationLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.SiteLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.OperationConflict as exc:
+            raise patient_write.WriteConflict() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    # -- purchasing (PO draft/submit + receipt) surface -------------------
+
+    def _purchase_meta_fields(self):
+        """Resolve the installed field names through the metadata cache."""
+
+        cached = getattr(self, "_purchase_fields_cache", None)
+        if cached is not None:
+            return cached
+        frappe = self.frappe
+        get_meta = getattr(getattr(frappe, "db", None), "get_meta", None)
+        if not callable(get_meta):
+            get_meta = frappe.get_meta
+        fields = {}
+        for doctype in purchase_contract.INSTALLED_CANDIDATES:
+            fields[doctype] = set(get_meta(doctype).get_valid_columns())
+        self._purchase_fields_cache = fields
+        return fields
+
+    def native_purchase_install_problem(self):
+        """Preflight the installed DocType/field set; a gap is a refusal."""
+
+        try:
+            return purchase_contract.install_problem(self._purchase_meta_fields())
+        except Exception:
+            return "installed metadata unreadable"
+
+    def native_purchase_boundary_problem(self):
+        """Return pinned-boundary drift for the purchasing family, or ``None``.
+
+        Tests supply ``frappe.purchase_boundary_snapshot``; production collects
+        the pinned versions, the sha256 of the two buying controllers this
+        family drives or creates, their MRO, the submittable flags, the
+        wildcard/class overrides on the path, the enabled Server Script count and
+        our fence kinds. Any failure is a non-empty problem so callers fail
+        closed.
+        """
+
+        try:
+            snapshot = getattr(self.frappe, "purchase_boundary_snapshot", None)
+            if snapshot is None:
+                snapshot = self._collect_purchase_boundary_snapshot()
+            return purchase_contract.boundary_problem(snapshot)
+        except Exception:
+            return "boundary unreadable"
+
+    def _collect_purchase_boundary_snapshot(self):
+        import hashlib
+        import importlib
+
+        frappe = self.frappe
+
+        def version(module_name, module=None):
+            if module is not None:
+                return getattr(module, "__version__", None)
+            try:
+                return getattr(
+                    importlib.import_module(module_name), "__version__", None
+                )
+            except Exception:
+                return None
+
+        sources = {
+            "purchase_order": (
+                "buying",
+                "doctype",
+                "purchase_order",
+                "purchase_order.py",
+            ),
+            "purchase_receipt": (
+                "stock",
+                "doctype",
+                "purchase_receipt",
+                "purchase_receipt.py",
+            ),
+            "batch": ("stock", "doctype", "batch", "batch.py"),
+        }
+        source_sha256 = {}
+        for key, parts in sources.items():
+            path = frappe.get_app_path("erpnext", *parts)
+            with open(path, "rb") as handle:
+                source_sha256[key] = hashlib.sha256(handle.read()).hexdigest()
+
+        mro = {}
+        for doctype in purchase_contract.GUARDED_DOCTYPES:
+            controller = type(frappe.get_doc({"doctype": doctype}))
+            mro[doctype] = tuple(
+                f"{base.__module__}.{base.__name__}" for base in controller.__mro__
+            )
+
+        hooks = frappe.get_hooks() or {}
+        doc_events = hooks.get("doc_events") or {}
+        wildcard = doc_events.get("*") or {}
+        overrides = hooks.get("override_doctype_class") or {}
+        extends = hooks.get("extend_doctype_class") or {}
+        server_scripts = frappe.get_all(
+            "Server Script", filters={"disabled": 0}, limit=1, pluck="name"
+        ) or ()
+        return {
+            "versions": {
+                "frappe": version("frappe", frappe),
+                "erpnext": version("erpnext"),
+                "healthcare": version("healthcare"),
+            },
+            "source_sha256": source_sha256,
+            "controller_mro": mro,
+            "submittable": {
+                doctype: (
+                    1 if frappe.get_meta(doctype).get("is_submittable") else 0
+                )
+                for doctype in (
+                    purchase_contract.PURCHASE_ORDER_DOCTYPE,
+                    purchase_contract.PURCHASE_RECEIPT_DOCTYPE,
+                )
+            },
+            "enabled_server_scripts": len(server_scripts),
+            "doc_events": {
+                doctype: tuple(doc_events.get(doctype) or ())
+                for doctype in purchase_contract.GUARDED_DOCTYPES
+            },
+            "wildcard_doc_events": {
+                event: tuple(wildcard.get(event) or ())
+                for event in purchase_contract.REVIEWED_WILDCARD_EVENTS
+            },
+            "scheduler_purchase_jobs": tuple(
+                path
+                for handlers in (hooks.get("scheduler_events") or {}).values()
+                for path in (handlers or ())
+                if any(
+                    token in str(path)
+                    for token in purchase_contract.SCHEDULER_PURCHASE_TOKENS
+                )
+            ),
+            "class_overrides": {
+                doctype: tuple(overrides.get(doctype) or ())
+                + tuple(extends.get(doctype) or ())
+                for doctype in purchase_contract.GUARDED_DOCTYPES
+            },
+            "fence_kinds": tuple(purchase_contract.PURCHASE_KINDS),
+        }
+
+    def native_purchase_can_create(self, doctype):
+        """The acting user's native create authority on one buying document."""
+
+        try:
+            return bool(
+                self.frappe.has_permission(
+                    doctype,
+                    ptype="create",
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
+    def _purchase_company_currency(self):
+        """The installed company and its own currency (never client input)."""
+
+        company = None
+        try:
+            get_default = getattr(self.frappe.defaults, "get_user_default", None)
+            if callable(get_default):
+                company = get_default("Company")
+            if not company:
+                company = self.frappe.db.get_single_value(
+                    "Global Defaults", "default_company"
+                )
+        except Exception:
+            company = None
+        company = self._text_value(company)
+        currency = ""
+        if company:
+            try:
+                currency = self._text_value(
+                    self.frappe.db.get_value("Company", company, "default_currency")
+                )
+            except Exception:
+                currency = ""
+        return company, currency
+
+    def _purchase_currency(self, company):
+        if not company:
+            return ""
+        try:
+            return self._text_value(
+                self.frappe.db.get_value("Company", company, "default_currency")
+            )
+        except Exception:
+            return ""
+
+    def _purchase_order_line(self, purchase_order, item_code):
+        """Read the order state and its matching line (pending quantity)."""
+
+        if not purchase_order:
+            return {
+                "exists": False,
+                "docstatus": None,
+                "status": None,
+                "supplier": "",
+                "po_item": None,
+                "pending": None,
+                "received": 0.0,
+            }
+        docstatus = self.frappe.db.get_value(
+            purchase_contract.PURCHASE_ORDER_DOCTYPE,
+            purchase_order,
+            "docstatus",
+        )
+        if docstatus is None:
+            return {
+                "exists": False,
+                "docstatus": None,
+                "status": None,
+                "supplier": "",
+                "po_item": None,
+                "pending": None,
+                "received": 0.0,
+            }
+        status = self.frappe.db.get_value(
+            purchase_contract.PURCHASE_ORDER_DOCTYPE, purchase_order, "status"
+        )
+        supplier = self.frappe.db.get_value(
+            purchase_contract.PURCHASE_ORDER_DOCTYPE, purchase_order, "supplier"
+        )
+        rows = self.frappe.db.get_all(
+            purchase_contract.PURCHASE_ORDER_ITEM_DOCTYPE,
+            filters={"parent": purchase_order, "item_code": item_code},
+            fields=["name", "qty", "received_qty"],
+            order_by="idx asc",
+            limit=1,
+        ) or ()
+        if not rows:
+            return {
+                "exists": True,
+                "docstatus": docstatus,
+                "status": self._text_value(status),
+                "supplier": self._text_value(supplier),
+                "po_item": None,
+                "pending": None,
+                "received": 0.0,
+            }
+        row = rows[0]
+        get = getattr(row, "get", lambda key, default=None: default)
+        ordered = get("qty")
+        received = get("received_qty") or 0
+        pending = None
+        if isinstance(ordered, (int, float)) and not isinstance(ordered, bool):
+            pending = float(ordered) - float(received or 0)
+        return {
+            "exists": True,
+            "docstatus": docstatus,
+            "status": self._text_value(status),
+            "supplier": self._text_value(supplier),
+            "po_item": self._text_value(get("name")),
+            "pending": pending,
+            "received": float(received or 0),
+        }
+
+    def _purchase_received(self, purchase_order, item_code):
+        return self._purchase_order_line(purchase_order, item_code)["received"]
+
+    def native_purchase_order_draft_detail(self, payload):
+        """Read the pre-fence draft decision fields under native authority."""
+
+        try:
+            company, currency = self._purchase_company_currency()
+            items = {}
+            for line in payload["items"]:
+                code = line["item_code"]
+                if code not in items:
+                    items[code] = self._stock_item(code)
+            return {
+                "today": self.site_today(),
+                "company": company,
+                "currency": currency,
+                "supplier_exists": bool(
+                    self.frappe.db.exists("Supplier", payload["supplier"])
+                ),
+                "items": items,
+            }
+        except Exception:
+            raise patient_write.StoreUnavailable() from None
+
+    def native_purchase_order_submit_detail(self, payload):
+        """Read the pre-fence submit decision fields."""
+
+        try:
+            company, currency = self._purchase_company_currency()
+            order = self._purchase_order_line(payload["purchase_order"], None)
+            lines = []
+            if order["exists"]:
+                rows = self.frappe.db.get_all(
+                    purchase_contract.PURCHASE_ORDER_ITEM_DOCTYPE,
+                    filters={"parent": payload["purchase_order"]},
+                    fields=[
+                        "name",
+                        "item_code",
+                        "qty",
+                        "rate",
+                        "uom",
+                        "received_qty",
+                    ],
+                    order_by="idx asc",
+                ) or ()
+                for row in rows:
+                    get = getattr(row, "get", lambda key, default=None: default)
+                    lines.append(
+                        {
+                            "item_code": self._text_value(get("item_code")),
+                            "qty": get("qty"),
+                            "rate": get("rate"),
+                            "uom": self._text_value(get("uom")),
+                            "po_item": self._text_value(get("name")),
+                        }
+                    )
+            return {
+                "today": self.site_today(),
+                "company": company,
+                "currency": currency,
+                "supplier_exists": bool(
+                    order["supplier"]
+                    and self.frappe.db.exists("Supplier", order["supplier"])
+                ),
+                "purchase_order": {
+                    "exists": order["exists"],
+                    "docstatus": order["docstatus"],
+                    "supplier": order["supplier"],
+                    "status": order["status"],
+                },
+                "lines": lines,
+            }
+        except Exception:
+            raise patient_write.StoreUnavailable() from None
+
+    def native_purchase_receipt_detail(self, payload):
+        """Read the pre-fence PO-referenced receipt decision fields."""
+
+        try:
+            item = self._stock_item(payload["item_code"])
+            warehouse = self._stock_warehouse(payload["warehouse"])
+            company = warehouse.get("company")
+            order = self._purchase_order_line(
+                payload["purchase_order"], payload["item_code"]
+            )
+            return {
+                "today": self.site_today(),
+                "company": company,
+                "currency": self._purchase_currency(company),
+                "supplier": order["supplier"],
+                "supplier_exists": bool(
+                    order["supplier"]
+                    and self.frappe.db.exists("Supplier", order["supplier"])
+                ),
+                "item": item,
+                "warehouse": warehouse,
+                "purchase_order": {
+                    "exists": order["exists"],
+                    "docstatus": order["docstatus"],
+                    "status": order["status"],
+                },
+                "po_pending_qty": order["pending"],
+                "po_item": order["po_item"],
+                "batch": self._stock_batch(payload.get("batch_id")),
+            }
+        except Exception:
+            raise patient_write.StoreUnavailable() from None
+
+    def native_purchase_baseline(
+        self, kind, warehouses, item_code, purchase_order=None
+    ):
+        """Pre-fence Stock Ledger Entry, GL, Bin and PO received baselines."""
+
+        if kind not in purchase_contract.PURCHASE_KINDS:
+            raise patient_write.WriteUncertain()
+        try:
+            counts = self._stock_document_counts()
+            bins = {
+                warehouse: self._stock_bin_qty(item_code, warehouse)
+                for warehouse in warehouses
+            }
+            received = (
+                self._purchase_received(purchase_order, item_code)
+                if purchase_order
+                else 0.0
+            )
+            return {**counts, "bins": bins, "po_received": received}
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def create_native_purchase_order_draft(self, prepared):
+        """One draft purchase order: inserted, never submitted."""
+
+        try:
+            rows = []
+            for line in prepared["items"]:
+                rows.append(
+                    {
+                        "item_code": line["item_code"],
+                        "qty": line["qty"],
+                        "rate": line["rate"],
+                        "uom": line["uom"],
+                        "stock_uom": line.get("stock_uom") or line["uom"],
+                        "conversion_factor": line.get("conversion_factor") or 1.0,
+                        "schedule_date": line["schedule_date"],
+                    }
+                )
+            document = {
+                "doctype": purchase_contract.PURCHASE_ORDER_DOCTYPE,
+                "supplier": prepared["supplier"],
+                "company": prepared["company"],
+                "currency": prepared["currency"],
+                "conversion_rate": prepared.get("conversion_rate") or 1.0,
+                "transaction_date": prepared["transaction_date"],
+                "items": rows,
+            }
+            order = self.frappe.get_doc(document)
+            order.insert()
+            return self._text_value(order.name)
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def submit_native_purchase_order(self, prepared):
+        """Submit the existing draft; the body never carries a submit flag."""
+
+        try:
+            order = self.frappe.get_doc(
+                purchase_contract.PURCHASE_ORDER_DOCTYPE,
+                prepared["purchase_order"],
+            )
+            if order.docstatus != purchase_contract.DRAFT_DOCSTATUS:
+                raise patient_write.WriteUncertain()
+            order.submit()
+            return self._text_value(order.name)
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def create_native_purchase_receipt(self, prepared):
+        """One PO-referenced receipt unit: batch master (where required), then
+        the submitted ``Purchase Receipt`` carrying the order reference."""
+
+        try:
+            if prepared.get("create_batch"):
+                self._stock_create_batch(prepared)
+            row = {
+                "item_code": prepared["item_code"],
+                "qty": prepared["qty"],
+                "uom": prepared["uom"],
+                "warehouse": prepared["warehouse"],
+                "purchase_order": prepared["purchase_order"],
+            }
+            if prepared.get("po_item"):
+                row["purchase_order_item"] = prepared["po_item"]
+            if prepared.get("batch_no"):
+                row["batch_no"] = prepared["batch_no"]
+                row["use_serial_batch_fields"] = 1
+            document = {
+                "doctype": purchase_contract.PURCHASE_RECEIPT_DOCTYPE,
+                "supplier": prepared["supplier"],
+                "company": prepared["company"],
+                "currency": prepared["currency"],
+                "posting_date": prepared["posting_date"],
+                "posting_time": self._stock_now_time(),
+                "set_posting_time": 1,
+                "items": [row],
+            }
+            receipt = self.frappe.get_doc(document)
+            receipt.insert()
+            receipt.submit()
+            return self._text_value(receipt.name)
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def _purchase_side_effect_facts(self, reference, expected, baseline):
+        """Closed-world re-read: document state, SLE/GL deltas, Bin movement and
+        the purchase order received-quantity/status delta."""
+
+        if not isinstance(baseline, dict) or not isinstance(expected, dict):
+            raise patient_write.WriteUncertain()
+        doctype = expected.get("doctype")
+        if not isinstance(doctype, str) or not reference:
+            raise patient_write.WriteUncertain()
+        try:
+            counts = self._stock_document_counts()
+            bins = {}
+            for warehouse in expected.get("bins") or {}:
+                before = (baseline.get("bins") or {}).get(warehouse)
+                after = self._stock_bin_qty(
+                    expected.get("item_code"), warehouse
+                )
+                after_value = (
+                    float(after) if isinstance(after, (int, float)) else 0.0
+                )
+                before_value = (
+                    float(before) if isinstance(before, (int, float)) else 0.0
+                )
+                bins[warehouse] = after_value - before_value
+            status = None
+            purchase_order = expected.get("purchase_order")
+            if doctype == purchase_contract.PURCHASE_ORDER_DOCTYPE:
+                status = self.frappe.db.get_value(doctype, reference, "status")
+            elif purchase_order:
+                status = self.frappe.db.get_value(
+                    purchase_contract.PURCHASE_ORDER_DOCTYPE,
+                    purchase_order,
+                    "status",
+                )
+            facts = {
+                "docstatus": self.frappe.db.get_value(
+                    doctype, reference, "docstatus"
+                ),
+                "doctype": doctype,
+                "status": self._text_value(status),
+                "sle_rows": counts["stock_ledger_rows"]
+                - int(baseline.get("stock_ledger_rows") or 0),
+                "gl_rows": counts["gl_rows"]
+                - int(baseline.get("gl_rows") or 0),
+                "bins": bins,
+            }
+            if "po_received_delta" in expected:
+                before = baseline.get("po_received") or 0.0
+                after = self._purchase_received(
+                    purchase_order, expected.get("item_code")
+                )
+                facts["po_received_delta"] = float(after) - float(before)
+                facts["po_status"] = self._text_value(status)
+            if facts["docstatus"] is None:
+                raise patient_write.WriteUncertain()
+            return facts
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def native_purchase_order_facts(self, reference, expected, baseline):
+        return self._purchase_side_effect_facts(reference, expected, baseline)
+
+    def native_purchase_receipt_facts(self, reference, expected, baseline):
+        return self._purchase_side_effect_facts(reference, expected, baseline)
+
+    # -- purchasing fence, receipts and acknowledgement --------------------
+
+    def list_committed_purchase_receipts(
+        self, limit, kind=None, operation_key=None
+    ):
+        ledger = self._ledger()
+        try:
+            return ledger.committed_purchase_receipts(
+                limit=limit, kind=kind, operation_key=operation_key
+            )
+        except write_fence.EnumerationOverflow as exc:
+            raise purchase_contract.PurchaseBudgetExhausted() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    def acknowledge_purchase_write(
+        self, secret, actor, kind, operation_key, ack_token
+    ):
+        if kind not in write_fence.PURCHASE_OPERATION_KINDS:
+            return "invalid"
+        ledger = self._ledger()
+        try:
+            record = ledger.lookup(
+                actor=actor, kind=kind, operation_key=operation_key
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+        if (
+            record is None
+            or record.state != write_fence.COMMITTED
+            or not record.receipt
+        ):
+            return "invalid"
+        expected = purchase_contract.ack_token(
+            secret, self.site, actor, kind, operation_key, record.receipt
+        )
+        if not hmac.compare_digest(expected, ack_token):
+            return "invalid"
+        try:
+            return ledger.acknowledge_barrier(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                ack_receipt="ack:" + expected,
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    @contextmanager
+    def purchase_write_fence(self, actor, kind, operation_key, payload_digest):
+        if kind not in write_fence.PURCHASE_OPERATION_KINDS:
             raise patient_write.WriteUncertain()
         ledger = self._ledger()
         try:

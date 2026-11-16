@@ -92,6 +92,8 @@ DEPLOYMENT_GATED_WRITE_NAMES = frozenset(
         "write.stock.receive",
         "write.stock.transfer",
         "write.stock.adjust",
+        "write.purchase_order.draft",
+        "write.purchase_order.submit",
         "write.admin.user",
         "write.admin.master",
     }
@@ -123,6 +125,8 @@ def bootstrap_capabilities(
     write_stock_receive=False,
     write_stock_transfer=False,
     write_stock_adjust=False,
+    write_purchase_order_draft=False,
+    write_purchase_order_submit=False,
     write_admin_user=False,
     write_admin_master=False,
 ):
@@ -172,6 +176,13 @@ def bootstrap_capabilities(
         capabilities["write.stock.transfer"] = ENABLED_STATE
     if write_stock_adjust is True:
         capabilities["write.stock.adjust"] = ENABLED_STATE
+    # Purchase-order draft and submit are two contract surfaces under one
+    # site-config gate; the PO-referenced receipt is the stock receipt surface
+    # (the one receipt write), advertised through ``write.stock.receive``.
+    if write_purchase_order_draft is True:
+        capabilities["write.purchase_order.draft"] = ENABLED_STATE
+    if write_purchase_order_submit is True:
+        capabilities["write.purchase_order.submit"] = ENABLED_STATE
     # Admin users and masters are two independent contract surfaces that share
     # one site-config gate; bootstrap passes each only after that gate passes.
     if write_admin_user is True:

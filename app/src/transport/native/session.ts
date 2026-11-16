@@ -102,6 +102,8 @@ const NATIVE_ENABLEABLE = new Set<string>([
   "write.stock.receive",
   "write.stock.transfer",
   "write.stock.adjust",
+  "write.purchase_order.draft",
+  "write.purchase_order.submit",
   "write.admin.user",
   "write.admin.master",
 ]);

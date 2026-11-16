@@ -27,6 +27,7 @@ from clinic_ui.core.policy import (
     ENCOUNTER_COMPLETE_ROLE_CODES,
     ENCOUNTER_ROLE_CODES,
     PATIENT_WRITE_ROLE_CODES,
+    PO_ROLE_CODES,
     PROCEDURE_ROLE_CODES,
     STOCK_ROLE_CODES,
     SUPPORTED_ROLE_CODES,
@@ -236,6 +237,48 @@ def _stock_write_flags(gateway, settings, role):
         return disabled
 
 
+def _purchase_write_flags(gateway, settings, role):
+    """Return ``(draft, submit, receipt)`` when purchasing is open.
+
+    Independent of the stock and clinical flags: exact approved site, boundary
+    and installed-field preflight, the purchasing flag, the deployment marker, a
+    ready fence store and the caller's own native authority on the document it
+    would create, submit or receive. Masters, the purchase-order target and the
+    quantities are decided per request; these flags only advertise that the
+    surface exists.
+
+    The PO-referenced receipt is part of the purchase family, so its session
+    authorization uses the purchase role set rather than the inventory one; its
+    capability id stays ``write.stock.receive`` because there is one receipt
+    write.
+    """
+
+    disabled = (False, False, False)
+    if role not in PO_ROLE_CODES:
+        return disabled
+    try:
+        if gateway.native_purchase_boundary_problem() is not None:
+            return disabled
+        if gateway.native_purchase_install_problem() is not None:
+            return disabled
+        if not settings.purchase_write_enabled:
+            return disabled
+        if gateway.write_deployment_approved() is not True:
+            return disabled
+        if gateway.write_fence_ready() is not True:
+            return disabled
+        draft_ok = (
+            gateway.native_purchase_can_create("Purchase Order") is True
+        )
+        submit_ok = draft_ok
+        receipt_ok = (
+            gateway.native_purchase_can_create("Purchase Receipt") is True
+        )
+        return draft_ok, submit_ok, receipt_ok
+    except Exception:
+        return disabled
+
+
 def _admin_write_flags(gateway, settings, role):
     """Return ``(user, master)`` when the admin surface is open.
 
@@ -306,6 +349,11 @@ def bootstrap(gateway):
         write_admin_user, write_admin_master = _admin_write_flags(
             gateway, settings, role
         )
+        (
+            write_purchase_order_draft,
+            write_purchase_order_submit,
+            write_purchase_receipt,
+        ) = _purchase_write_flags(gateway, settings, role)
         capabilities = bootstrap_capabilities(
             write_patient_create=write_create,
             write_patient_update=write_update,
@@ -318,9 +366,13 @@ def bootstrap(gateway):
             write_encounter_complete=write_encounter_complete,
             write_encounter_amend=write_encounter_amend,
             write_procedure_complete=write_procedure_complete,
-            write_stock_receive=write_stock_receive,
+            write_stock_receive=(
+                write_stock_receive or write_purchase_receipt
+            ),
             write_stock_transfer=write_stock_transfer,
             write_stock_adjust=write_stock_adjust,
+            write_purchase_order_draft=write_purchase_order_draft,
+            write_purchase_order_submit=write_purchase_order_submit,
             write_admin_user=write_admin_user,
             write_admin_master=write_admin_master,
         )
