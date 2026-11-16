@@ -78,14 +78,29 @@ docker compose -p marley-sit -f deploy/local-sit/compose.yaml build backend
 docker compose -p marley-sit -f deploy/local-sit/compose.yaml up -d
 docker compose -p marley-sit -f deploy/local-sit/compose.yaml wait create-site provision
 
-# 7. Verify identity, versions, shell, assets, session, allowlist, capabilities
+# 7. Verify identity, versions, shell, assets, session, allowlist, capabilities,
+#    the durable fence/budget ledger and the new POST surface
 python3 deploy/local-sit/bin/verify.py
+
+# Pure-function self-checks (no site access, no Docker):
+python3 deploy/local-sit/bin/verify.py --selfcheck
+python3 deploy/local-sit/bin/preflight.py --selfcheck
 ```
 
 `deploy/local-sit/bin/deploy.sh` runs steps 1–7 and appends each command and
 exit status to the private deployment log. It stops before any deploy step if
 `preflight.py` finds a resource collision. Every Compose command uses
 `-p marley-sit`; an inherited `COMPOSE_PROJECT_NAME` is reported and ignored.
+
+Read-only SIT preflight subcommands (require the stack to be running):
+
+```bash
+python3 deploy/local-sit/bin/preflight.py masters        # master inventory + dependency order
+python3 deploy/local-sit/bin/preflight.py finance-counts # invoice/payment/GL/PLE counts, no gate opens
+python3 deploy/local-sit/bin/preflight.py boundary-shas  # recompute installed controller hashes vs pins
+```
+
+`preflight.py` with no argument keeps its original ownership-collision role.
 
 Nothing in this workflow deletes containers or volumes. `down -v` below is
 documented only for a deliberate, separate teardown.
@@ -122,6 +137,11 @@ Only fictional records are created, and only on `marley-sit.local`:
 | `sit.nur@example.invalid` | Nursing User | `NUR` |
 | `sit.rec@example.invalid` | Healthcare Administrator | `REC` |
 
+The site role map also configures the four write-contract codes (`PHA` →
+`Stock Manager`, `CAS` → `Accounts User`, `MGR` → `Purchase User`, `ADM` →
+`Item Manager`). Their synthetic users are created later through the admin
+contract, per the write-contract SIT lanes; no user row is seeded here.
+
 One fictional `Patient` (`SITSYNTH Alpha`) is created and exposed through the
 `clinic_ui_synthetic_patients` allowlist as workspace alias `WS-SIT-1`. The
 native patient identifier is written only to the site configuration; it is not
@@ -154,10 +174,23 @@ an explicitly destructive step on this isolated project only).
   clinic role, a CSRF token and a 64-hex epoch; the directory resolves the seeded
   allowlisted patient plus the locally created patient (two items, no native
   identifiers).
-- Every capability from `contracts/capabilities.json` is present; only
-  `write.patient.create` and `write.patient.update` are `enabled` and every other
-  capability is `read_only`; an authenticated POST with a valid CSRF token is
-  refused on both read-only endpoints (and an anonymous POST on bootstrap).
+- Every capability from `contracts/capabilities.json` is present (39 ids); the
+  enabled write set follows the site's own gate flags, and the five previously
+  approved writes (`write.patient.create`, `write.patient.update`,
+  `write.appointment.book`, `write.appointment.reschedule`,
+  `write.appointment.checkin`) stay enabled exactly as before. Every other
+  write capability is `read_only` unless its family gate flag is set; cut
+  surfaces (`write.invoice.void_amend`, `write.payment.refund`, the photo and
+  lab-review ids) are always `read_only`. An authenticated POST with a valid
+  CSRF token is refused on both read-only endpoints (and an anonymous POST on
+  bootstrap).
+- The durable fence store is ready with the expected event count (24 baseline,
+  overridable with `MARLEY_SIT_EXPECTED_FENCE_EVENTS`), zero unresolved keys and
+  only registry kinds; `write_budgets.budget_for` reads back all 17 approved
+  budgets and still refuses an unknown kind.
+- The new write API surface (`appointments_cancel_write`, `encounters_write`,
+  `procedures_write`, `admin_write`, `stock_write`, `purchase_write`,
+  `finance_write`) is whitelisted for POST only and never allows guest.
 - The site holds exactly the three non-system synthetic users (emails, single
   native roles, enabled) and exactly two approved Patients: the original
   `SITSYNTH Alpha` fixture (whose `first_name`, `last_name`, `patient_name`,

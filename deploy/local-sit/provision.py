@@ -34,7 +34,20 @@ EPOCH_SECRET = os.environ["SIT_EPOCH_SECRET"]
 if len(EPOCH_SECRET) < 32:
     sys.exit("refusing: SIT_EPOCH_SECRET must be at least 32 characters")
 
-ROLE_MAP = {"DOC": ["Physician"], "NUR": ["Nursing User"], "REC": ["Healthcare Administrator"]}
+ROLE_MAP = {
+    "DOC": ["Physician"],
+    "NUR": ["Nursing User"],
+    "REC": ["Healthcare Administrator"],
+    # The write-contract wave codes. They map to built-in module roles that the
+    # admin contract may assign (System Manager / Healthcare Administrator are
+    # never assignable through the contract). REC stays mapped to the existing
+    # native role of sit.rec; creating an REC user through the contract is
+    # refused by design (privilege boundary), and no lane does so.
+    "PHA": ["Stock Manager"],
+    "CAS": ["Accounts User"],
+    "MGR": ["Purchase User"],
+    "ADM": ["Item Manager"],
+}
 
 ACCOUNTS = [
     ("sit.doc@example.invalid", "SIT Doctor", "Physician", "SIT_DOC_PASSWORD"),
