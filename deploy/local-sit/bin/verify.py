@@ -149,7 +149,7 @@ APPROVED_BUDGETS = {
     "invoice_submit": 1,
     "payment_receive": 1,
     "admin_user": 4,
-    "admin_master": 14,
+    "admin_master": 15,
 }
 
 # Kinds the durable fence may legitimately carry (write_fence.OPERATION_KINDS).
@@ -412,8 +412,8 @@ def selfcheck() -> int:
         ("unknown fence kind is caught", bool(fence_ledger_problems(
             dict(good_ledger, kinds=["create", "made_up"]), 24, APPROVED_BUDGETS
         ))),
-        ("budget v3 carries the admin master fourteen", (
-            APPROVED_BUDGETS["admin_master"] == 14
+        ("budget v3 carries the admin master fifteen", (
+            APPROVED_BUDGETS["admin_master"] == 15
             and APPROVED_BUDGETS["procedure_create"] == 1
             and len(APPROVED_BUDGETS) == 18
         )),

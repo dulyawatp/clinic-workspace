@@ -39,7 +39,9 @@ SITE = "marley-sit.local"
 
 # Family-master inventory the SIT lanes seed through the admin contract. Design
 # Amendment A1 (budget v3) added the two prerequisites the install lacks: ``uom``
-# and ``supplier_group``.
+# and ``supplier_group``. Amendment A1.1 added ``practitioner`` (one Healthcare
+# Practitioner for the SIT doctor user); it is order-independent relative to the
+# admin chain.
 MASTER_DOCTYPES = {
     "supplier_group": "Supplier Group",
     "uom": "UOM",
@@ -50,7 +52,12 @@ MASTER_DOCTYPES = {
     "price_list": "Price List",
     "mode_of_payment": "Mode of Payment",
     "procedure_template": "Clinical Procedure Template",
+    "practitioner": "Healthcare Practitioner",
 }
+
+# The SIT A user the practitioner row links (Amendment A1.1). The real user is
+# created in the 11B window, so absence is reported, never a refusal.
+PRACTITIONER_LINK_USER = "sit.doc@example.invalid"
 
 failures: list[str] = []
 
@@ -86,13 +93,18 @@ def masters_order_problems(inventory):
     return problems
 
 
-def masters_prerequisite_problems(company, inventory):
+def masters_prerequisite_problems(company, inventory, practitioner=None):
     """Return the named D2 data-prerequisite problems for the master lanes.
 
     The admin contract refuses every master op pre-fence when no company
     resolves, so the preflight refuses it here instead of letting a lane
     discover it. UOM and Supplier Group are contract masters now: their absence
     is the next seed step, reported, never a refusal.
+
+    Amendment A1.1 adds the practitioner kind: its mandatory Link targets are
+    read from the installed meta (probe) and any zero-row target is a refusal,
+    because the contract would refuse the op. The linked SIT user is reported
+    separately — it is created in the 11B window — and never refused here.
     """
 
     problems = []
@@ -102,6 +114,33 @@ def masters_prerequisite_problems(company, inventory):
         )
     if not isinstance(inventory, dict):
         problems.append("master inventory unreadable")
+    if practitioner is not None:
+        problems.extend(practitioner_prerequisite_problems(practitioner))
+    return problems
+
+
+def practitioner_prerequisite_problems(practitioner):
+    """Return the named A1.1 problems for the practitioner master op."""
+
+    if not isinstance(practitioner, dict):
+        return ["practitioner probe unreadable"]
+    problems = []
+    link_user = practitioner.get("link_user")
+    if not isinstance(link_user, str) or not link_user.strip():
+        # A malformed probe target is a configuration defect; a user that is
+        # merely absent is reported, because the 11B window creates it.
+        problems.append("practitioner link user is not configured")
+    links = practitioner.get("links")
+    if not isinstance(links, dict):
+        problems.append("practitioner link targets unreadable")
+        return problems
+    for field, rows in sorted(links.items()):
+        if not isinstance(rows, int) or isinstance(rows, bool) or rows < 0:
+            problems.append(f"practitioner link rows unreadable for {field}")
+        elif rows == 0:
+            problems.append(
+                f"no rows installed for the mandatory practitioner link {field}"
+            )
     return problems
 
 
@@ -143,6 +182,7 @@ def selfcheck() -> int:
         "price_list": 0,
         "mode_of_payment": 0,
         "procedure_template": 0,
+        "practitioner": 0,
     }
     good_report = {
         "finance": {
@@ -223,6 +263,57 @@ def selfcheck() -> int:
         (
             "an unreadable inventory is refused by the prerequisite check",
             bool(masters_prerequisite_problems("SIT Synthetic Company", None)),
+        ),
+        (
+            "a practitioner row is order-independent of the admin chain",
+            not masters_order_problems(
+                dict(good_inventory, practitioner=1)
+            ),
+        ),
+        (
+            "the practitioner probe reports its links and the SIT A user",
+            "'practitioner'" in masters_probe_script()
+            and PRACTITIONER_LINK_USER in masters_probe_script(),
+        ),
+        (
+            "a practitioner with no mandatory links passes",
+            not practitioner_prerequisite_problems(
+                {"links": {}, "link_user": PRACTITIONER_LINK_USER}
+            ),
+        ),
+        (
+            "a missing practitioner link user is a configuration refusal",
+            bool(
+                practitioner_prerequisite_problems(
+                    {"links": {}, "link_user": ""}
+                )
+            ),
+        ),
+        (
+            "a zero-row mandatory practitioner link is refused",
+            bool(
+                practitioner_prerequisite_problems(
+                    {"links": {"gender": 0}, "link_user": PRACTITIONER_LINK_USER}
+                )
+            ),
+        ),
+        (
+            "an unreadable practitioner probe is refused",
+            bool(practitioner_prerequisite_problems(None)),
+        ),
+        (
+            "an unreadable practitioner link map is refused",
+            bool(practitioner_prerequisite_problems({"links": None})),
+        ),
+        (
+            "the masters prerequisite check includes the practitioner probe",
+            bool(
+                masters_prerequisite_problems(
+                    "SIT Synthetic Company",
+                    good_inventory,
+                    {"links": {"gender": 0}},
+                )
+            ),
         ),
         ("a pinned boundary passes", not boundary_sha_problems(good_report)),
         (
@@ -307,10 +398,13 @@ def masters_probe_script() -> str:
 
     The company resolution mirrors the contract's own resolver (Global Defaults,
     then the frappe-16 database default, then exactly one Company row) so the
-    preflight reports the same state the admin master ops will see.
+    preflight reports the same state the admin master ops will see. Amendment
+    A1.1 also reports every mandatory Link field on Healthcare Practitioner with
+    its installed row count, plus whether the SIT A link user exists (read-only).
     """
 
     doctypes = repr(dict(MASTER_DOCTYPES))
+    link_user = repr(PRACTITIONER_LINK_USER)
     return (
         "cd sites && ../env/bin/python - <<'PY'\n"
         "import json\n"
@@ -318,16 +412,32 @@ def masters_probe_script() -> str:
         f"frappe.init(site={SITE!r}, sites_path='.')\n"
         "frappe.connect()\n"
         f"doctypes = {doctypes}\n"
+        f"link_user = {link_user}\n"
         "company = frappe.db.get_single_value('Global Defaults', 'default_company')\n"
         "if not company:\n"
         "    company = frappe.db.get_default('company')\n"
         "if not company:\n"
         "    rows = frappe.get_all('Company', pluck='name') or ()\n"
         "    company = rows[0] if len(rows) == 1 else None\n"
+        "meta = frappe.get_meta('Healthcare Practitioner')\n"
+        "links = {}\n"
+        "for field in meta.fields or ():\n"
+        "    if getattr(field, 'fieldtype', None) != 'Link':\n"
+        "        continue\n"
+        "    if not getattr(field, 'reqd', 0):\n"
+        "        continue\n"
+        "    if not getattr(field, 'options', None):\n"
+        "        continue\n"
+        "    links[field.fieldname] = int(frappe.db.count(field.options))\n"
         "print(json.dumps({\n"
         "    'company': company,\n"
         "    'masters': {kind: frappe.db.count(doctype)\n"
         "                for kind, doctype in doctypes.items()},\n"
+        "    'practitioner': {\n"
+        "        'links': links,\n"
+        "        'link_user': link_user,\n"
+        "        'link_user_exists': bool(frappe.db.exists('User', link_user)),\n"
+        "    },\n"
         "}))\n"
         "PY"
     )
@@ -449,11 +559,16 @@ def run_masters() -> int:
     report = json.loads(probe.stdout)
     inventory = report.get("masters") if isinstance(report, dict) else None
     company = report.get("company") if isinstance(report, dict) else None
+    practitioner = (
+        report.get("practitioner") if isinstance(report, dict) else None
+    )
     if not isinstance(inventory, dict):
         print("REFUSE masters: master inventory unreadable")
         return 1
     problems = masters_order_problems(inventory)
-    prerequisites = masters_prerequisite_problems(company, inventory)
+    prerequisites = masters_prerequisite_problems(
+        company, inventory, practitioner
+    )
     if isinstance(company, str) and company.strip():
         print(f"INFO admin company: {company}")
     for kind, doctype in MASTER_DOCTYPES.items():
@@ -461,7 +576,26 @@ def run_masters() -> int:
         state = "absent" if count == 0 else f"present ({count})"
         if kind in ("uom", "supplier_group") and count == 0:
             state += " — the contract seeds it first (budget v3)"
+        if kind == "practitioner" and count == 0:
+            state += " — the contract creates it (Amendment A1.1)"
         print(f"INFO master {kind} ({doctype}): {state}")
+    if isinstance(practitioner, dict):
+        links = practitioner.get("links")
+        if isinstance(links, dict) and links:
+            for field, rows in sorted(links.items()):
+                print(
+                    f"INFO practitioner mandatory link {field}: {rows} row(s)"
+                )
+        elif isinstance(links, dict):
+            print(
+                "INFO practitioner mandatory links: none on this installed meta"
+            )
+        user = practitioner.get("link_user")
+        if user:
+            state = "present" if practitioner.get("link_user_exists") else (
+                "absent — created in the 11B window"
+            )
+            print(f"INFO practitioner link user {user}: {state}")
     for problem in problems:
         print(f"REFUSE master order: {problem}")
     for problem in prerequisites:
