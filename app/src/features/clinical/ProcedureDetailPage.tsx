@@ -17,6 +17,13 @@ import { opsData } from "../../fixtures/data-ops";
 import { translateClinicalText } from "../../i18n";
 import { formatDate, formatDateTime } from "../../i18n/format";
 import { useLocale } from "../../i18n/LocaleProvider";
+import {
+  completeNativeProcedure,
+  NativeProcedureWriteError,
+} from "../../transport/native/procedure-write";
+import { useCapabilities } from "../shell/CapabilityProvider";
+import { Button as GateButton } from "../../ui/Button";
+import { WriteGate } from "../../ui/WriteGate";
 import { StatePanel } from "../../ui/StatePanel";
 import {
   patientLabel,
@@ -24,21 +31,166 @@ import {
   roomLabel,
   templateName,
 } from "./sample-scope";
+import { useProcedureWriteLock } from "./useProcedureWriteLock";
+
+function nativeFailureKey(code: string): string {
+  switch (code) {
+    case "validation":
+      return "procedureWrite.invalid";
+    case "forbidden":
+    case "auth":
+      return "procedureWrite.forbidden";
+    case "conflict":
+      return "procedureWrite.conflict";
+    case "uncertain":
+      return "procedureWrite.uncertain";
+    default:
+      return "procedureWrite.locked";
+  }
+}
+
+/**
+ * Native completion of one server-owned procedure target.
+ *
+ * The workspace procedure id is the only identifier here; the consumables and
+ * the stock preview stay read-only (the designed preview is unchanged) because
+ * the stock movement belongs to the one server transaction. Completion is
+ * confirmation-gated, DOC-only, and locked after one attempt: a second call
+ * would post a second Stock Entry, so the server refuses it and this button
+ * stays locked until an operator resolves the state.
+ */
+function NativeProcedureCompletion({ workspaceId }: { workspaceId: string }) {
+  const { t } = useTranslation();
+  const { session } = useSession();
+  const roles = session?.user.roles ?? [];
+  const isDoctor = roles.includes("DOC");
+  const { locked, refreshLock } = useProcedureWriteLock();
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [completed, setCompleted] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const unavailable = completed || locked;
+
+  async function submit() {
+    if (saving || unavailable) return;
+    setSaving(true);
+    setFailure(null);
+    try {
+      await completeNativeProcedure({
+        operation_key: crypto.randomUUID(),
+        procedure: workspaceId,
+      });
+      setCompleted(true);
+      setOpen(false);
+    } catch (error) {
+      setFailure(
+        error instanceof NativeProcedureWriteError
+          ? nativeFailureKey(error.code)
+          : "procedureWrite.uncertain",
+      );
+    } finally {
+      setSaving(false);
+      refreshLock();
+    }
+  }
+
+  return (
+    <div data-surface="DOC-03" data-testid="procedure-native-complete">
+      <PageHeader
+        breadcrumb={<Link to={ROUTES.home}>{t("action.goHome")}</Link>}
+        title={t("surface.DOC-03")}
+      />
+      <div className="pc-page__body">
+        <Card
+          title={`${workspaceId} · ${t("procedureWrite.title")}`}
+          actions={
+            completed ? (
+              <Badge tone="success">{t("procedureWrite.completed")}</Badge>
+            ) : (
+              <Badge tone="warning">{t("status.inProgress")}</Badge>
+            )
+          }
+        >
+          <p className="pc-note">{t("procedureWrite.notice")}</p>
+          <p className="pc-note" data-testid="procedure-write-stock-note">
+            {t("procedureWrite.stockNote")}
+          </p>
+          <div className="pc-row">
+            {isDoctor ? (
+              <WriteGate capability="write.procedure.complete">
+                <GateButton
+                  variant="primary"
+                  onClick={() => setOpen(true)}
+                  disabled={unavailable}
+                >
+                  {t("procedureWrite.completeAction")}
+                </GateButton>
+              </WriteGate>
+            ) : (
+              <p className="pc-note">{t("procedureWrite.doctorOnly")}</p>
+            )}
+            {unavailable && !completed && (
+              <Badge tone="danger">{t("procedureWrite.locked")}</Badge>
+            )}
+          </div>
+          {completed && (
+            <p className="pc-status-line">{t("procedureWrite.completed")}</p>
+          )}
+          {failure && (
+            <p className="pc-error" role="alert">
+              {t(failure)}
+            </p>
+          )}
+        </Card>
+      </div>
+
+      {open && (
+        <Drawer
+          title={t("procedureWrite.completeAction")}
+          onClose={() => setOpen(false)}
+          footer={
+            <div className="pc-row">
+              <Button variant="ghost" onClick={() => setOpen(false)}>
+                {t("action.close")}
+              </Button>
+              <Button
+                variant="primary"
+                onClick={submit}
+                disabled={saving || unavailable}
+              >
+                {t("action.confirm")}
+              </Button>
+            </div>
+          }
+        >
+          <div className="pc-stack">
+            <p>{t("procedureWrite.confirmBody", { procedure: workspaceId })}</p>
+            <p className="pc-note">{t("procedureWrite.stockNote")}</p>
+          </div>
+        </Drawer>
+      )}
+    </div>
+  );
+}
 
 /**
  * DOC-03 procedure detail.
  *
  * Consumables come from the authored procedure template and are resolved to
  * real sample lots; the preview recomputes `before → after` from the lot
- * quantity instead of copying a total. Completion is a single local sample
- * transition — the screen states that real consumption needs one verified
- * server transaction and offers no transport.
+ * quantity instead of copying a total. For the sample rows completion is a
+ * single local sample transition. A workspace procedure id that is not an
+ * authored row is the native surface: it renders the same designed page only
+ * when the deployment advertises the procedure write capability, and its
+ * completion is one confirmed server transaction.
  */
 export function ProcedureDetailPage() {
   const { t } = useTranslation();
   const { locale } = useLocale();
   const { id } = useParams();
   const { session } = useSession();
+  const { get } = useCapabilities();
   const roles = session?.user.roles ?? [];
   const procedure = id ? procedureById(id) : null;
   const [previewed, setPreviewed] = useState(false);
@@ -47,6 +199,9 @@ export function ProcedureDetailPage() {
   const [error, setError] = useState<string | null>(null);
 
   if (!procedure) {
+    if (id && get("write.procedure.complete") === "enabled") {
+      return <NativeProcedureCompletion workspaceId={id} />;
+    }
     return (
       <div data-surface="DOC-03" data-testid="procedure-detail">
         <PageHeader title={t("surface.DOC-03")} />
