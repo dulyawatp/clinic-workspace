@@ -153,8 +153,8 @@
 - Modify: `deploy/local-sit/bin/verify.py` (expected enabled-write set becomes site-config dependent: assert the five current + any opened family write set from config, plus new capability IDs present in bootstrap), preflight script (family-master preflight checks)
 - Modify: deploy scripts for role-map config keys (new codes)
 - Test: verifier self-check; run against sit AFTER Task 10 deploy
-- [ ] Verifier keeps asserting `write.appointment.cancel`… semantics per approved design; new kinds' READ_ONLY state asserted until their gates open.
-- [ ] Preflight ruling (2026-11-16): `stock_receive` and `purchase_receipt` are distinct fence kinds; SIT C performs TWO receipt ops — one standalone receipt (kind `stock_receive`) and one PO-referenced receipt (kind `purchase_receipt`) — each consuming its own budget line.
+- [x] Verifier keeps asserting `write.appointment.cancel`… semantics per approved design; new kinds' READ_ONLY state asserted until their gates open.
+- [x] Preflight ruling (2026-11-16): `stock_receive` and `purchase_receipt` are distinct fence kinds; SIT C performs TWO receipt ops — one standalone receipt (kind `stock_receive`) and one PO-referenced receipt (kind `purchase_receipt`) — each consuming its own budget line.
 
 ### Task 10: Redeploy (approved pattern, frozen source)
 
