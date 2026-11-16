@@ -19,6 +19,7 @@ import { formatDate, formatDateTime } from "../../i18n/format";
 import { useLocale } from "../../i18n/LocaleProvider";
 import {
   completeNativeProcedure,
+  createNativeProcedure,
   NativeProcedureWriteError,
 } from "../../transport/native/procedure-write";
 import { useCapabilities } from "../shell/CapabilityProvider";
@@ -31,7 +32,26 @@ import {
   roomLabel,
   templateName,
 } from "./sample-scope";
-import { useProcedureWriteLock } from "./useProcedureWriteLock";
+import {
+  useProcedureCreateLock,
+  useProcedureWriteLock,
+} from "./useProcedureWriteLock";
+
+function createFailureKey(code: string): string {
+  switch (code) {
+    case "validation":
+      return "procedureCreate.invalid";
+    case "forbidden":
+    case "auth":
+      return "procedureCreate.forbidden";
+    case "conflict":
+      return "procedureCreate.conflict";
+    case "uncertain":
+      return "procedureCreate.uncertain";
+    default:
+      return "procedureCreate.locked";
+  }
+}
 
 function nativeFailureKey(code: string): string {
   switch (code) {
@@ -50,6 +70,96 @@ function nativeFailureKey(code: string): string {
 }
 
 /**
+ * Native creation of one Clinical Procedure from a submitted Service Request.
+ *
+ * The actor types the Service Request they were told to use (the encounter
+ * cascade creates it); the server reads every procedure field from that request
+ * and returns the workspace alias completion uses. One explicit submit, no
+ * retry: the form locks after one attempt and stays locked until an operator
+ * reconciles the server state.
+ */
+function NativeProcedureCreation() {
+  const { t } = useTranslation();
+  const { locked, refreshLock } = useProcedureCreateLock();
+  const [serviceRequest, setServiceRequest] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [created, setCreated] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || locked) return;
+    const request = serviceRequest.trim();
+    if (!request) {
+      setFailure("procedureCreate.invalid");
+      return;
+    }
+    setFailure(null);
+    setSaving(true);
+    try {
+      const result = await createNativeProcedure({
+        operation_key: crypto.randomUUID(),
+        service_request: request,
+      });
+      setCreated(result.procedure.procedure_id);
+      setServiceRequest("");
+    } catch (error) {
+      setFailure(
+        error instanceof NativeProcedureWriteError
+          ? createFailureKey(error.code)
+          : "procedureCreate.uncertain",
+      );
+    } finally {
+      setSaving(false);
+      refreshLock();
+    }
+  }
+
+  return (
+    <Card title={t("procedureCreate.title")}>
+      <p className="pc-note">{t("procedureCreate.notice")}</p>
+      <form onSubmit={(event) => void submit(event)} noValidate>
+        <div className="admin-write-field">
+          <label htmlFor="procedure-create-request">
+            {t("procedureCreate.serviceRequest")}
+          </label>
+          <input
+            id="procedure-create-request"
+            maxLength={140}
+            value={serviceRequest}
+            required
+            onChange={(event) => setServiceRequest(event.target.value)}
+          />
+        </div>
+        <div className="pc-row">
+          <GateButton
+            type="submit"
+            variant="primary"
+            disabled={saving || locked}
+          >
+            {saving ? t("procedureCreate.saving") : t("procedureCreate.action")}
+          </GateButton>
+          {locked && (
+            <Badge tone="danger">{t("procedureCreate.locked")}</Badge>
+          )}
+        </div>
+      </form>
+      {created && (
+        <p className="pc-status-line" data-testid="procedure-created">
+          {t("procedureCreate.created")}{" "}
+          <span className="ops-mono">{created}</span>
+        </p>
+      )}
+      {failure && (
+        <p className="pc-error" role="alert">
+          {t(failure)}
+        </p>
+      )}
+    </Card>
+  );
+}
+
+/**
  * Native completion of one server-owned procedure target.
  *
  * The workspace procedure id is the only identifier here; the consumables and
@@ -59,7 +169,7 @@ function nativeFailureKey(code: string): string {
  * would post a second Stock Entry, so the server refuses it and this button
  * stays locked until an operator resolves the state.
  */
-function NativeProcedureCompletion({ workspaceId }: { workspaceId: string }) {
+function NativeProcedureCompletionCard({ workspaceId }: { workspaceId: string }) {
   const { t } = useTranslation();
   const { session } = useSession();
   const roles = session?.user.roles ?? [];
@@ -96,54 +206,48 @@ function NativeProcedureCompletion({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <div data-surface="DOC-03" data-testid="procedure-native-complete">
-      <PageHeader
-        breadcrumb={<Link to={ROUTES.home}>{t("action.goHome")}</Link>}
-        title={t("surface.DOC-03")}
-      />
-      <div className="pc-page__body">
-        <Card
-          title={`${workspaceId} · ${t("procedureWrite.title")}`}
-          actions={
-            completed ? (
-              <Badge tone="success">{t("procedureWrite.completed")}</Badge>
-            ) : (
-              <Badge tone="warning">{t("status.inProgress")}</Badge>
-            )
-          }
-        >
-          <p className="pc-note">{t("procedureWrite.notice")}</p>
-          <p className="pc-note" data-testid="procedure-write-stock-note">
-            {t("procedureWrite.stockNote")}
+    <div data-testid="procedure-native-complete">
+      <Card
+        title={`${workspaceId} · ${t("procedureWrite.title")}`}
+        actions={
+          completed ? (
+            <Badge tone="success">{t("procedureWrite.completed")}</Badge>
+          ) : (
+            <Badge tone="warning">{t("status.inProgress")}</Badge>
+          )
+        }
+      >
+        <p className="pc-note">{t("procedureWrite.notice")}</p>
+        <p className="pc-note" data-testid="procedure-write-stock-note">
+          {t("procedureWrite.stockNote")}
+        </p>
+        <div className="pc-row">
+          {isDoctor ? (
+            <WriteGate capability="write.procedure.complete">
+              <GateButton
+                variant="primary"
+                onClick={() => setOpen(true)}
+                disabled={unavailable}
+              >
+                {t("procedureWrite.completeAction")}
+              </GateButton>
+            </WriteGate>
+          ) : (
+            <p className="pc-note">{t("procedureWrite.doctorOnly")}</p>
+          )}
+          {unavailable && !completed && (
+            <Badge tone="danger">{t("procedureWrite.locked")}</Badge>
+          )}
+        </div>
+        {completed && (
+          <p className="pc-status-line">{t("procedureWrite.completed")}</p>
+        )}
+        {failure && (
+          <p className="pc-error" role="alert">
+            {t(failure)}
           </p>
-          <div className="pc-row">
-            {isDoctor ? (
-              <WriteGate capability="write.procedure.complete">
-                <GateButton
-                  variant="primary"
-                  onClick={() => setOpen(true)}
-                  disabled={unavailable}
-                >
-                  {t("procedureWrite.completeAction")}
-                </GateButton>
-              </WriteGate>
-            ) : (
-              <p className="pc-note">{t("procedureWrite.doctorOnly")}</p>
-            )}
-            {unavailable && !completed && (
-              <Badge tone="danger">{t("procedureWrite.locked")}</Badge>
-            )}
-          </div>
-          {completed && (
-            <p className="pc-status-line">{t("procedureWrite.completed")}</p>
-          )}
-          {failure && (
-            <p className="pc-error" role="alert">
-              {t(failure)}
-            </p>
-          )}
-        </Card>
-      </div>
+        )}
+      </Card>
 
       {open && (
         <Drawer
@@ -175,6 +279,37 @@ function NativeProcedureCompletion({ workspaceId }: { workspaceId: string }) {
 }
 
 /**
+ * The native DOC-03 surface: one page header and the two write cards the
+ * deployment advertises (create the procedure, complete it).
+ */
+function NativeProcedureSurface({
+  workspaceId,
+  create,
+  complete,
+}: {
+  workspaceId: string;
+  create: boolean;
+  complete: boolean;
+}) {
+  const { t } = useTranslation();
+
+  return (
+    <div data-surface="DOC-03" data-testid="procedure-native">
+      <PageHeader
+        breadcrumb={<Link to={ROUTES.home}>{t("action.goHome")}</Link>}
+        title={t("surface.DOC-03")}
+      />
+      <div className="pc-page__body">
+        {create && <NativeProcedureCreation />}
+        {complete && (
+          <NativeProcedureCompletionCard workspaceId={workspaceId} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
  * DOC-03 procedure detail.
  *
  * Consumables come from the authored procedure template and are resolved to
@@ -199,8 +334,16 @@ export function ProcedureDetailPage() {
   const [error, setError] = useState<string | null>(null);
 
   if (!procedure) {
-    if (id && get("write.procedure.complete") === "enabled") {
-      return <NativeProcedureCompletion workspaceId={id} />;
+    const canComplete = get("write.procedure.complete") === "enabled";
+    const canCreate = get("write.procedure.create") === "enabled";
+    if (id && (canComplete || canCreate)) {
+      return (
+        <NativeProcedureSurface
+          workspaceId={id}
+          create={canCreate}
+          complete={canComplete}
+        />
+      );
     }
     return (
       <div data-surface="DOC-03" data-testid="procedure-detail">

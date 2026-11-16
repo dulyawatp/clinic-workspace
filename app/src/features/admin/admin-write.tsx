@@ -71,6 +71,18 @@ export const MASTER_SPECS: Record<MasterType, MasterSpec> = {
       { name: "rate", label: "adminWrite.rate", kind: "number" },
     ],
   },
+  uom: {
+    title: "adminWrite.masterUom",
+    fields: [
+      { name: "uom_name", label: "adminWrite.uomName", kind: "text", maxLength: 140 },
+    ],
+  },
+  supplier_group: {
+    title: "adminWrite.masterSupplierGroup",
+    fields: [
+      { name: "supplier_group_name", label: "adminWrite.supplierGroupName", kind: "text", maxLength: 140 },
+    ],
+  },
 };
 
 function failureKey(error: unknown): string {

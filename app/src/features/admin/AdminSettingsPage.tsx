@@ -138,6 +138,8 @@ export function AdminSettingsPage() {
                 ])}
                 empty={copy("ไม่พบรายการตามตัวกรอง", "No records match these filters")}
               />
+              <AdminMasterWriteForm masterType="uom" />
+              <AdminMasterWriteForm masterType="supplier_group" />
               <AdminMasterWriteForm masterType="warehouse" />
               <AdminMasterWriteForm masterType="supplier" />
             </>

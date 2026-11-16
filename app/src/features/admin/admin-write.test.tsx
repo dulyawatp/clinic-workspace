@@ -130,6 +130,66 @@ it("creates a warehouse from the masters surface", async () => {
   expect(await screen.findByText("สร้างข้อมูลหลักแล้ว")).toBeVisible();
 });
 
+it.each([
+  {
+    label: "สร้างหน่วยวัด",
+    field: "ชื่อหน่วยวัด",
+    masterType: "uom",
+    payload: { uom_name: "SIT Unit" },
+  },
+  {
+    label: "สร้างกลุ่มผู้จำหน่าย",
+    field: "ชื่อกลุ่มผู้จำหน่าย",
+    masterType: "supplier_group",
+    payload: { supplier_group_name: "SIT Suppliers" },
+  },
+])(
+  "creates a $masterType master from the masters surface",
+  async ({ label, field, masterType, payload }) => {
+    const user = userEvent.setup();
+    const bodies: Record<string, unknown>[] = [];
+    serve(ENABLED_USERS);
+    server.use(
+      http.post(EDIT_MASTER, async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({
+          message: {
+            status: "created",
+            master: {
+              master_type: masterType,
+              master_id: Object.values(payload)[0] as string,
+            },
+            ackToken: TOKEN,
+          },
+        });
+      }),
+      http.post(ACK, ack),
+    );
+    renderWithFixtures(<AdminSettingsPage />, {
+      role: "ADM",
+      sessionMode: "live",
+      path: `${ROUTES.adminSettings}?tab=warehouses`,
+    });
+    await screen.findByTestId("admin-settings");
+
+    await user.click(screen.getByRole("button", { name: label }));
+    await user.type(
+      screen.getByLabelText(field),
+      Object.values(payload)[0] as string,
+    );
+    await user.click(screen.getByRole("button", { name: label }));
+
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]!.master_type).toBe(masterType);
+    expect(bodies[0]!.payload).toEqual(payload);
+    expect(
+      typeof (bodies[0]!.operation_key as string) === "string" &&
+        (bodies[0]!.operation_key as string).length,
+    ).toBeGreaterThanOrEqual(16);
+    expect(await screen.findByText("สร้างข้อมูลหลักแล้ว")).toBeVisible();
+  },
+);
+
 it("hides the master forms when the master capability is read_only", async () => {
   serve({ "write.admin.user": "enabled" });
   renderWithFixtures(<AdminSettingsPage />, {

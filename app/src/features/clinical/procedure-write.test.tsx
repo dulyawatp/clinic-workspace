@@ -12,6 +12,7 @@ import { clearNativeCsrfToken } from "../../transport/native/session";
 import { ProcedureDetailPage } from "./ProcedureDetailPage";
 
 const COMPLETE = "/api/method/clinic_ui.api.procedures_write.complete";
+const CREATE = "/api/method/clinic_ui.api.procedures_write.create";
 const ACK = "/api/method/clinic_ui.api.procedures_write.ack";
 const LOCK = "clinic.procedure-write.pending";
 const TOKEN = "b".repeat(64);
@@ -155,6 +156,86 @@ it("locks and never retries when the server refuses the completion", async () =>
   expect(
     screen.getByRole("button", { name: "ยืนยันจบหัตถการ" }),
   ).toBeDisabled();
+  expect(attempts).toBe(1);
+});
+
+it("creates one procedure from a submitted service request and shows the alias", async () => {
+  const user = userEvent.setup();
+  serve({ "write.procedure.create": "enabled" });
+  const writes: string[] = [];
+  const bodies: Record<string, unknown>[] = [];
+  server.use(
+    http.post(CREATE, async ({ request }) => {
+      writes.push("create");
+      bodies.push((await request.json()) as Record<string, unknown>);
+      return HttpResponse.json({
+        message: {
+          status: "created",
+          procedure: {
+            procedure_id: "WS-PROC-NATIVE-1",
+            state: "pending",
+            status: "Pending",
+          },
+          ackToken: TOKEN,
+        },
+      });
+    }),
+    http.post(ACK, () => {
+      writes.push("ack");
+      return HttpResponse.json({ message: { acknowledged: true } });
+    }),
+  );
+  renderNative();
+
+  await user.type(
+    await screen.findByLabelText("ใบขอรับบริการ"),
+    "SR-SIT-0001",
+  );
+  await user.click(screen.getByRole("button", { name: "สร้างหัตถการ" }));
+
+  await waitFor(() => expect(writes).toEqual(["create", "ack"]));
+  expect(bodies[0]!.service_request).toBe("SR-SIT-0001");
+  expect(bodies[0]!.operation_key).toEqual(expect.any(String));
+  expect(
+    (bodies[0]!.operation_key as string).length,
+  ).toBeGreaterThanOrEqual(16);
+  expect(await screen.findByTestId("procedure-created")).toHaveTextContent(
+    "WS-PROC-NATIVE-1",
+  );
+  expect(
+    localStorage.getItem("clinic.procedure-create-write.pending"),
+  ).toBeNull();
+});
+
+it("locks creation after one refusal and does not retry", async () => {
+  const user = userEvent.setup();
+  serve({ "write.procedure.create": "enabled" });
+  let attempts = 0;
+  server.use(
+    http.post(CREATE, () => {
+      attempts += 1;
+      return HttpResponse.json(
+        { message: { code: "VALIDATION" } },
+        { status: 417 },
+      );
+    }),
+  );
+  renderNative();
+
+  await user.type(
+    await screen.findByLabelText("ใบขอรับบริการ"),
+    "SR-SIT-0002",
+  );
+  await user.click(screen.getByRole("button", { name: "สร้างหัตถการ" }));
+
+  await waitFor(() => expect(attempts).toBe(1));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    /ใบขอรับบริการ/,
+  );
+  expect(
+    localStorage.getItem("clinic.procedure-create-write.pending"),
+  ).toBe("1");
+  expect(screen.getByRole("button", { name: "สร้างหัตถการ" })).toBeDisabled();
   expect(attempts).toBe(1);
 });
 

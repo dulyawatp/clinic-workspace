@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  procedureCreateLocked,
   procedureWriteLocked,
   subscribeProcedureWriteLock,
 } from "../../transport/native/procedure-write";
@@ -17,6 +18,33 @@ export function useProcedureWriteLock(): {
 
   const refreshLock = useCallback(() => {
     setLocked(procedureWriteLocked());
+  }, []);
+
+  useEffect(() => {
+    refreshLock();
+    const unsubscribe = subscribeProcedureWriteLock(refreshLock);
+    window.addEventListener("storage", refreshLock);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("storage", refreshLock);
+    };
+  }, [refreshLock]);
+
+  return { locked, refreshLock };
+}
+
+/**
+ * Browser-visible creation lock. Same rules as the completion lock: read on
+ * every mount, never unlocked automatically.
+ */
+export function useProcedureCreateLock(): {
+  locked: boolean;
+  refreshLock: () => void;
+} {
+  const [locked, setLocked] = useState(procedureCreateLocked);
+
+  const refreshLock = useCallback(() => {
+    setLocked(procedureCreateLocked());
   }, []);
 
   useEffect(() => {

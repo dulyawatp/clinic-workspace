@@ -44,6 +44,8 @@ export const MASTER_TYPES = [
   "price_list",
   "mode_of_payment",
   "procedure_template",
+  "uom",
+  "supplier_group",
 ] as const;
 export type MasterType = (typeof MASTER_TYPES)[number];
 
