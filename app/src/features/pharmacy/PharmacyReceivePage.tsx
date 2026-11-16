@@ -24,6 +24,7 @@ import {
   SourceNote,
   useOpsFormat,
 } from "../operations/ops-ui";
+import { ReceiveStockForm } from "./stock-write";
 
 /**
  * PHA-05 purchase-order receipt. Progress comes from the submitted-receipt
@@ -247,6 +248,8 @@ export function PharmacyReceivePage() {
             </div>
           </div>
         </Card>
+
+        <ReceiveStockForm />
 
         <Card
           title={copy("รับสินค้าตามใบสั่งซื้อ", "Purchase-order receipt")}

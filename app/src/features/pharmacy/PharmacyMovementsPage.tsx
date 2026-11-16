@@ -26,6 +26,7 @@ import {
   SourceNote,
   useOpsFormat,
 } from "../operations/ops-ui";
+import { AdjustStockForm, TransferStockForm } from "./stock-write";
 
 type MovementTab = "transfer" | "usage" | "reconcile";
 
@@ -356,6 +357,9 @@ export function PharmacyMovementsPage() {
             ) : null}
           </div>
         </Card>
+
+        <TransferStockForm />
+        <AdjustStockForm />
 
         <Card
           title={copy("บัญชีคลัง", "Immutable ledger")}
