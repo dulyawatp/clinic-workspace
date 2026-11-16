@@ -1,0 +1,232 @@
+# Isolated local SIT stack: synthetic-only Marley (Frappe/ERPNext) site plus the
+# native clinic_ui React shell. See README.md for the ordered commands.
+#
+# Isolation invariants:
+# - distinct Compose project name (`marley-sit`) and explicitly named volumes;
+# - every published port is bound to 127.0.0.1 only;
+# - no service on the default network is published except the loopback frontend;
+# - the existing 127.0.0.1:18080 lab tunnel is not referenced or touched.
+#
+# Secrets are never stored in this file. They come from the Compose project `.env`
+# (a symlink to a private file outside the repository, created by
+# bin/gen-secrets.py) and are interpolated at run time.
+name: marley-sit
+
+x-frappe-image: &frappe_image
+  image: marley-sit/backend:16.6.1
+  build:
+    context: ../..
+    dockerfile: deploy/local-sit/backend.Dockerfile
+    args:
+      CLINIC_SOURCE_REV: ${CLINIC_SOURCE_REV:-unknown}
+  pull_policy: never
+
+x-frappe-app: &frappe_app
+  <<: *frappe_image
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+
+services:
+  configurator:
+    <<: *frappe_app
+    restart: "no"
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host db;
+        bench set-config -gp db_port 3306;
+        bench set-config -g redis_cache "redis://redis-cache:6379";
+        bench set-config -g redis_queue "redis://redis-queue:6379";
+        bench set-config -g redis_socketio "redis://redis-queue:6379";
+        bench set-config -gp socketio_port 9000
+
+  create-site:
+    <<: *frappe_app
+    restart: "no"
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - |
+        set -e
+        wait-for-it -t 180 db:3306
+        wait-for-it -t 180 redis-cache:6379
+        wait-for-it -t 180 redis-queue:6379
+        start=$(date +%s)
+        until [ -n "$(grep -hs ^ sites/common_site_config.json | jq -r '.db_host // empty')" ] \
+          && [ -n "$(grep -hs ^ sites/common_site_config.json | jq -r '.redis_cache // empty')" ] \
+          && [ -n "$(grep -hs ^ sites/common_site_config.json | jq -r '.redis_queue // empty')" ]; do
+          echo "Waiting for sites/common_site_config.json to be created"
+          sleep 5
+          if [ $(( $(date +%s) - start )) -gt 180 ]; then
+            echo "could not find sites/common_site_config.json with required keys"
+            exit 1
+          fi
+        done
+        echo "sites/common_site_config.json found"
+        if [ -d "sites/$$SIT_SITE" ]; then
+          echo "site $$SIT_SITE already exists, skipping creation"
+        else
+          bench new-site "$$SIT_SITE" \
+            --mariadb-user-host-login-scope=% \
+            --admin-password="$$SIT_ADMIN_PASSWORD" \
+            --db-root-username=root \
+            --db-root-password="$$DB_ROOT_PASSWORD" \
+            --install-app erpnext \
+            --install-app healthcare \
+            --set-default
+          bench --site "$$SIT_SITE" install-app clinic_ui
+        fi
+    environment:
+      SIT_SITE: ${SIT_SITE:-marley-sit.local}
+      SIT_ADMIN_PASSWORD: ${SIT_ADMIN_PASSWORD:?run bin/gen-secrets.py first}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?run bin/gen-secrets.py first}
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+
+  provision:
+    <<: *frappe_app
+    restart: "no"
+    working_dir: /home/frappe/frappe-bench/sites
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - /home/frappe/frappe-bench/env/bin/python /opt/sit/provision.py
+    environment:
+      SIT_SITE: ${SIT_SITE:-marley-sit.local}
+      SIT_EPOCH_SECRET: ${SIT_EPOCH_SECRET:?run bin/gen-secrets.py first}
+      SIT_DOC_PASSWORD: ${SIT_DOC_PASSWORD:?}
+      SIT_NUR_PASSWORD: ${SIT_NUR_PASSWORD:?}
+      SIT_REC_PASSWORD: ${SIT_REC_PASSWORD:?}
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - ./provision.py:/opt/sit/provision.py:ro
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+
+  backend:
+    <<: *frappe_app
+    restart: unless-stopped
+    environment:
+      GUNICORN_THREADS: "4"
+      GUNICORN_WORKERS: "2"
+      GUNICORN_TIMEOUT: "120"
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  frontend:
+    <<: *frappe_image
+    restart: unless-stopped
+    command:
+      - nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      SOCKETIO: websocket:9000
+      NGINX_LISTEN_PORT: "8080"
+      FRAPPE_SITE_NAME_HEADER: ${SIT_SITE:-marley-sit.local}
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: "120"
+      CLIENT_MAX_BODY_SIZE: 50m
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    ports:
+      - "127.0.0.1:18081:8080"
+    depends_on:
+      - backend
+      - websocket
+
+  websocket:
+    <<: *frappe_app
+    restart: unless-stopped
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  queue-short:
+    <<: *frappe_app
+    restart: unless-stopped
+    command: bench worker --queue short,default
+    environment:
+      FRAPPE_REDIS_CACHE: redis://redis-cache:6379
+      FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  queue-long:
+    <<: *frappe_app
+    restart: unless-stopped
+    command: bench worker --queue long,default,short
+    environment:
+      FRAPPE_REDIS_CACHE: redis://redis-cache:6379
+      FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  scheduler:
+    <<: *frappe_app
+    restart: unless-stopped
+    command: bench schedule
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  db:
+    # Immutable multi-arch digest, verified from the pulled tag on 2026-11-14.
+    image: mariadb:11.8@sha256:d36f18d65a0459510b8b0f643b226a6d299e3206486e2b64ff20754a6d291707
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --innodb-snapshot-isolation=OFF
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?run bin/gen-secrets.py first}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?run bin/gen-secrets.py first}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 10s
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis-cache:
+    # Immutable multi-arch digest, verified from the pulled tag on 2026-11-14.
+    image: redis:6.2-alpine@sha256:3f9c6e23ed6bea3b41d0ef709fc164c1a0b7c00d5a21a60e0e9c33ada5496881
+    restart: unless-stopped
+
+  redis-queue:
+    image: redis:6.2-alpine@sha256:3f9c6e23ed6bea3b41d0ef709fc164c1a0b7c00d5a21a60e0e9c33ada5496881
+    restart: unless-stopped
+    volumes:
+      - redis-queue-data:/data
+
+volumes:
+  sites:
+    name: marley-sit-sites
+  logs:
+    name: marley-sit-logs
+  db-data:
+    name: marley-sit-db-data
+  redis-queue-data:
+    name: marley-sit-redis-queue-data
