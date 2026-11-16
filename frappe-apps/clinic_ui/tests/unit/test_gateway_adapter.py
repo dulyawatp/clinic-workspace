@@ -3537,6 +3537,153 @@ class AdminTypedFactsTests(GatewayTestCase):
         self.assertEqual(facts["enabled"], 1)
 
 
+class AdminRoleTableStub(AmendmentStub):
+    """Models the installed User-roles child table (``Has Role``).
+
+    On the site ``User.roles`` is a Table whose options are ``Has Role``, and
+    every installed User role row carries parenttype ``User`` / parentfield
+    ``roles``. The core ``User Role`` child doctype is *also* installed and
+    holds zero rows, so a reader pointed at it returns ``[]`` without raising.
+    """
+
+    def __init__(self, *, user="sit.doc@example.invalid", roles=(), extra_rows=()):
+        super().__init__(user=user)
+        self.queries = []
+        self.missing_doctypes = set()
+        self.db.values[(admin_contract.USER_DOCTYPE, user, "name")] = user
+        self.db.values[(admin_contract.USER_DOCTYPE, user, "enabled")] = 1
+        self.child_rows = {
+            admin_contract.USER_ROLES_DOCTYPE: [
+                {
+                    "name": f"{user}-role-{index}",
+                    "parent": user,
+                    "parenttype": admin_contract.USER_ROLES_PARENTTYPE,
+                    "parentfield": admin_contract.USER_ROLES_PARENTFIELD,
+                    "role": role,
+                }
+                for index, role in enumerate(roles)
+            ]
+            + [dict(row) for row in extra_rows],
+            # Installed on the site and empty: the wrong table reads as no roles.
+            "User Role": [],
+        }
+
+    def get_all(self, doctype, filters=None, limit=None, pluck=None, **kwargs):
+        if doctype in self.missing_doctypes:
+            raise KeyError(f"DocType {doctype} is not installed")
+        filters = dict(filters or {})
+        self.queries.append((doctype, filters))
+        rows = [
+            row
+            for row in self.child_rows.get(doctype, [])
+            if all(row.get(field) == value for field, value in filters.items())
+        ]
+        if pluck:
+            return [row.get(pluck) for row in rows]
+        return rows
+
+
+class AdminUserRoleFactsTests(GatewayTestCase):
+    """Review round 4: the user facts read the installed roles child table.
+
+    The observed site failure: the reader asked ``User Role`` for the roles,
+    which is installed and empty, so the post-claim compare saw ``roles: []``,
+    said "created user roles differ from the request", raised ``WriteUncertain``
+    after the claim and latched the site. Same class as the round-3 typed-facts
+    bug, different root cause.
+    """
+
+    USER = "sit.doc@example.invalid"
+    ROLES = ("Item Manager", "Laboratory User")
+
+    def stub_and_gateway(self, roles=None, extra_rows=()):
+        stub = AdminRoleTableStub(
+            user=self.USER,
+            roles=self.ROLES if roles is None else roles,
+            extra_rows=extra_rows,
+        )
+        return stub, self.gateway(stub)
+
+    def expected(self, roles=None):
+        return {
+            "identifier": self.USER,
+            "roles": tuple(self.ROLES if roles is None else roles),
+            "practitioner": None,
+        }
+
+    def test_the_reader_queries_the_installed_child_table(self):
+        stub, gateway = self.stub_and_gateway()
+
+        gateway.native_admin_user_facts(self.USER)
+
+        self.assertEqual(
+            stub.queries,
+            [
+                (
+                    admin_contract.USER_ROLES_DOCTYPE,
+                    {
+                        "parent": self.USER,
+                        "parenttype": admin_contract.USER_ROLES_PARENTTYPE,
+                        "parentfield": admin_contract.USER_ROLES_PARENTFIELD,
+                    },
+                )
+            ],
+        )
+
+    def test_a_roles_round_trip_passes_the_contract(self):
+        stub, gateway = self.stub_and_gateway()
+
+        facts = gateway.native_admin_user_facts(self.USER)
+
+        self.assertEqual(facts["roles"], list(self.ROLES))
+        self.assertIsNone(
+            admin_contract.user_facts_problem(facts, self.expected())
+        )
+
+    def test_a_row_for_another_parenttype_is_not_read(self):
+        stub, gateway = self.stub_and_gateway(
+            extra_rows=(
+                {
+                    "name": "role-profile-row",
+                    "parent": self.USER,
+                    "parenttype": "Role Profile",
+                    "parentfield": "roles",
+                    "role": "System Manager",
+                },
+            )
+        )
+
+        facts = gateway.native_admin_user_facts(self.USER)
+
+        self.assertEqual(facts["roles"], list(self.ROLES))
+        self.assertIsNone(
+            admin_contract.user_facts_problem(facts, self.expected())
+        )
+
+    def test_the_empty_core_user_role_table_is_the_observed_defect(self):
+        stub, gateway = self.stub_and_gateway()
+
+        # Exactly what the site shows: the wrong table exists and is empty.
+        self.assertEqual(
+            stub.get_all("User Role", filters={"parent": self.USER}, pluck="role"),
+            [],
+        )
+        facts = dict(
+            gateway.native_admin_user_facts(self.USER), roles=[]
+        )
+        self.assertEqual(
+            admin_contract.user_facts_problem(facts, self.expected()),
+            "created user roles differ from the request",
+        )
+
+    def test_a_missing_child_doctype_still_fails_closed(self):
+        stub, gateway = self.stub_and_gateway()
+        stub.missing_doctypes.add(admin_contract.USER_ROLES_DOCTYPE)
+
+        with self.assertRaises(patient_write.WriteUncertain):
+            gateway.native_admin_user_facts(self.USER)
+
+
 class EncounterAmendFactsTypingTests(GatewayTestCase):
     """Review round 3 sweep: the encounter facts keep dates as ISO text.
 

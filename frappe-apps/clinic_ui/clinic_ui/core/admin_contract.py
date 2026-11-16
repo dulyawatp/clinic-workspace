@@ -3,7 +3,7 @@
 The design rulings this module encodes (they are not re-decided here):
 
 * ``create_user`` is ONE mutation per budget unit: the ``User`` row, its
-  ``User Role`` rows and the optional ``Healthcare Practitioner`` link are
+  ``Has Role`` child rows and the optional ``Healthcare Practitioner`` link are
   created together. The client supplies the password; the gateway never
   generates a secret and no credential is logged or placed in a receipt.
 * the privilege boundary is the assignable-role allowlist. Only the clinic
@@ -43,6 +43,16 @@ ADMIN_KINDS = (ADMIN_USER_KIND, ADMIN_MASTER_KIND)
 
 USER_DOCTYPE = "User"
 ROLE_DOCTYPE = "Role"
+# Review round 4: the installed User-roles child table is ``Has Role`` — the
+# ``User.roles`` field is a Table whose options are ``Has Role``, and every
+# installed User role row carries parenttype ``User`` / parentfield ``roles``.
+# The core ``User Role`` child doctype also exists on the site but holds no
+# rows, so reading it returns ``[]`` silently and the post-claim compare then
+# denounces the created user (``WriteUncertain`` after the claim = a latched
+# site). Never read ``User Role`` for a User's roles.
+USER_ROLES_DOCTYPE = "Has Role"
+USER_ROLES_PARENTTYPE = "User"
+USER_ROLES_PARENTFIELD = "roles"
 PRACTITIONER_DOCTYPE = "Healthcare Practitioner"
 WAREHOUSE_DOCTYPE = "Warehouse"
 SUPPLIER_DOCTYPE = "Supplier"

@@ -4301,8 +4301,12 @@ class Gateway:
                 else (lambda key, default=None: default)
             )
             roles = self.frappe.get_all(
-                "User Role",
-                filters={"parent": user},
+                admin_contract.USER_ROLES_DOCTYPE,
+                filters={
+                    "parent": user,
+                    "parenttype": admin_contract.USER_ROLES_PARENTTYPE,
+                    "parentfield": admin_contract.USER_ROLES_PARENTFIELD,
+                },
                 pluck="role",
             ) or ()
             practitioner = self.frappe.db.get_value(
