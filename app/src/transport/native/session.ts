@@ -97,6 +97,7 @@ const NATIVE_ENABLEABLE = new Set<string>([
   "write.medication.order",
   "write.lab.order",
   "write.procedure.complete",
+  "write.procedure.create",
   "write.invoice.void_amend",
   "write.stock.consume",
   "write.stock.receive",

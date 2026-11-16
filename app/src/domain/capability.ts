@@ -32,6 +32,7 @@ export type Capability =
   | "write.encounter.amend"
   | "write.medication.order"
   | "write.procedure.complete"
+  | "write.procedure.create"
   | "write.lab.order"
   | "write.lab.review"
   | "write.photo.consent"

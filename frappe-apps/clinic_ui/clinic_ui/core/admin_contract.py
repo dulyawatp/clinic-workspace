@@ -12,9 +12,13 @@ The design rulings this module encodes (they are not re-decided here):
   Administrator`` may NEVER be assigned through the contract; both are refused
   pre-fence with a named line.
 * ``edit_master`` is one mutation per DocType variant (warehouse, supplier,
-  item + price, price list, mode of payment + account, procedure template).
+  item + price, price list, mode of payment + account, procedure template, and
+  the two prerequisites the install lacks: UOM and Supplier Group).
   Each variant accepts exactly its designed payload keys, and duplicates are
   refused pre-fence.
+* the master prerequisites (a resolvable company, an installed UOM row for the
+  item unit, an installed Supplier Group row for the supplier) are decided
+  before the fence claim, never after it.
 * company and currency are read from the site's own records by the gateway;
   nothing here hardcodes a company or a currency.
 
@@ -42,12 +46,19 @@ ROLE_DOCTYPE = "Role"
 PRACTITIONER_DOCTYPE = "Healthcare Practitioner"
 WAREHOUSE_DOCTYPE = "Warehouse"
 SUPPLIER_DOCTYPE = "Supplier"
+UOM_DOCTYPE = "UOM"
+SUPPLIER_GROUP_DOCTYPE = "Supplier Group"
 ITEM_DOCTYPE = "Item"
 ITEM_PRICE_DOCTYPE = "Item Price"
 PRICE_LIST_DOCTYPE = "Price List"
 MODE_OF_PAYMENT_DOCTYPE = "Mode of Payment"
 PROCEDURE_TEMPLATE_DOCTYPE = "Clinical Procedure Template"
 
+# Design Amendment A1: ``uom`` and ``supplier_group`` are contract masters
+# because they are prerequisites of the approved item and supplier rows, and the
+# install has none. Order: uom -> supplier_group -> price list -> item ->
+# procedure template (warehouse, supplier and mode of payment are
+# order-independent, but supplier_group must precede supplier).
 MASTER_TYPES = (
     "warehouse",
     "supplier",
@@ -55,6 +66,8 @@ MASTER_TYPES = (
     "price_list",
     "mode_of_payment",
     "procedure_template",
+    "supplier_group",
+    "uom",
 )
 
 MASTER_DOCTYPES = {
@@ -64,7 +77,14 @@ MASTER_DOCTYPES = {
     "price_list": PRICE_LIST_DOCTYPE,
     "mode_of_payment": MODE_OF_PAYMENT_DOCTYPE,
     "procedure_template": PROCEDURE_TEMPLATE_DOCTYPE,
+    "supplier_group": SUPPLIER_GROUP_DOCTYPE,
+    "uom": UOM_DOCTYPE,
 }
+
+# The first supplier group the install/contract supplies. The supplier row needs
+# a group; the server resolves it (never the client) and refuses pre-fence when
+# no group exists.
+DEFAULT_SUPPLIER_GROUP = "All Supplier Groups"
 
 # The privilege boundary. A role is assignable only when it is one of the
 # built-in module roles, one of the five clinic Role records, or a native role
@@ -108,6 +128,8 @@ MASTER_PAYLOAD_KEYS = {
     "price_list": frozenset({"price_list_name"}),
     "mode_of_payment": frozenset({"mode_of_payment", "account"}),
     "procedure_template": frozenset({"template_name", "item_code", "rate"}),
+    "supplier_group": frozenset({"supplier_group_name"}),
+    "uom": frozenset({"uom_name"}),
 }
 
 # Installed-field preflight. Logical name -> installed candidates, per DocType.
@@ -158,6 +180,12 @@ REQUIRED_FIELDS = {
         "item_code": ("item_code",),
         "rate": ("rate",),
         "company": ("company",),
+    },
+    SUPPLIER_GROUP_DOCTYPE: {
+        "supplier_group_name": ("supplier_group_name",),
+    },
+    UOM_DOCTYPE: {
+        "uom_name": ("uom_name",),
     },
 }
 
@@ -510,7 +538,50 @@ def identifier_for(master_type, payload):
         return payload["mode_of_payment"]
     if master_type == "procedure_template":
         return payload["template_name"]
+    if master_type == "supplier_group":
+        return payload["supplier_group_name"]
+    if master_type == "uom":
+        return payload["uom_name"]
     raise AdminContractError("master_type is not supported")
+
+
+# -- pre-fence prerequisites ------------------------------------------------
+#
+# The install has no UOM and no Supplier Group rows, while the approved item row
+# links a UOM and the approved supplier row links a group. Both are contract
+# masters now (Amendment A1); the checks below are the designed pre-fence
+# refusals so a missing prerequisite can never fail *after* the fence claim.
+
+
+def _count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def prerequisite_problem(master_type, prerequisites):
+    """Return the named pre-fence prerequisite problem, or ``None``.
+
+    ``prerequisites`` is the server-read site state: the resolved company, the
+    installed UOM row count, the resolved supplier group and the installed
+    supplier-group row count. Nothing here is client input.
+    """
+
+    if master_type_problem(master_type) is not None:
+        return "master_type is not supported"
+    if not isinstance(prerequisites, dict):
+        return "master prerequisites unreadable"
+    if not _present(prerequisites.get("company")):
+        return "no company resolves for the admin surface"
+    if not _count(prerequisites.get("uom_rows")):
+        return "UOM rows are unreadable"
+    if not _count(prerequisites.get("supplier_group_rows")):
+        return "Supplier Group rows are unreadable"
+    if master_type == "item" and prerequisites["uom_rows"] == 0:
+        return "no UOM rows are installed for the item unit"
+    if master_type == "supplier" and not _present(
+        prerequisites.get("supplier_group")
+    ):
+        return "no Supplier Group rows are installed for the supplier"
+    return None
 
 
 def user_identifier(payload):
@@ -580,6 +651,12 @@ def master_facts_problem(master_type, facts, expected):
     elif master_type == "procedure_template":
         if facts.get("item_code") != payload["item_code"]:
             return "created procedure template item differs from the request"
+    elif master_type == "supplier_group":
+        if facts.get("name") != payload["supplier_group_name"]:
+            return "created supplier group differs from the request"
+    elif master_type == "uom":
+        if facts.get("name") != payload["uom_name"]:
+            return "created UOM differs from the request"
     else:
         return "master_type is not supported"
     return None

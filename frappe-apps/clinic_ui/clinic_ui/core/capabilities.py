@@ -22,6 +22,7 @@ CAPABILITY_NAMES = (
     "write.encounter.amend",
     "write.medication.order",
     "write.procedure.complete",
+    "write.procedure.create",
     "write.lab.order",
     "write.lab.review",
     "write.photo.consent",
@@ -87,6 +88,7 @@ DEPLOYMENT_GATED_WRITE_NAMES = frozenset(
         "write.medication.order",
         "write.lab.order",
         "write.procedure.complete",
+        "write.procedure.create",
         "write.invoice.void_amend",
         "write.stock.consume",
         "write.stock.receive",
@@ -124,6 +126,7 @@ def bootstrap_capabilities(
     write_encounter_complete=False,
     write_encounter_amend=False,
     write_procedure_complete=False,
+    write_procedure_create=False,
     write_stock_receive=False,
     write_stock_transfer=False,
     write_stock_adjust=False,
@@ -172,6 +175,10 @@ def bootstrap_capabilities(
     if write_procedure_complete is True:
         capabilities["write.procedure.complete"] = ENABLED_STATE
         capabilities["write.stock.consume"] = ENABLED_STATE
+    # Creating the Clinical Procedure is the family's one creation write
+    # (Amendment A1); it rides the same site-config gate as completion.
+    if write_procedure_create is True:
+        capabilities["write.procedure.create"] = ENABLED_STATE
     # Stock receive/transfer/adjust are three contract surfaces under one
     # site-config gate; bootstrap passes each only after the gate passes.
     if write_stock_receive is True:

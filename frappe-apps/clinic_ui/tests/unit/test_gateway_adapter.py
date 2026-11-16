@@ -2972,5 +2972,578 @@ class BoundaryCollectorTests(GatewayTestCase):
         self.assertEqual(drifted["enabled_milestone_trackers"], 1)
 
 
+class AmendmentDB:
+    """Read-only fake for the Amendment A1 paths (company, counts, targets)."""
+
+    def __init__(self):
+        self.single_values = {}
+        self.values = {}
+        self.defaults = {}
+        self.existing = set()
+        self.counts = {}
+
+    def get_single_value(self, doctype, fieldname):
+        return self.single_values.get((doctype, fieldname))
+
+    def get_default(self, key, *args, **kwargs):
+        return self.defaults.get(key)
+
+    def get_value(self, doctype, name, fieldname=None, as_dict=False, **kwargs):
+        if isinstance(fieldname, (list, tuple)):
+            row = {field: self.values.get((doctype, name, field)) for field in fieldname}
+            return row if as_dict else tuple(row[field] for field in fieldname)
+        return self.values.get((doctype, name, fieldname))
+
+    def exists(self, doctype, key):
+        if isinstance(key, dict):
+            return (doctype, "filter", tuple(sorted(key.items()))) in self.existing
+        return (doctype, key) in self.existing
+
+    def count(self, doctype, filters=None):
+        if filters is not None:
+            raise AssertionError("unexpected filtered count")
+        return self.counts.get(doctype, 0)
+
+
+class AmendmentDoc:
+    def __init__(self, doctype, values):
+        self.doctype = doctype
+        self.name = None
+        self.inserted = False
+        self.submitted = False
+        self.docstatus = 0
+        for field, value in values.items():
+            setattr(self, field, value)
+        self.inserted_before_submit = None
+
+    def insert(self):
+        self.inserted = True
+        if self.name is None:
+            self.name = f"{self.doctype.upper()}-NEW-1"
+
+    def submit(self):
+        self.inserted_before_submit = self.inserted
+        self.submitted = True
+        self.docstatus = 1
+
+
+class AmendmentStub(types.SimpleNamespace):
+    """Fake Frappe module for the meta, company and creation paths."""
+
+    def __init__(self, *, user="doctor@example.test"):
+        super().__init__()
+        self.session = types.SimpleNamespace(user=user, sid="sid-amendment")
+        self.local = types.SimpleNamespace(
+            site="marley.test",
+            session={},
+            response={},
+            response_headers={},
+            flags=types.SimpleNamespace(),
+        )
+        self.db = AmendmentDB()
+        self.meta_fields = {}
+        self.valid_columns = {}
+        self.permissions = set()
+        self.docs = {}
+        self.dict_docs = []
+        self.created_docs = []
+        self.all_rows = {}
+
+    def get_meta(self, doctype):
+        names = self.meta_fields.get(doctype, ())
+        return types.SimpleNamespace(
+            fields=[types.SimpleNamespace(fieldname=name) for name in names]
+        )
+
+    def get_meta_columns(self, doctype):
+        return set(self.valid_columns.get(doctype, ()))
+
+    def get_doc(self, doctype, name=None, **kwargs):
+        if isinstance(doctype, dict):
+            self.dict_docs.append(dict(doctype))
+            document = AmendmentDoc(doctype["doctype"], doctype)
+            self.created_docs.append(document)
+            return document
+        return self.docs[(doctype, name)]
+
+    def has_permission(self, doctype, ptype="read", doc=None, user=None):
+        return (doctype, ptype) in self.permissions
+
+    def get_all(self, doctype, filters=None, limit=None, pluck=None, **kwargs):
+        return list(self.all_rows.get(doctype, []))
+
+
+class AmendmentMetaFieldTests(GatewayTestCase):
+    """D1: the install preflight resolves meta fieldnames, not DB columns."""
+
+    def stub_with_meta(self):
+        stub = AmendmentStub()
+        from clinic_ui.core import admin_contract, procedure_contract
+
+        for doctype, fields in admin_contract.REQUIRED_FIELDS.items():
+            names = set()
+            for candidates in fields.values():
+                names.add(candidates[0])
+            stub.meta_fields[doctype] = sorted(
+                set(stub.meta_fields.get(doctype, ())) | names
+            )
+            stub.valid_columns[doctype] = {
+                name for name in names if name not in ("roles", "accounts")
+            }
+        for doctype, fields in procedure_contract.REQUIRED_FIELDS.items():
+            names = {candidates[0] for candidates in fields.values()}
+            stub.meta_fields[doctype] = sorted(
+                set(stub.meta_fields.get(doctype, ())) | names
+            )
+            if doctype not in stub.valid_columns:
+                stub.valid_columns[doctype] = {
+                    name for name in names if name != "items"
+                }
+        return stub
+
+    def test_user_roles_passes_on_an_install_that_has_the_table_field(self):
+        stub = self.stub_with_meta()
+        gateway = self.gateway(stub)
+
+        self.assertIsNone(gateway.native_admin_install_problem())
+        self.assertIn("roles", gateway._admin_meta_fields()["User"])
+
+    def test_the_database_column_resolution_is_the_defect(self):
+        from clinic_ui.core import admin_contract
+
+        stub = self.stub_with_meta()
+        columns = {
+            doctype: stub.get_meta_columns(doctype)
+            for doctype in admin_contract.REQUIRED_FIELDS
+        }
+
+        self.assertEqual(
+            admin_contract.install_problem(columns),
+            "missing field User.roles",
+        )
+
+    def test_procedure_items_passes_on_an_install_that_has_the_table_field(self):
+        stub = self.stub_with_meta()
+        gateway = self.gateway(stub)
+
+        self.assertIsNone(gateway.native_procedure_install_problem())
+        self.assertIn(
+            "items", gateway._procedure_meta_fields()["Clinical Procedure"]
+        )
+
+    def test_a_genuinely_missing_field_is_still_refused(self):
+        stub = self.stub_with_meta()
+        stub.meta_fields["UOM"] = []
+
+        self.assertEqual(
+            self.gateway(stub).native_admin_install_problem(),
+            "missing field UOM.uom_name",
+        )
+
+
+class CompanyResolutionTests(GatewayTestCase):
+    """D2-i: the company resolver uses frappe-16 APIs and fails closed."""
+
+    def test_global_defaults_wins(self):
+        stub = AmendmentStub()
+        stub.db.single_values[("Global Defaults", "default_company")] = "GD Company"
+        stub.all_rows["Company"] = ["Other Company"]
+
+        self.assertEqual(
+            self.gateway(stub).native_admin_company(), "GD Company"
+        )
+
+    def test_the_database_default_is_the_frappe_16_fallback(self):
+        stub = AmendmentStub()
+        stub.db.defaults["company"] = "Defaults Company"
+
+        self.assertEqual(
+            self.gateway(stub).native_admin_company(), "Defaults Company"
+        )
+
+    def test_exactly_one_company_row_is_the_deterministic_fallback(self):
+        stub = AmendmentStub()
+        stub.all_rows["Company"] = ["SIT Synthetic Company"]
+
+        self.assertEqual(
+            self.gateway(stub).native_admin_company(), "SIT Synthetic Company"
+        )
+
+    def test_two_company_rows_without_a_default_do_not_resolve(self):
+        stub = AmendmentStub()
+        stub.all_rows["Company"] = ["One", "Two"]
+
+        self.assertIsNone(self.gateway(stub).native_admin_company())
+
+    def test_nothing_resolvable_is_none_and_the_mutation_refuses(self):
+        stub = AmendmentStub()
+        gateway = self.gateway(stub)
+
+        self.assertIsNone(gateway.native_admin_company())
+        with self.assertRaises(patient_write.WriteUncertain):
+            gateway._admin_company()
+
+    def test_the_prerequisites_carry_the_resolved_state(self):
+        stub = AmendmentStub()
+        stub.all_rows["Company"] = ["SIT Synthetic Company"]
+        stub.all_rows["UOM"] = ["Nos"]
+        stub.all_rows["Supplier Group"] = ["All Supplier Groups"]
+        stub.db.counts = {"UOM": 1, "Supplier Group": 1}
+
+        self.assertEqual(
+            self.gateway(stub).native_admin_prerequisites(),
+            {
+                "company": "SIT Synthetic Company",
+                "uom_rows": 1,
+                "supplier_group": "All Supplier Groups",
+                "supplier_group_rows": 1,
+            },
+        )
+
+
+class SupplierGroupResolutionTests(GatewayTestCase):
+    def test_the_installed_root_group_is_preferred(self):
+        stub = AmendmentStub()
+        stub.db.existing.add(("Supplier Group", "All Supplier Groups"))
+        stub.all_rows["Supplier Group"] = ["All Supplier Groups", "Local"]
+
+        self.assertEqual(
+            self.gateway(stub).native_admin_supplier_group(),
+            "All Supplier Groups",
+        )
+
+    def test_exactly_one_group_is_the_deterministic_answer(self):
+        stub = AmendmentStub()
+        stub.all_rows["Supplier Group"] = ["SIT Suppliers"]
+
+        self.assertEqual(
+            self.gateway(stub).native_admin_supplier_group(), "SIT Suppliers"
+        )
+
+    def test_ambiguity_and_absence_do_not_resolve(self):
+        stub = AmendmentStub()
+        stub.all_rows["Supplier Group"] = ["One", "Two"]
+
+        self.assertIsNone(self.gateway(stub).native_admin_supplier_group())
+
+        stub.all_rows["Supplier Group"] = []
+        self.assertIsNone(self.gateway(stub).native_admin_supplier_group())
+
+
+class AdminMasterCreateTests(GatewayTestCase):
+    def stub(self):
+        stub = AmendmentStub()
+        stub.db.single_values[("Global Defaults", "default_company")] = "COMP-1"
+        stub.db.values[("Company", "COMP-1", "default_currency")] = "USD"
+        return stub
+
+    def test_a_uom_row_carries_only_its_name(self):
+        stub = self.stub()
+
+        name = self.gateway(stub).create_native_admin_master(
+            "uom", {"uom_name": "Nos"}
+        )
+
+        self.assertEqual(name, "UOM-NEW-1")
+        self.assertEqual(
+            stub.dict_docs[0],
+            {"doctype": "UOM", "uom_name": "Nos"},
+        )
+
+    def test_a_supplier_group_row_carries_only_its_name(self):
+        stub = self.stub()
+
+        name = self.gateway(stub).create_native_admin_master(
+            "supplier_group", {"supplier_group_name": "SIT Suppliers"}
+        )
+
+        self.assertEqual(name, "SUPPLIER GROUP-NEW-1")
+        self.assertEqual(
+            stub.dict_docs[0],
+            {
+                "doctype": "Supplier Group",
+                "supplier_group_name": "SIT Suppliers",
+            },
+        )
+
+    def test_a_supplier_row_links_the_resolved_group(self):
+        stub = self.stub()
+        stub.all_rows["Supplier Group"] = ["SIT Suppliers"]
+
+        self.gateway(stub).create_native_admin_master(
+            "supplier", {"supplier_name": "SIT Supplier"}
+        )
+
+        self.assertEqual(
+            stub.dict_docs[0]["supplier_group"], "SIT Suppliers"
+        )
+
+    def test_a_price_list_still_reads_the_company_currency(self):
+        stub = self.stub()
+
+        self.gateway(stub).create_native_admin_master(
+            "price_list", {"price_list_name": "Standard Selling"}
+        )
+
+        self.assertEqual(stub.dict_docs[0]["currency"], "USD")
+
+    def test_the_new_kinds_need_no_currency(self):
+        stub = self.stub()
+        stub.db.values.pop(("Company", "COMP-1", "default_currency"))
+
+        self.gateway(stub).create_native_admin_master(
+            "uom", {"uom_name": "Nos"}
+        )
+
+        self.assertEqual(len(stub.dict_docs), 1)
+
+    def test_the_new_kind_facts_are_the_row_name(self):
+        stub = self.stub()
+        stub.db.values[("UOM", "Nos", "name")] = "Nos"
+        stub.db.values[("Supplier Group", "SIT", "name")] = "SIT"
+
+        gateway = self.gateway(stub)
+        self.assertEqual(
+            gateway.native_admin_master_facts("uom", "Nos"), {"name": "Nos"}
+        )
+        self.assertEqual(
+            gateway.native_admin_master_facts("supplier_group", "SIT"),
+            {"name": "SIT"},
+        )
+
+
+class ProcedureCreateAdapterTests(GatewayTestCase):
+    REQUEST = "HLC-SR-1"
+
+    def stub(self, *, permitted=True):
+        stub = AmendmentStub()
+        if permitted:
+            stub.permissions.add(("Service Request", "read"))
+            stub.permissions.add(("Clinical Procedure", "create"))
+            stub.permissions.add(("Clinical Procedure", "submit"))
+        doc = AmendmentDoc(
+            "Service Request",
+            {
+                "name": self.REQUEST,
+                "docstatus": 1,
+                "template_dt": "Clinical Procedure Template",
+                "template_dn": "TPL-1",
+                "patient": "PAT-1",
+                "patient_name": "Patient One",
+                "patient_gender": "Female",
+                "patient_age_data": "36Y",
+                "practitioner": "HLC-PRAC-1",
+                "company": "COMP-1",
+                "billing_status": "Not Billed",
+                "occurrence_date": "2026-11-16",
+                "occurrence_time": "09:00:00",
+                "inpatient_record": None,
+            },
+        )
+        stub.db.existing.add(("Service Request", self.REQUEST))
+        stub.docs[("Service Request", self.REQUEST)] = doc
+        stub.db.values[
+            ("Clinical Procedure Template", "TPL-1", "consume_stock")
+        ] = 0
+        return stub
+
+    def test_the_pre_fence_reader_reports_an_absent_request(self):
+        stub = self.stub()
+
+        self.assertEqual(
+            self.gateway(stub).native_service_request_target("MISSING"),
+            {
+                "exists": False,
+                "docstatus": None,
+                "template_dt": None,
+                "template_dn": None,
+                "patient": None,
+                "procedure_template": None,
+                "procedure_exists": False,
+                "consume_stock": False,
+            },
+        )
+
+    def test_the_pre_fence_reader_denies_unreadable_requests(self):
+        stub = self.stub(permitted=False)
+
+        self.assertIsNone(
+            self.gateway(stub).native_service_request_target(self.REQUEST)
+        )
+
+    def test_the_pre_fence_reader_returns_the_decisions(self):
+        stub = self.stub()
+
+        values = self.gateway(stub).native_service_request_target(self.REQUEST)
+
+        self.assertTrue(values["exists"])
+        self.assertEqual(values["docstatus"], 1)
+        self.assertEqual(values["patient"], "PAT-1")
+        self.assertEqual(values["procedure_template"], "TPL-1")
+        self.assertFalse(values["procedure_exists"])
+        self.assertFalse(values["consume_stock"])
+
+    def test_an_existing_procedure_for_the_request_is_reported(self):
+        stub = self.stub()
+        stub.db.existing.add(
+            (
+                "Clinical Procedure",
+                "filter",
+                (("service_request", self.REQUEST),),
+            )
+        )
+
+        values = self.gateway(stub).native_service_request_target(self.REQUEST)
+
+        self.assertTrue(values["procedure_exists"])
+
+    def test_the_lock_reads_the_request_for_update(self):
+        stub = self.stub()
+
+        state = self.gateway(stub).lock_service_request_target(self.REQUEST)
+
+        self.assertIs(state.doc, stub.docs[("Service Request", self.REQUEST)])
+        self.assertEqual(state.procedure_template, "TPL-1")
+
+    def test_the_creation_inserts_and_submits_the_mapped_row(self):
+        stub = self.stub()
+        gateway = self.gateway(stub)
+        state = gateway.lock_service_request_target(self.REQUEST)
+
+        created = gateway.create_native_procedure(state)
+
+        self.assertEqual(created, "CLINICAL PROCEDURE-NEW-1")
+        body = stub.dict_docs[0]
+        self.assertEqual(body["doctype"], "Clinical Procedure")
+        self.assertEqual(body["patient"], "PAT-1")
+        self.assertEqual(body["procedure_template"], "TPL-1")
+        self.assertEqual(body["service_request"], self.REQUEST)
+        self.assertEqual(body["company"], "COMP-1")
+        self.assertEqual(body["patient_sex"], "Female")
+        self.assertEqual(body["patient_age"], "36Y")
+        self.assertEqual(body["practitioner"], "HLC-PRAC-1")
+        self.assertEqual(body["start_date"], "2026-11-16")
+        self.assertEqual(body["start_time"], "09:00:00")
+        self.assertEqual(body["consume_stock"], 0)
+        self.assertEqual(body["invoiced"], 0)
+
+    def test_the_creation_submits_after_the_insert(self):
+        stub = self.stub()
+        gateway = self.gateway(stub)
+        state = gateway.lock_service_request_target(self.REQUEST)
+
+        gateway.create_native_procedure(state)
+
+        self.assertEqual(len(stub.created_docs), 1)
+        document = stub.created_docs[0]
+        self.assertTrue(document.inserted)
+        self.assertTrue(document.submitted)
+        self.assertIs(document.inserted_before_submit, True)
+        self.assertEqual(document.docstatus, 1)
+
+    def test_the_creation_facts_are_read_back(self):
+        stub = self.stub()
+        stub.db.values[("Clinical Procedure", "HLC-CPR-1", "name")] = "HLC-CPR-1"
+        stub.db.values[("Clinical Procedure", "HLC-CPR-1", "patient")] = "PAT-1"
+        stub.db.values[
+            ("Clinical Procedure", "HLC-CPR-1", "procedure_template")
+        ] = "TPL-1"
+        stub.db.values[
+            ("Clinical Procedure", "HLC-CPR-1", "service_request")
+        ] = self.REQUEST
+        stub.db.values[("Clinical Procedure", "HLC-CPR-1", "docstatus")] = 1
+        stub.db.values[("Clinical Procedure", "HLC-CPR-1", "status")] = "Pending"
+
+        self.assertEqual(
+            self.gateway(stub).native_procedure_create_facts("HLC-CPR-1"),
+            {
+                "name": "HLC-CPR-1",
+                "patient": "PAT-1",
+                "procedure_template": "TPL-1",
+                "service_request": self.REQUEST,
+                "docstatus": 1,
+                "status": "Pending",
+            },
+        )
+
+    def test_a_creation_insert_failure_is_uncertain(self):
+        stub = self.stub()
+        gateway = self.gateway(stub)
+        state = gateway.lock_service_request_target(self.REQUEST)
+
+        def boom():
+            raise RuntimeError("insert rejected")
+
+        stub.get_doc = boom
+        with self.assertRaises(patient_write.WriteUncertain):
+            gateway.create_native_procedure(state)
+
+
+class GatewayAdditiveSurfaceTests(unittest.TestCase):
+    """The amendment adds method names; nothing on either family was removed."""
+
+    ADMIN_SURFACE = frozenset(
+        {
+            "native_admin_install_problem",
+            "native_admin_can_write",
+            "native_admin_can_create",
+            "native_admin_missing_roles",
+            "native_admin_user_exists",
+            "native_admin_practitioner_exists",
+            "native_admin_master_exists",
+            "native_admin_item_price_exists",
+            "native_admin_prerequisites",
+            "native_admin_company",
+            "native_admin_supplier_group",
+            "native_admin_master_rows",
+            "create_native_admin_user",
+            "create_native_admin_master",
+            "native_admin_user_facts",
+            "native_admin_master_facts",
+            "lookup_admin_receipt",
+            "list_committed_admin_receipts",
+            "acknowledge_admin_write",
+            "admin_write_fence",
+        }
+    )
+    PROCEDURE_SURFACE = frozenset(
+        {
+            "native_procedure_boundary_problem",
+            "native_procedure_install_problem",
+            "native_procedure_can_write",
+            "native_procedure_can_create",
+            "native_procedure_action_detail",
+            "native_procedure_create_facts",
+            "native_procedure_from_create_receipt",
+            "native_service_request_target",
+            "lock_service_request_target",
+            "lock_procedure_target",
+            "create_native_procedure",
+            "complete_native_procedure",
+            "native_procedure_complete_facts",
+            "native_stock_ledger_baseline",
+            "lookup_procedure_receipt",
+            "list_committed_procedure_receipts",
+            "acknowledge_procedure_write",
+            "procedure_write_fence",
+            "receipt_stock_entry",
+        }
+    )
+
+    def test_the_admin_family_surface_is_the_reviewed_set(self):
+        for name in self.ADMIN_SURFACE:
+            with self.subTest(name=name):
+                self.assertTrue(
+                    callable(getattr(frappe_gateway.Gateway, name, None))
+                )
+
+    def test_the_procedure_family_surface_is_the_reviewed_set(self):
+        for name in self.PROCEDURE_SURFACE:
+            with self.subTest(name=name):
+                self.assertTrue(
+                    callable(getattr(frappe_gateway.Gateway, name, None))
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

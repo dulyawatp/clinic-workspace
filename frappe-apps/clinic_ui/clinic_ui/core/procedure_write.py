@@ -1,15 +1,17 @@
-"""Framework-independent codecs for the Clinical Procedure completion family.
+"""Framework-independent codecs for the Clinical Procedure write family.
 
 Nothing here imports Frappe, resolves a session, reads a record or performs a
-write. It defines the durable identifier, the strict request body and the
-acknowledgement binding that surround the one native operation: driving the
-installed ``complete_procedure`` document method.
+write. It defines the durable identifiers, the strict request bodies and the
+acknowledgement binding that surround the two native operations: creating one
+Clinical Procedure from a submitted Service Request, and driving the installed
+``complete_procedure`` document method.
 
-The kind is ``procedure_complete`` and the alias prefix is ``wsp1_``, distinct
-from the patient ``wpa1_``, appointment ``wsa1_`` and encounter ``wse1_``
-namespaces. The alias names one workspace procedure target and never embeds a
-native docname; the target itself comes from the server-owned procedure
-allowlist, never from the client.
+The kinds are ``procedure_create`` and ``procedure_complete`` and the alias
+prefix is ``wsp1_``, distinct from the patient ``wpa1_``, appointment ``wsa1_``
+and encounter ``wse1_`` namespaces. An alias names one workspace procedure and
+never embeds a native docname: for completion the target comes from the
+server-owned allowlist, for creation the committed creation receipt is the only
+map between the alias and the created row.
 """
 
 from __future__ import annotations
@@ -44,9 +46,8 @@ MAX_WORKSPACE_ID_LENGTH = 192
 MAX_MODIFIED_LENGTH = 64
 
 BUDGETS = {
-    procedure_contract.PROCEDURE_COMPLETE_KIND: write_budgets.budget_for(
-        procedure_contract.PROCEDURE_COMPLETE_KIND
-    ),
+    kind: write_budgets.budget_for(kind)
+    for kind in procedure_contract.PROCEDURE_KINDS
 }
 
 RECEIPT_CODEC = "procedure"
@@ -59,6 +60,7 @@ RECEIPT_KEYS = frozenset(
         "alias",
         "native_procedure_id",
         "stock_entry",
+        "service_request",
     }
 )
 
@@ -81,12 +83,17 @@ class ProcedureBudgetExhausted(Exception):
 
 @dataclass(frozen=True)
 class ProcedureReceipt:
-    """Decoded terminal receipt for one committed procedure completion."""
+    """Decoded terminal receipt for one committed procedure write.
+
+    A completion receipt carries the driven Stock Entry; a creation receipt
+    carries the Service Request it was created from and no Stock Entry.
+    """
 
     kind: str
     alias: str
     native_procedure_id: str
     stock_entry: str
+    service_request: str
 
 
 def require_kind(kind):
@@ -180,7 +187,9 @@ def parse_alias(secret, site, actor, alias):
     return operation_key
 
 
-def encode_receipt(*, kind, alias, native_procedure_id, stock_entry=None):
+def encode_receipt(
+    *, kind, alias, native_procedure_id, stock_entry=None, service_request=None
+):
     kind = require_kind(kind)
     if not is_valid_text(alias, ALIAS_MAX_LENGTH):
         raise ProcedureWriteError("invalid receipt alias")
@@ -191,6 +200,11 @@ def encode_receipt(*, kind, alias, native_procedure_id, stock_entry=None):
         entry and not is_valid_text(entry, MAX_PROCEDURE_ID_LENGTH)
     ):
         raise ProcedureWriteError("invalid receipt stock entry")
+    request = "" if service_request is None else service_request
+    if not isinstance(request, str) or (
+        request and not is_valid_text(request, MAX_PROCEDURE_ID_LENGTH)
+    ):
+        raise ProcedureWriteError("invalid receipt service request")
     receipt = json.dumps(
         {
             "codec": RECEIPT_CODEC,
@@ -199,6 +213,7 @@ def encode_receipt(*, kind, alias, native_procedure_id, stock_entry=None):
             "alias": alias,
             "native_procedure_id": native_procedure_id,
             "stock_entry": entry,
+            "service_request": request,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -239,6 +254,7 @@ def decode_receipt(receipt):
     alias = payload["alias"]
     native_procedure_id = payload["native_procedure_id"]
     stock_entry = payload["stock_entry"]
+    service_request = payload["service_request"]
     if not is_valid_text(alias, ALIAS_MAX_LENGTH):
         raise ProcedureWriteError("invalid procedure receipt")
     if not is_valid_text(native_procedure_id, MAX_PROCEDURE_ID_LENGTH):
@@ -247,11 +263,17 @@ def decode_receipt(receipt):
         stock_entry and not is_valid_text(stock_entry, MAX_PROCEDURE_ID_LENGTH)
     ):
         raise ProcedureWriteError("invalid procedure receipt")
+    if not isinstance(service_request, str) or (
+        service_request
+        and not is_valid_text(service_request, MAX_PROCEDURE_ID_LENGTH)
+    ):
+        raise ProcedureWriteError("invalid procedure receipt")
     return ProcedureReceipt(
         kind=kind,
         alias=alias,
         native_procedure_id=native_procedure_id,
         stock_entry=stock_entry,
+        service_request=service_request,
     )
 
 
@@ -325,15 +347,20 @@ def operation_digest(secret, *, kind, operation_key, fields):
 # procedure already holds.
 
 COMPLETE_KEYS = frozenset({"procedure", "operation_key"})
+# The creation body carries the selected Service Request and the operation key.
+# Nothing else: the procedure fields, the template, the patient and the
+# practitioner all come from the server-read request.
+CREATE_KEYS = frozenset({"service_request", "operation_key"})
+MAX_SERVICE_REQUEST_LENGTH = 140
 
 
-def _require_body(body):
+def _require_body(body, allowed=COMPLETE_KEYS):
     if not isinstance(body, Mapping):
         raise ProcedureWriteError("body must be a mapping")
     for key in body:
         if not isinstance(key, str):
             raise ProcedureWriteError("body keys must be strings")
-    if set(body) - COMPLETE_KEYS:
+    if set(body) - allowed:
         raise ProcedureWriteError("unknown field")
     return body
 
@@ -364,5 +391,27 @@ def validate_complete(body):
         "kind": procedure_contract.PROCEDURE_COMPLETE_KIND,
         "operation_key": require_operation_key(body["operation_key"]),
         "procedure": _workspace_procedure(body["procedure"]),
+    }
+
+
+def validate_create(body):
+    """Return the normalized creation payload or raise ``ProcedureWriteError``.
+
+    The Service Request is the only record selector the client sends. The
+    created Clinical Procedure is never named by the client.
+    """
+
+    body = _require_body(body, CREATE_KEYS)
+    for required in ("service_request", "operation_key"):
+        if required not in body:
+            raise ProcedureWriteError(f"missing field {required}")
+    return {
+        "kind": procedure_contract.PROCEDURE_CREATE_KIND,
+        "operation_key": require_operation_key(body["operation_key"]),
+        "service_request": _require_text(
+            body["service_request"],
+            "service_request",
+            MAX_SERVICE_REQUEST_LENGTH,
+        ),
     }
 

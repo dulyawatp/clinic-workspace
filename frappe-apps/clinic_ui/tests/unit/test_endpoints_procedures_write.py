@@ -25,8 +25,10 @@ SITE = config.APPROVED_WRITE_SITE
 ACTOR = "doctor@example.test"
 CSRF = "csrf-token-value"
 KEY = "proc-complete-key-0001-01"
+CREATE_KEY = "proc-create-key-0001-01"
 WORKSPACE = "WS-PROC-1"
 NATIVE = "HLC-CPR-1"
+SERVICE_REQUEST = "HLC-SR-1"
 
 
 def write_settings(**overrides):
@@ -99,6 +101,7 @@ def gateway(**overrides):
             setattr(fake, key, value)
     fake.site_today_value = "2026-11-16"
     fake.procedure_details[NATIVE] = procedure_detail()
+    fake.service_request_states[SERVICE_REQUEST] = service_request_state()
     fake.stock_baseline = {
         "stock_ledger_rows": 5,
         "gl_rows": 10,
@@ -109,6 +112,30 @@ def gateway(**overrides):
 
 def body(**overrides):
     values = {"procedure": WORKSPACE, "operation_key": KEY}
+    values.update(overrides)
+    return values
+
+
+def service_request_state(**overrides):
+    """The server-read creation decisions for one submitted request."""
+
+    values = {
+        "exists": True,
+        "docstatus": 1,
+        "template_dt": "Clinical Procedure Template",
+        "template_dn": "TPL-1",
+        "patient": "PAT-1",
+        "procedure_template": "TPL-1",
+        "procedure_exists": False,
+        "consume_stock": False,
+        "service_request": SERVICE_REQUEST,
+    }
+    values.update(overrides)
+    return values
+
+
+def create_body(**overrides):
+    values = {"service_request": SERVICE_REQUEST, "operation_key": CREATE_KEY}
     values.update(overrides)
     return values
 
@@ -373,6 +400,227 @@ class FenceTests(unittest.TestCase):
         self.assertEqual(len(fake.procedure_fence_claim.committed), 1)
 
 
+class CreateTests(unittest.TestCase):
+    """D4: the creation path from a submitted Service Request."""
+
+    def test_creates_one_procedure_and_leaves_the_ack_to_its_endpoint(self):
+        fake = gateway()
+
+        payload = procedures_write.create(fake, create_body(), CSRF)
+
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(payload["procedure"]["state"], "pending")
+        self.assertEqual(payload["procedure"]["status"], "Pending")
+        self.assertTrue(procedure_write.is_valid_ack_token(payload["ackToken"]))
+        alias = payload["procedure"]["procedure_id"]
+        self.assertEqual(
+            alias,
+            procedure_write.build_alias(SECRET.encode(), SITE, ACTOR, CREATE_KEY),
+        )
+        self.assertNotIn("HLC-CPR", repr(payload))
+        self.assertNotIn("HLC-SR", repr(payload))
+        self.assertEqual(fake.procedure_fence_calls[0][1], "procedure_create")
+        self.assertEqual(len(fake.create_procedure_calls), 1)
+        self.assertEqual(fake.create_procedure_calls[0].patient, "PAT-1")
+        self.assertEqual(fake.commit_calls, 1)
+        self.assertEqual(fake.procedure_ack_calls, [])
+        receipt = procedure_write.decode_receipt(
+            fake.procedure_fence_claim.committed[0]
+        )
+        self.assertEqual(receipt.kind, "procedure_create")
+        self.assertEqual(receipt.service_request, SERVICE_REQUEST)
+        self.assertEqual(receipt.native_procedure_id, fake.created_procedure_id)
+        self.assertEqual(receipt.stock_entry, "")
+
+    def test_the_created_alias_completes_through_its_receipt(self):
+        fake = gateway(
+            settings=write_settings(clinic_ui_synthetic_procedures=[])
+        )
+        created = procedures_write.create(fake, create_body(), CSRF)
+        alias = created["procedure"]["procedure_id"]
+        fake.procedure_details[fake.created_procedure_id] = procedure_detail(
+            service_request=SERVICE_REQUEST
+        )
+        fake.procedure_receipt_records.append(
+            FakeProcedureReceipt(
+                "procedure_create",
+                ACTOR,
+                CREATE_KEY,
+                fake.procedure_fence_claim.committed[0],
+            )
+        )
+
+        payload = procedures_write.complete(
+            fake,
+            {
+                "procedure": alias,
+                "operation_key": "proc-complete-key-0002-01",
+            },
+            CSRF,
+        )
+
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["procedure"]["procedure_id"], alias)
+        self.assertEqual(
+            fake.complete_procedure_calls[0].as_dict()["service_request"],
+            SERVICE_REQUEST,
+        )
+
+    def test_a_missing_service_request_is_refused_before_the_fence(self):
+        fake = gateway()
+        fake.service_request_states.clear()
+
+        payload = procedures_write.create(fake, create_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.procedure_fence_calls, [])
+        self.assertEqual(fake.create_procedure_calls, [])
+
+    def test_an_unsubmitted_service_request_is_refused_before_the_fence(self):
+        fake = gateway()
+        fake.service_request_states[SERVICE_REQUEST] = service_request_state(
+            docstatus=0
+        )
+
+        payload = procedures_write.create(fake, create_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.procedure_fence_calls, [])
+
+    def test_a_non_procedure_request_is_refused_before_the_fence(self):
+        fake = gateway()
+        fake.service_request_states[SERVICE_REQUEST] = service_request_state(
+            template_dt="Lab Test Template", procedure_template=None
+        )
+
+        payload = procedures_write.create(fake, create_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.procedure_fence_calls, [])
+
+    def test_an_existing_procedure_for_the_request_is_refused_exactly_once(self):
+        fake = gateway()
+        fake.service_request_states[SERVICE_REQUEST] = service_request_state(
+            procedure_exists=True
+        )
+
+        payload = procedures_write.create(fake, create_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.procedure_fence_calls, [])
+        self.assertEqual(fake.create_procedure_calls, [])
+
+    def test_a_stock_consuming_template_is_refused_before_the_fence(self):
+        fake = gateway()
+        fake.service_request_states[SERVICE_REQUEST] = service_request_state(
+            consume_stock=True
+        )
+
+        payload = procedures_write.create(fake, create_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.procedure_fence_calls, [])
+
+    def test_a_caller_without_create_authority_is_denied(self):
+        fake = gateway()
+        fake.procedure_can_create = False
+
+        with self.assertRaises(Denied):
+            procedures_write.create(fake, create_body(), CSRF)
+        self.assertEqual(fake.procedure_fence_calls, [])
+
+    def test_a_nurse_is_denied_before_validation(self):
+        fake = gateway(
+            current_session=session_view(
+                user="nurse@example.test", roles=("Nursing User",)
+            )
+        )
+
+        with self.assertRaises(Denied):
+            procedures_write.create(fake, create_body(), CSRF)
+        self.assertEqual(fake.procedure_fence_calls, [])
+
+    def test_the_body_is_strict(self):
+        cases = (
+            {},
+            {"operation_key": KEY},
+            {"service_request": SERVICE_REQUEST},
+            {**create_body(), "procedure": "WS-PROC-1"},
+            {**create_body(), "docstatus": 1},
+            {"service_request": " " + SERVICE_REQUEST, "operation_key": KEY},
+            {"service_request": SERVICE_REQUEST, "operation_key": "short"},
+        )
+        for candidate in cases:
+            with self.subTest(candidate=candidate):
+                fake = gateway()
+                payload = procedures_write.create(fake, candidate, CSRF)
+                self.assertEqual(payload, {"code": "VALIDATION"})
+                self.assertEqual(fake.procedure_fence_calls, [])
+
+    def test_boundary_and_install_drift_fail_closed(self):
+        fake = gateway(procedure_boundary_problem="versions drift")
+        with self.assertRaises(Denied):
+            procedures_write.create(fake, create_body(), CSRF)
+
+        fake = gateway(procedure_install_problem="missing field")
+        with self.assertRaises(Denied):
+            procedures_write.create(fake, create_body(), CSRF)
+
+    def test_an_exhausted_creation_budget_is_refused_before_the_fence(self):
+        fake = gateway()
+        fake.procedure_receipt_records.append(
+            FakeProcedureReceipt(
+                "procedure_create",
+                ACTOR,
+                "proc-create-key-0001-01",
+                procedure_write.encode_receipt(
+                    kind="procedure_create",
+                    alias=procedure_write.build_alias(
+                        SECRET.encode(), SITE, ACTOR, "proc-create-key-0001-01"
+                    ),
+                    native_procedure_id="HLC-CPR-0",
+                    service_request="HLC-SR-0",
+                ),
+            )
+        )
+
+        payload = procedures_write.create(fake, create_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.procedure_fence_calls, [])
+
+    def test_a_facts_mismatch_rolls_back(self):
+        fake = gateway()
+        fake.procedure_create_facts = {"docstatus": 0}
+
+        payload = procedures_write.create(fake, create_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.procedure_fence_claim.committed, [])
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_target_that_became_ineligible_inside_the_fence_rolls_back(self):
+        fake = gateway()
+        fake.service_request_lock_error = procedure_write.ProcedureTargetNotEligible()
+
+        payload = procedures_write.create(fake, create_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.procedure_fence_claim.committed, [])
+        self.assertEqual(fake.commit_calls, 0)
+
+    def test_a_native_creation_failure_is_uncertain_without_committing(self):
+        fake = gateway()
+        fake.create_procedure_error = patient_write.WriteUncertain()
+
+        payload = procedures_write.create(fake, create_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.procedure_fence_claim.committed, [])
+
+
 class AckTests(unittest.TestCase):
     def ack_body(self, **overrides):
         values = {
@@ -408,6 +656,21 @@ class AckTests(unittest.TestCase):
 
         self.assertEqual(payload, {"code": "VALIDATION"})
         self.assertEqual(fake.procedure_ack_calls, [])
+
+    def test_a_creation_ack_is_recorded_once(self):
+        fake = gateway()
+
+        payload = procedures_write.acknowledge(
+            fake,
+            self.ack_body(kind="procedure_create", operation_key=CREATE_KEY),
+            CSRF,
+        )
+
+        self.assertEqual(payload, {"acknowledged": True})
+        self.assertEqual(
+            fake.procedure_ack_calls,
+            [(ACTOR, "procedure_create", CREATE_KEY, "a" * 64)],
+        )
 
 
 class BootstrapTests(unittest.TestCase):

@@ -7,6 +7,9 @@ they never consume a unit.
 
 The numbers are the user-approved final set for the isolated sit. Changing a
 number here changes the approved write volume for every family that reads it.
+Design Amendment A1 (2026-11-16, budget v3) is the approved set: ``admin_master``
+grew to 14 for the two new master kinds (``uom``, ``supplier_group``) and the
+procedure family gained the one ``procedure_create`` unit.
 """
 
 BUDGETS = {
@@ -15,6 +18,7 @@ BUDGETS = {
     "encounter_draft": {"budget": 2, "family": "encounter"},
     "encounter_complete": {"budget": 1, "family": "encounter"},
     "encounter_amend": {"budget": 1, "family": "encounter"},
+    "procedure_create": {"budget": 1, "family": "procedure"},
     "procedure_complete": {"budget": 1, "family": "procedure"},
     "lab_order": {"budget": 1, "family": "lab"},
     "stock_receive": {"budget": 1, "family": "stock"},
@@ -26,7 +30,7 @@ BUDGETS = {
     "invoice_submit": {"budget": 1, "family": "invoice"},
     "payment_receive": {"budget": 1, "family": "payment"},
     "admin_user": {"budget": 4, "family": "admin"},
-    "admin_master": {"budget": 12, "family": "admin"},
+    "admin_master": {"budget": 14, "family": "admin"},
 }
 
 ALL_KINDS = tuple(BUDGETS)

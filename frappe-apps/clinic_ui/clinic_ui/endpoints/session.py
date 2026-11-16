@@ -170,33 +170,40 @@ def _encounter_write_flags(gateway, settings, role):
 
 
 def _procedure_write_flags(gateway, settings, role):
-    """Return ``True`` when the procedure-completion surface is open.
+    """Return ``(complete, create)`` when the procedure surface is open.
 
     Independent of the other write flags: exact approved site, boundary and
     installed-field preflight, the procedure flag, the deployment marker, a ready
-    fence store and the caller's own native Clinical Procedure write authority.
-    The target and its price list / batch / stock state are decided per request;
-    this flag only advertises that the surface exists.
+    fence store and the caller's own native Clinical Procedure authority. The
+    target and its price list / batch / stock state are decided per request;
+    these flags only advertise that the surface exists.
+
+    Completion also needs a resolvable target: the server-owned allowlist, or
+    the creation path, because a procedure created through the contract is
+    addressable through its own committed creation receipt.
     """
 
+    disabled = (False, False)
     if role not in PROCEDURE_ROLE_CODES:
-        return False
+        return disabled
     try:
         if gateway.native_procedure_boundary_problem() is not None:
-            return False
+            return disabled
         if gateway.native_procedure_install_problem() is not None:
-            return False
+            return disabled
         if not settings.procedure_write_enabled:
-            return False
-        if not settings.procedure_allowlist:
-            return False
+            return disabled
         if gateway.write_deployment_approved() is not True:
-            return False
+            return disabled
         if gateway.write_fence_ready() is not True:
-            return False
-        return gateway.native_procedure_can_write() is True
+            return disabled
+        create_ok = gateway.native_procedure_can_create() is True
+        complete_ok = gateway.native_procedure_can_write() is True and (
+            bool(settings.procedure_allowlist) or create_ok
+        )
+        return complete_ok, create_ok
     except Exception:
-        return False
+        return disabled
 
 
 def _stock_write_flags(gateway, settings, role):
@@ -372,7 +379,7 @@ def bootstrap(gateway):
             write_encounter_complete,
             write_encounter_amend,
         ) = _encounter_write_flags(gateway, settings, role)
-        write_procedure_complete = _procedure_write_flags(
+        write_procedure_complete, write_procedure_create = _procedure_write_flags(
             gateway, settings, role
         )
         (
@@ -403,6 +410,7 @@ def bootstrap(gateway):
             write_encounter_complete=write_encounter_complete,
             write_encounter_amend=write_encounter_amend,
             write_procedure_complete=write_procedure_complete,
+            write_procedure_create=write_procedure_create,
             write_stock_receive=(
                 write_stock_receive or write_purchase_receipt
             ),

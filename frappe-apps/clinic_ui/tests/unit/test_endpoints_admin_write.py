@@ -393,6 +393,7 @@ class EditMasterTests(unittest.TestCase):
 
     def test_an_item_payload_carries_its_price(self):
         fake = gateway()
+        fake.admin_masters.add(("uom", "Nos"))
         payload = {
             "item_code": "SIT-ITEM-1",
             "item_name": "SIT Item One",
@@ -428,6 +429,8 @@ class EditMasterTests(unittest.TestCase):
                     "rate": 25.0,
                 },
             ),
+            ("supplier_group", {"supplier_group_name": "SIT Suppliers"}),
+            ("uom", {"uom_name": "Nos"}),
         )
         for master_type, payload in cases:
             with self.subTest(master_type=master_type):
@@ -439,6 +442,130 @@ class EditMasterTests(unittest.TestCase):
                 self.assertEqual(
                     fake.admin_master_create_calls[0][0], master_type
                 )
+
+    def test_a_new_kind_receipts_its_own_variant(self):
+        fake = gateway()
+
+        for master_type, payload, identifier in (
+            ("uom", {"uom_name": "Nos"}, "Nos"),
+            (
+                "supplier_group",
+                {"supplier_group_name": "SIT Suppliers"},
+                "SIT Suppliers",
+            ),
+        ):
+            with self.subTest(master_type=master_type):
+                fake = gateway()
+                result = admin_write.edit_master(
+                    fake, master_body(master_type, payload), CSRF
+                )
+                self.assertEqual(result["status"], "created")
+                self.assertEqual(result["master"]["master_type"], master_type)
+                self.assertEqual(result["master"]["master_id"], identifier)
+                receipt = admin_contract.decode_receipt(
+                    fake.admin_fence_claim.committed[0]
+                )
+                self.assertEqual(receipt.kind, "admin_master")
+                self.assertEqual(receipt.master_type, master_type)
+                self.assertEqual(receipt.identifier, identifier)
+
+    def test_a_missing_company_is_refused_before_the_fence(self):
+        fake = gateway()
+        fake.admin_prerequisites = dict(
+            fake.admin_prerequisites, company=None
+        )
+
+        payload = admin_write.edit_master(fake, master_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_master_create_calls, [])
+
+    def test_every_master_op_is_refused_when_no_company_resolves(self):
+        cases = (
+            ("warehouse", {"warehouse_name": "SIT Pharmacy"}),
+            ("uom", {"uom_name": "Nos"}),
+            ("supplier_group", {"supplier_group_name": "SIT Suppliers"}),
+        )
+        for master_type, body in cases:
+            with self.subTest(master_type=master_type):
+                fake = gateway()
+                fake.admin_prerequisites = dict(
+                    fake.admin_prerequisites, company=None
+                )
+                payload = admin_write.edit_master(
+                    fake, master_body(master_type, body), CSRF
+                )
+                self.assertEqual(payload, {"code": "VALIDATION"})
+                self.assertEqual(fake.admin_fence_calls, [])
+
+    def test_an_item_op_is_refused_when_no_uom_row_exists(self):
+        fake = gateway()
+        fake.admin_prerequisites = dict(
+            fake.admin_prerequisites, uom_rows=0
+        )
+        payload = {
+            "item_code": "SIT-ITEM-1",
+            "item_name": "SIT Item One",
+            "item_group": "All Item Groups",
+            "stock_uom": "Nos",
+            "price_list": "Standard Selling",
+            "rate": 12.5,
+        }
+
+        result = admin_write.edit_master(
+            fake, master_body("item", payload), CSRF
+        )
+
+        self.assertEqual(result, {"code": "VALIDATION"})
+        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_master_create_calls, [])
+
+    def test_an_item_op_is_refused_when_its_unit_is_not_installed(self):
+        fake = gateway()
+
+        payload = {
+            "item_code": "SIT-ITEM-1",
+            "item_name": "SIT Item One",
+            "item_group": "All Item Groups",
+            "stock_uom": "Bottle",
+            "price_list": "Standard Selling",
+            "rate": 12.5,
+        }
+
+        result = admin_write.edit_master(
+            fake, master_body("item", payload), CSRF
+        )
+
+        self.assertEqual(result, {"code": "VALIDATION"})
+        self.assertEqual(fake.admin_fence_calls, [])
+
+    def test_a_supplier_op_is_refused_when_no_supplier_group_exists(self):
+        fake = gateway()
+        fake.admin_prerequisites = dict(
+            fake.admin_prerequisites,
+            supplier_group=None,
+            supplier_group_rows=0,
+        )
+
+        payload = admin_write.edit_master(
+            fake, master_body("supplier", {"supplier_name": "SIT Supplier"}), CSRF
+        )
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_master_create_calls, [])
+
+    def test_the_prerequisites_are_read_before_the_duplicate_checks(self):
+        fake = gateway()
+        fake.admin_masters.add(("warehouse", "SIT Pharmacy"))
+
+        admin_write.edit_master(fake, master_body(), CSRF)
+
+        self.assertEqual(
+            fake.admin_prerequisites_calls[0],
+            fake.admin_prerequisites,
+        )
 
     def test_a_duplicate_master_is_refused_before_the_fence(self):
         fake = gateway()
@@ -484,7 +611,7 @@ class EditMasterTests(unittest.TestCase):
 
     def test_an_exhausted_master_budget_is_refused_before_the_fence(self):
         fake = gateway()
-        for index in range(12):
+        for index in range(14):
             committed_master(fake, f"admin-master-key-{index:04d}-01")
 
         payload = admin_write.edit_master(fake, master_body(), CSRF)

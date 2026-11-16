@@ -294,6 +294,33 @@ class ProcedureLockedState:
         }
 
 
+@dataclass(frozen=True)
+class ServiceRequestLockedState:
+    """Freshly locked Service Request values passed to the creation endpoint."""
+
+    doc: object
+    exists: bool
+    docstatus: object
+    template_dt: str | None
+    template_dn: str | None
+    patient: str | None
+    procedure_template: str | None
+    procedure_exists: bool
+    consume_stock: bool
+
+    def as_dict(self):
+        return {
+            "exists": self.exists,
+            "docstatus": self.docstatus,
+            "template_dt": self.template_dt,
+            "template_dn": self.template_dn,
+            "patient": self.patient,
+            "procedure_template": self.procedure_template,
+            "procedure_exists": self.procedure_exists,
+            "consume_stock": self.consume_stock,
+        }
+
+
 class Gateway:
     """Adapter used by the whitelisted entry points."""
 
@@ -3026,6 +3053,11 @@ class Gateway:
         )
         with open(path, "rb") as handle:
             source_sha = hashlib.sha256(handle.read()).hexdigest()
+        request_path = frappe.get_app_path(
+            "healthcare", *procedure_contract.SERVICE_REQUEST_SOURCE_PATH
+        )
+        with open(request_path, "rb") as handle:
+            request_sha = hashlib.sha256(handle.read()).hexdigest()
 
         controller = frappe.get_doc(
             {"doctype": procedure_contract.PROCEDURE_DOCTYPE}
@@ -3046,7 +3078,10 @@ class Gateway:
                 "erpnext": version("erpnext"),
                 "healthcare": version("healthcare"),
             },
-            "source_sha256": {"clinical_procedure": source_sha},
+            "source_sha256": {
+                "clinical_procedure": source_sha,
+                "service_request": request_sha,
+            },
             "complete_method": procedure_contract.COMPLETE_METHOD,
             "complete_callable": 1 if callable(method) else 0,
             "procedure_submittable": (
@@ -3095,7 +3130,11 @@ class Gateway:
         }
 
     def _procedure_meta_fields(self):
-        """Resolve the installed field names through the metadata cache."""
+        """Resolve the installed field names through the metadata cache.
+
+        Meta fieldnames, not ``get_valid_columns()``: the latter excludes Table
+        fields in frappe 16.54.0, and ``Clinical Procedure.items`` is one.
+        """
 
         cached = getattr(self, "_procedure_fields_cache", None)
         if cached is not None:
@@ -3106,7 +3145,9 @@ class Gateway:
             get_meta = frappe.get_meta
         fields = {}
         for doctype in procedure_contract.REQUIRED_FIELDS:
-            fields[doctype] = set(get_meta(doctype).get_valid_columns())
+            fields[doctype] = {
+                field.fieldname for field in get_meta(doctype).fields
+            }
         self._procedure_fields_cache = fields
         return fields
 
@@ -3137,6 +3178,220 @@ class Gateway:
             )
         except Exception:
             return False
+
+    def native_procedure_can_create(self):
+        """The acting user's native Clinical Procedure create + submit authority."""
+
+        for ptype in ("create", "submit"):
+            try:
+                if not self.frappe.has_permission(
+                    procedure_contract.PROCEDURE_DOCTYPE,
+                    ptype=ptype,
+                    user=self.frappe.session.user,
+                ):
+                    return False
+            except Exception:
+                return False
+        return True
+
+    # -- procedure creation from a submitted Service Request ---------------
+
+    def _service_request_state(self, doc):
+        """Build the creation decisions from one Service Request document."""
+
+        native = self._text_value(doc.name)
+        template_dn = self._text_value(getattr(doc, "template_dn", None))
+        consume_stock = False
+        if template_dn:
+            try:
+                consume_stock = bool(
+                    self.frappe.db.get_value(
+                        procedure_contract.PROCEDURE_TEMPLATE_DOCTYPE,
+                        template_dn,
+                        "consume_stock",
+                    )
+                )
+            except Exception:
+                raise patient_write.WriteUncertain() from None
+        try:
+            procedure_exists = bool(
+                self.frappe.db.exists(
+                    procedure_contract.PROCEDURE_DOCTYPE,
+                    {"service_request": native},
+                )
+            )
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        return ServiceRequestLockedState(
+            doc=doc,
+            exists=True,
+            docstatus=getattr(doc, "docstatus", None),
+            template_dt=self._text_value(getattr(doc, "template_dt", None)),
+            template_dn=template_dn,
+            patient=self._text_value(getattr(doc, "patient", None)),
+            procedure_template=(
+                template_dn
+                if self._text_value(getattr(doc, "template_dt", None))
+                == procedure_contract.PROCEDURE_TEMPLATE_DOCTYPE
+                else None
+            ),
+            procedure_exists=procedure_exists,
+            consume_stock=consume_stock,
+        )
+
+    def native_service_request_target(self, service_request):
+        """Read the pre-fence creation decisions under native read authority.
+
+        ``None`` means the request is unreadable or the caller may not read it;
+        the endpoint denies. An absent row is reported as absent so the refusal
+        can be a designed one.
+        """
+
+        try:
+            if not self.frappe.db.exists(
+                procedure_contract.SERVICE_REQUEST_DOCTYPE, service_request
+            ):
+                return {
+                    "exists": False,
+                    "docstatus": None,
+                    "template_dt": None,
+                    "template_dn": None,
+                    "patient": None,
+                    "procedure_template": None,
+                    "procedure_exists": False,
+                    "consume_stock": False,
+                }
+        except Exception:
+            return None
+        try:
+            allowed = self.frappe.has_permission(
+                procedure_contract.SERVICE_REQUEST_DOCTYPE,
+                ptype="read",
+                doc=service_request,
+                user=self.frappe.session.user,
+            )
+        except Exception:
+            return None
+        if allowed is not True:
+            return None
+        try:
+            doc = self.frappe.get_doc(
+                procedure_contract.SERVICE_REQUEST_DOCTYPE, service_request
+            )
+            return self._service_request_state(doc).as_dict()
+        except patient_write.WriteUncertain:
+            return None
+        except Exception:
+            return None
+
+    def lock_service_request_target(self, service_request):
+        """Lock the Service Request row and re-read the creation decisions."""
+
+        try:
+            doc = self.frappe.get_doc(
+                procedure_contract.SERVICE_REQUEST_DOCTYPE,
+                service_request,
+                for_update=True,
+            )
+            return self._service_request_state(doc)
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def create_native_procedure(self, state):
+        """Insert and submit the Clinical Procedure for the locked request.
+
+        The field mapping is the pinned ``make_clinical_procedure`` mapping; the
+        body carries no client value. Submitting here is what gives completion
+        its legal target (``docstatus`` 1, status ``Pending``), and the row is
+        linked back to the Service Request it came from.
+        """
+
+        values = {}
+        for source, target in procedure_contract.CREATE_FIELD_MAP:
+            value = getattr(state.doc, source, None)
+            if value not in (None, ""):
+                values[target] = value
+        try:
+            doc = self.frappe.get_doc(
+                {
+                    "doctype": procedure_contract.PROCEDURE_DOCTYPE,
+                    "patient": state.patient,
+                    "procedure_template": state.template_dn,
+                    "service_request": self._text_value(state.doc.name),
+                    "company": self._text_value(
+                        getattr(state.doc, "company", None)
+                    ),
+                    "invoiced": (
+                        1
+                        if self._text_value(
+                            getattr(state.doc, "billing_status", None)
+                        )
+                        == "Invoiced"
+                        else 0
+                    ),
+                    "consume_stock": 1 if state.consume_stock else 0,
+                    **values,
+                }
+            )
+            doc.insert()
+            doc.submit()
+            return self._text_value(doc.name)
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def native_procedure_create_facts(self, native_procedure_id):
+        """Closed-world re-read after one Clinical Procedure creation."""
+
+        try:
+            row = self.frappe.db.get_value(
+                procedure_contract.PROCEDURE_DOCTYPE,
+                native_procedure_id,
+                [
+                    "name",
+                    "patient",
+                    "procedure_template",
+                    "service_request",
+                    "docstatus",
+                    "status",
+                ],
+                as_dict=True,
+            )
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        if row is None:
+            raise patient_write.WriteUncertain()
+        get = (
+            row.get
+            if hasattr(row, "get")
+            else (lambda key, default=None: default)
+        )
+        return {
+            "name": self._text_value(get("name")),
+            "patient": self._text_value(get("patient")),
+            "procedure_template": self._text_value(
+                get("procedure_template")
+            ),
+            "service_request": self._text_value(get("service_request")),
+            "docstatus": get("docstatus"),
+            "status": self._text_value(get("status")),
+        }
+
+    def native_procedure_from_create_receipt(self, actor, operation_key):
+        """Resolve the procedure a committed creation receipt names, or ``None``."""
+
+        receipt = self.lookup_procedure_receipt(
+            actor,
+            procedure_contract.PROCEDURE_CREATE_KIND,
+            operation_key,
+        )
+        if receipt is None:
+            return None
+        created = procedure_write.decode_receipt(receipt)
+        if created.kind != procedure_contract.PROCEDURE_CREATE_KIND:
+            return None
+        return self._text_value(created.native_procedure_id) or None
 
     def native_procedure_action_detail(self, native_procedure_id):
         """Read the pre-fence decision fields under native authority."""
@@ -3535,7 +3790,14 @@ class Gateway:
     # -- admin user/master surface --------------------------------------
 
     def _admin_meta_fields(self):
-        """Resolve the installed field names through the metadata cache."""
+        """Resolve the installed field names through the metadata cache.
+
+        ``get_valid_columns()`` returns only the database columns, which excludes
+        every Table field: ``User.roles`` is one, so it can never satisfy the
+        closed-world preflight (frappe 16.54.0). The installed field set is the
+        meta fieldnames, which include Table fields and nothing that is not a
+        field.
+        """
 
         cached = getattr(self, "_admin_fields_cache", None)
         if cached is not None:
@@ -3546,7 +3808,9 @@ class Gateway:
             get_meta = frappe.get_meta
         fields = {}
         for doctype in admin_contract.REQUIRED_FIELDS:
-            fields[doctype] = set(get_meta(doctype).get_valid_columns())
+            fields[doctype] = {
+                field.fieldname for field in get_meta(doctype).fields
+            }
         self._admin_fields_cache = fields
         return fields
 
@@ -3634,7 +3898,16 @@ class Gateway:
         except Exception:
             return True
 
-    def _admin_company(self):
+    def native_admin_company(self):
+        """Resolve the site's one working company, or ``None``.
+
+        ``frappe.defaults.get_default`` does not exist in frappe 16.54.0; the
+        frappe-16 API is ``frappe.db.get_default``. Global Defaults is read
+        first, then the database default, then the deterministic fallback: a site
+        with exactly one Company row has exactly one answer. Anything else is
+        ``None`` and the caller refuses before the fence claim.
+        """
+
         company = None
         try:
             company = self._text_value(
@@ -3646,12 +3919,75 @@ class Gateway:
             company = None
         if not company:
             try:
-                company = self._text_value(
-                    self.frappe.defaults.get_default("company")
-                )
+                company = self._text_value(self.frappe.db.get_default("company"))
             except Exception:
                 company = None
         if not company:
+            try:
+                companies = self.frappe.get_all("Company", pluck="name") or ()
+            except Exception:
+                companies = ()
+            if len(companies) == 1:
+                company = self._text_value(companies[0])
+            else:
+                company = None
+        return company
+
+    def native_admin_supplier_group(self):
+        """Resolve the supplier group the supplier row links, or ``None``.
+
+        The installed default root is preferred; a site with exactly one group
+        has exactly one answer. Ambiguity is never resolved by precedence, and no
+        group means the supplier op refuses before the fence claim.
+        """
+
+        try:
+            if self.frappe.db.exists(
+                admin_contract.SUPPLIER_GROUP_DOCTYPE,
+                admin_contract.DEFAULT_SUPPLIER_GROUP,
+            ):
+                return admin_contract.DEFAULT_SUPPLIER_GROUP
+            groups = (
+                self.frappe.get_all(
+                    admin_contract.SUPPLIER_GROUP_DOCTYPE, pluck="name"
+                )
+                or ()
+            )
+        except Exception:
+            return None
+        if len(groups) == 1:
+            return self._text_value(groups[0]) or None
+        return None
+
+    def native_admin_master_rows(self, master_type):
+        """Return the installed row count for one master DocType, or ``None``."""
+
+        doctype = admin_contract.MASTER_DOCTYPES.get(master_type)
+        if doctype is None:
+            return None
+        try:
+            return int(self.frappe.db.count(doctype))
+        except Exception:
+            return None
+
+    def native_admin_prerequisites(self):
+        """Read the pre-fence admin prerequisites from the site's own records."""
+
+        return {
+            "company": self.native_admin_company(),
+            "uom_rows": self.native_admin_master_rows("uom"),
+            "supplier_group": self.native_admin_supplier_group(),
+            "supplier_group_rows": self.native_admin_master_rows(
+                "supplier_group"
+            ),
+        }
+
+    def _admin_company(self):
+        company = self.native_admin_company()
+        if not company:
+            # Unreachable through the endpoint: the same resolution is a designed
+            # pre-fence refusal there. Closing fail-closed keeps the mutation
+            # honest if the site changes under a held claim.
             raise patient_write.WriteUncertain()
         return company
 
@@ -3713,13 +4049,32 @@ class Gateway:
     def create_native_admin_master(self, master_type, payload):
         """Create one master row (with its bundled price/account child).
 
-        Company and currency are read from the site's own records; none is
-        accepted from the client.
+        Company, currency and the supplier group are read from the site's own
+        records; none is accepted from the client. The prerequisite existence
+        checks are decided pre-fence by the endpoint, so a missing company, UOM
+        or Supplier Group never fails after the claim.
         """
 
         try:
             company = self._admin_company()
-            currency = self._admin_currency(company)
+            if master_type == "uom":
+                doc = self.frappe.get_doc(
+                    {
+                        "doctype": admin_contract.UOM_DOCTYPE,
+                        "uom_name": payload["uom_name"],
+                    }
+                )
+                doc.insert()
+                return self._text_value(doc.name)
+            if master_type == "supplier_group":
+                doc = self.frappe.get_doc(
+                    {
+                        "doctype": admin_contract.SUPPLIER_GROUP_DOCTYPE,
+                        "supplier_group_name": payload["supplier_group_name"],
+                    }
+                )
+                doc.insert()
+                return self._text_value(doc.name)
             if master_type == "warehouse":
                 doc = self.frappe.get_doc(
                     {
@@ -3731,16 +4086,20 @@ class Gateway:
                 doc.insert()
                 return self._text_value(doc.name)
             if master_type == "supplier":
+                supplier_group = self.native_admin_supplier_group()
+                if not supplier_group:
+                    raise patient_write.WriteUncertain()
                 doc = self.frappe.get_doc(
                     {
                         "doctype": admin_contract.SUPPLIER_DOCTYPE,
                         "supplier_name": payload["supplier_name"],
-                        "supplier_group": "All Supplier Groups",
+                        "supplier_group": supplier_group,
                     }
                 )
                 doc.insert()
                 return self._text_value(doc.name)
             if master_type == "item":
+                currency = self._admin_currency(company)
                 doc = self.frappe.get_doc(
                     {
                         "doctype": admin_contract.ITEM_DOCTYPE,
@@ -3765,6 +4124,7 @@ class Gateway:
                 price.insert()
                 return self._text_value(doc.name)
             if master_type == "price_list":
+                currency = self._admin_currency(company)
                 doc = self.frappe.get_doc(
                     {
                         "doctype": admin_contract.PRICE_LIST_DOCTYPE,
@@ -3952,6 +4312,22 @@ class Gateway:
                     as_dict=True,
                 )
                 return self._admin_facts_row(row, ("template", "item_code"))
+            if master_type == "supplier_group":
+                row = self.frappe.db.get_value(
+                    admin_contract.SUPPLIER_GROUP_DOCTYPE,
+                    name,
+                    ["name"],
+                    as_dict=True,
+                )
+                return self._admin_facts_row(row, ())
+            if master_type == "uom":
+                row = self.frappe.db.get_value(
+                    admin_contract.UOM_DOCTYPE,
+                    name,
+                    ["name"],
+                    as_dict=True,
+                )
+                return self._admin_facts_row(row, ())
             raise patient_write.WriteUncertain()
         except patient_write.WriteUncertain:
             raise

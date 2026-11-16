@@ -16,6 +16,7 @@ EXPECTED = {
     "encounter_draft": (2, "encounter"),
     "encounter_complete": (1, "encounter"),
     "encounter_amend": (1, "encounter"),
+    "procedure_create": (1, "procedure"),
     "procedure_complete": (1, "procedure"),
     "lab_order": (1, "lab"),
     "stock_receive": (1, "stock"),
@@ -27,13 +28,13 @@ EXPECTED = {
     "invoice_submit": (1, "invoice"),
     "payment_receive": (1, "payment"),
     "admin_user": (4, "admin"),
-    "admin_master": (12, "admin"),
+    "admin_master": (14, "admin"),
 }
 
 
 class WriteBudgetRegistryTests(unittest.TestCase):
     def test_registry_contains_exactly_the_approved_kinds(self):
-        self.assertEqual(len(EXPECTED), 17)
+        self.assertEqual(len(EXPECTED), 18)
         self.assertEqual(write_budgets.ALL_KINDS, tuple(EXPECTED))
         self.assertEqual(tuple(write_budgets.BUDGETS), tuple(EXPECTED))
 

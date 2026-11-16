@@ -20,6 +20,11 @@ The design rulings this module encodes (they are not re-decided here):
   procedure and a draft procedure are all refused before the fence claim. A
   second completion would create a second Stock Entry (SPEC:221), so the server
   refuses it and the client locks its button.
+* creation (Amendment A1) is exactly-once per Service Request: an existing
+  Clinical Procedure for the selected request is refused before the fence claim,
+  and the created row is submitted so completion has its legal target. Its
+  receipt is the only thing that maps the returned workspace alias to the new
+  native row.
 
 Installed field names are not hardcoded here. Each logical field lists the
 installed candidates; the adapter resolves them from the site's own metadata
@@ -37,15 +42,24 @@ PROCEDURE_DOCTYPE = "Clinical Procedure"
 ITEM_DOCTYPE = "Clinical Procedure Item"
 STOCK_ENTRY_DOCTYPE = "Stock Entry"
 PROCEDURE_TEMPLATE_DOCTYPE = "Clinical Procedure Template"
+SERVICE_REQUEST_DOCTYPE = "Service Request"
 
 PROCEDURE_COMPLETE_KIND = "procedure_complete"
-PROCEDURE_KINDS = (PROCEDURE_COMPLETE_KIND,)
+# Design Amendment A1: the one Creation write of the family. The actor selects a
+# submitted Service Request (created by the encounter-complete cascade) and the
+# contract creates the Clinical Procedure it links, in the state completion
+# requires as its legal target: submitted, status ``Pending``.
+PROCEDURE_CREATE_KIND = "procedure_create"
+PROCEDURE_KINDS = (PROCEDURE_COMPLETE_KIND, PROCEDURE_CREATE_KIND)
 
 DRAFT_DOCSTATUS = 0
 FINAL_DOCSTATUS = 1
 CANCELLED_DOCSTATUS = 2
 COMPLETED_STATUS = "Completed"
 CANCELLED_STATUS = "Cancelled"
+# The installed controller sets this status on submit (``set_status``), so it is
+# the exact state a created procedure is expected to carry.
+PENDING_STATUS = "Pending"
 MATERIAL_ISSUE_TYPE = "Material Issue"
 
 # The installed document method this family drives, pinned by name and by the
@@ -60,6 +74,38 @@ PROCEDURE_SOURCE_PATH = (
 )
 PROCEDURE_SOURCE_SHA256 = (
     "1eb0883901c63b6a0eface06971f9ed3a11415f79ac826767d894653bb9b272c"
+)
+# The creation path mirrors the installed ``make_clinical_procedure`` mapping
+# (healthcare v16.6.1) field by field instead of re-deciding it, so the file that
+# defines that mapping is pinned too. The installed helper itself cannot be
+# driven on this stack: its last write reads ``Stock Settings.default_warehouse``,
+# which erpnext 16.52.1 does not define, so it raises on every call. The mapping
+# below therefore reproduces the reviewed lines and stops at that broken one.
+SERVICE_REQUEST_SOURCE_SHA256 = (
+    "4d342241d8d52220cd2034dea90f49bbe0427ff66ce8925ed7a733ad72f40802"
+)
+SERVICE_REQUEST_SOURCE_PATH = (
+    "healthcare",
+    "doctype",
+    "service_request",
+    "service_request.py",
+)
+
+# Service Request -> Clinical Procedure field mapping, verbatim from the pinned
+# ``make_clinical_procedure`` bodies (source field name, target field name).
+CREATE_FIELD_MAP = (
+    ("patient_name", "patient_name"),
+    ("patient_gender", "patient_sex"),
+    ("patient_age_data", "patient_age"),
+    ("inpatient_record", "inpatient_record"),
+    ("practitioner", "practitioner"),
+    ("occurrence_date", "start_date"),
+    ("occurrence_time", "start_time"),
+    ("medical_department", "medical_department"),
+    ("insurance_policy", "insurance_policy"),
+    ("insurance_payor", "insurance_payor"),
+    ("insurance_coverage", "insurance_coverage"),
+    ("coverage_status", "coverage_status"),
 )
 
 # The reviewed executable boundary: the versions pinned with the appointment and
@@ -204,6 +250,11 @@ REQUIRED_FIELDS = {
             "post_op_nursing_checklist_template",
         ),
     },
+    SERVICE_REQUEST_DOCTYPE: {
+        "patient": ("patient",),
+        "template_dt": ("template_dt",),
+        "template_dn": ("template_dn",),
+    },
 }
 
 
@@ -266,6 +317,8 @@ def boundary_problem(snapshot):
         return "source hashes unreadable"
     if source.get("clinical_procedure") != PROCEDURE_SOURCE_SHA256:
         return "source drift for clinical_procedure"
+    if source.get("service_request") != SERVICE_REQUEST_SOURCE_SHA256:
+        return "source drift for service_request"
     if snapshot.get("complete_method") != COMPLETE_METHOD:
         return "driven method drift"
     if snapshot.get("complete_callable") != 1:
@@ -316,6 +369,64 @@ def target_problem(values):
         return "target procedure is not submitted"
     if not values.get("patient"):
         return "target procedure has no patient"
+    return None
+
+
+def service_request_problem(values):
+    """Refuse the selected Service Request before any fence claim.
+
+    Exactly-once is decided here: a Service Request that already has a Clinical
+    Procedure (any docstatus) is refused, so one request never produces two
+    procedures. A request that is not submitted, not a procedure request or not
+    readable is refused with its own named line.
+    """
+
+    if not isinstance(values, dict):
+        return "service request state unreadable"
+    if values.get("exists") is not True:
+        return "service request not found"
+    if values.get("docstatus") != FINAL_DOCSTATUS:
+        return "service request is not submitted"
+    if values.get("template_dt") != PROCEDURE_TEMPLATE_DOCTYPE:
+        return "service request is not a procedure request"
+    if not _text(values.get("patient"), MAX_TEXT_LENGTH):
+        return "service request has no patient"
+    if not _text(values.get("procedure_template"), MAX_TEXT_LENGTH):
+        return "service request has no procedure template"
+    if values.get("procedure_exists") is True:
+        return "a procedure already exists for the service request"
+    if values.get("consume_stock") is True:
+        return (
+            "the procedure template consumes stock, which this creation path "
+            "does not seed"
+        )
+    return None
+
+
+def create_facts_problem(facts, expected):
+    """Check the closed-world state after one Clinical Procedure creation.
+
+    EXPECTED: the row this operation created, linked to the selected Service
+    Request and its template, submitted (so completion has its legal target) and
+    not already in a terminal completion state.
+    """
+
+    if not isinstance(facts, dict):
+        return "post-create procedure facts unreadable"
+    if not isinstance(expected, dict):
+        return "expected procedure facts unreadable"
+    if facts.get("name") != expected.get("procedure_id"):
+        return "created procedure differs from the receipt"
+    if facts.get("patient") != expected.get("patient"):
+        return "created procedure patient differs from the service request"
+    if facts.get("procedure_template") != expected.get("procedure_template"):
+        return "created procedure template differs from the service request"
+    if facts.get("service_request") != expected.get("service_request"):
+        return "created procedure is not linked to the service request"
+    if facts.get("docstatus") != FINAL_DOCSTATUS:
+        return "created procedure is not submitted"
+    if facts.get("status") in (COMPLETED_STATUS, CANCELLED_STATUS):
+        return "created procedure is already in a terminal state"
     return None
 
 

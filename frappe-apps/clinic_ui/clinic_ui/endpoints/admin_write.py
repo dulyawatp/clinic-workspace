@@ -169,13 +169,23 @@ def _master_problems(gateway, payload):
 
     master_type = payload["master_type"]
     body = payload["payload"]
+    # Prerequisites first (Amendment A1): the install has no UOM and no Supplier
+    # Group rows, so these are decided here — never after the fence claim.
+    problem = admin_contract.prerequisite_problem(
+        master_type, gateway.native_admin_prerequisites()
+    )
+    if problem:
+        return problem
     identifier = admin_contract.identifier_for(master_type, body)
     if gateway.native_admin_master_exists(master_type, identifier):
         return "master already exists"
-    if master_type == "item" and gateway.native_admin_item_price_exists(
-        body["item_code"], body["price_list"]
-    ):
-        return "item price already exists"
+    if master_type == "item":
+        if not gateway.native_admin_master_exists("uom", body["stock_uom"]):
+            return "stock uom is not installed"
+        if gateway.native_admin_item_price_exists(
+            body["item_code"], body["price_list"]
+        ):
+            return "item price already exists"
     return None
 
 

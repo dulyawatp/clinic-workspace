@@ -9,7 +9,7 @@ stock validity, the EXPECTED side-effect list and the codecs.
 import unittest
 
 from clinic_ui.core import config, procedure_contract as contract
-from clinic_ui.core import procedure_write
+from clinic_ui.core import procedure_write, write_fence
 
 
 def meta_fields(**overrides):
@@ -25,7 +25,8 @@ def snapshot(**overrides):
     values = {
         "versions": dict(contract.REVIEWED_VERSIONS),
         "source_sha256": {
-            "clinical_procedure": contract.PROCEDURE_SOURCE_SHA256
+            "clinical_procedure": contract.PROCEDURE_SOURCE_SHA256,
+            "service_request": contract.SERVICE_REQUEST_SOURCE_SHA256,
         },
         "complete_method": contract.COMPLETE_METHOD,
         "complete_callable": 1,
@@ -253,9 +254,20 @@ class TargetTests(unittest.TestCase):
     def test_a_submitted_in_progress_procedure_is_completable(self):
         self.assertIsNone(contract.target_problem(detail()))
 
-    def test_the_installed_source_pin_is_the_expected_sha(self):
+    def test_the_installed_source_pins_are_the_expected_shas(self):
         self.assertEqual(len(contract.PROCEDURE_SOURCE_SHA256), 64)
+        self.assertEqual(len(contract.SERVICE_REQUEST_SOURCE_SHA256), 64)
         self.assertEqual(contract.COMPLETE_METHOD, "complete_procedure")
+
+    def test_service_request_source_drift_is_refused(self):
+        values = snapshot()
+        values["source_sha256"] = dict(
+            values["source_sha256"], service_request="0" * 64
+        )
+        self.assertEqual(
+            contract.boundary_problem(values),
+            "source drift for service_request",
+        )
 
     def test_a_draft_procedure_is_refused(self):
         self.assertEqual(
@@ -556,6 +568,232 @@ class BudgetAndCodecTests(unittest.TestCase):
                 }
             )["ack_token"],
             token,
+        )
+
+    # -- Amendment A1: the creation kind ---------------------------------
+
+    def test_the_creation_budget_is_the_approved_single_unit(self):
+        self.assertEqual(procedure_write.budget("procedure_create"), 1)
+        self.assertEqual(
+            set(procedure_write.BUDGETS),
+            {"procedure_complete", "procedure_create"},
+        )
+
+    def test_a_creation_receipt_carries_the_service_request(self):
+        receipt = procedure_write.encode_receipt(
+            kind="procedure_create",
+            alias="wsp1_" + "a" * 32 + "_" + "b" * 16 + "_" + "c" * 16,
+            native_procedure_id="HLC-CPR-1",
+            service_request="HLC-SR-1",
+        )
+        decoded = procedure_write.decode_receipt(receipt)
+        self.assertEqual(decoded.kind, "procedure_create")
+        self.assertEqual(decoded.service_request, "HLC-SR-1")
+        self.assertEqual(decoded.stock_entry, "")
+
+    def test_a_completion_receipt_carries_no_service_request(self):
+        receipt = procedure_write.encode_receipt(
+            kind="procedure_complete",
+            alias="wsp1_" + "a" * 32 + "_" + "b" * 16 + "_" + "c" * 16,
+            native_procedure_id="HLC-CPR-1",
+            stock_entry="MAT-STE-1",
+        )
+        self.assertEqual(
+            procedure_write.decode_receipt(receipt).service_request, ""
+        )
+
+    def test_the_creation_body_is_exactly_the_request_and_key(self):
+        payload = procedure_write.validate_create(
+            {"service_request": "HLC-SR-1", "operation_key": "proc-key-0001-abcdef"}
+        )
+        self.assertEqual(payload["kind"], "procedure_create")
+        self.assertEqual(payload["service_request"], "HLC-SR-1")
+        for extra in (
+            {"procedure_template": "TPL-1"},
+            {"patient": "PAT-1"},
+            {"docstatus": 1},
+        ):
+            with self.subTest(extra=extra):
+                with self.assertRaises(procedure_write.ProcedureWriteError):
+                    procedure_write.validate_create(
+                        {
+                            "service_request": "HLC-SR-1",
+                            "operation_key": "proc-key-0001-abcdef",
+                            **extra,
+                        }
+                    )
+
+    def test_a_creation_body_without_the_request_is_refused(self):
+        with self.assertRaises(procedure_write.ProcedureWriteError):
+            procedure_write.validate_create(
+                {"operation_key": "proc-key-0001-abcdef"}
+            )
+
+    def test_both_kinds_are_procedure_kinds(self):
+        self.assertEqual(
+            contract.PROCEDURE_KINDS,
+            ("procedure_complete", "procedure_create"),
+        )
+        self.assertIn("procedure_create", write_fence.PROCEDURE_OPERATION_KINDS)
+
+
+def request(**overrides):
+    """The server-read creation decisions for one submitted request."""
+
+    values = {
+        "exists": True,
+        "docstatus": contract.FINAL_DOCSTATUS,
+        "template_dt": contract.PROCEDURE_TEMPLATE_DOCTYPE,
+        "template_dn": "TPL-1",
+        "patient": "PAT-1",
+        "procedure_template": "TPL-1",
+        "procedure_exists": False,
+        "consume_stock": False,
+    }
+    values.update(overrides)
+    return values
+
+
+def create_facts(**overrides):
+    values = {
+        "name": "HLC-CPR-1",
+        "patient": "PAT-1",
+        "procedure_template": "TPL-1",
+        "service_request": "HLC-SR-1",
+        "docstatus": contract.FINAL_DOCSTATUS,
+        "status": contract.PENDING_STATUS,
+    }
+    values.update(overrides)
+    return values
+
+
+def create_expected(**overrides):
+    values = {
+        "procedure_id": "HLC-CPR-1",
+        "patient": "PAT-1",
+        "procedure_template": "TPL-1",
+        "service_request": "HLC-SR-1",
+    }
+    values.update(overrides)
+    return values
+
+
+class CreationTargetTests(unittest.TestCase):
+    """Amendment A1: every creation decision is pre-fence and named."""
+
+    def test_a_submitted_procedure_request_is_creatable(self):
+        self.assertIsNone(contract.service_request_problem(request()))
+
+    def test_an_absent_request_is_refused(self):
+        self.assertEqual(
+            contract.service_request_problem(request(exists=False)),
+            "service request not found",
+        )
+
+    def test_an_unsubmitted_request_is_refused(self):
+        self.assertEqual(
+            contract.service_request_problem(request(docstatus=0)),
+            "service request is not submitted",
+        )
+
+    def test_a_non_procedure_request_is_refused(self):
+        self.assertEqual(
+            contract.service_request_problem(
+                request(
+                    template_dt="Lab Test Template", procedure_template=None
+                )
+            ),
+            "service request is not a procedure request",
+        )
+
+    def test_a_request_without_patient_or_template_is_refused(self):
+        self.assertEqual(
+            contract.service_request_problem(request(patient=None)),
+            "service request has no patient",
+        )
+        self.assertEqual(
+            contract.service_request_problem(request(procedure_template=None)),
+            "service request has no procedure template",
+        )
+
+    def test_an_existing_procedure_is_the_exactly_once_refusal(self):
+        self.assertEqual(
+            contract.service_request_problem(request(procedure_exists=True)),
+            "a procedure already exists for the service request",
+        )
+
+    def test_a_stock_consuming_template_is_refused(self):
+        self.assertEqual(
+            contract.service_request_problem(request(consume_stock=True)),
+            "the procedure template consumes stock, which this creation path "
+            "does not seed",
+        )
+
+    def test_unreadable_decisions_are_refused(self):
+        self.assertEqual(
+            contract.service_request_problem(None),
+            "service request state unreadable",
+        )
+
+    def test_the_pinned_field_map_mirrors_the_installed_helper(self):
+        mapping = dict(contract.CREATE_FIELD_MAP)
+        self.assertEqual(mapping["patient_gender"], "patient_sex")
+        self.assertEqual(mapping["patient_age_data"], "patient_age")
+        self.assertEqual(mapping["occurrence_date"], "start_date")
+        self.assertEqual(mapping["occurrence_time"], "start_time")
+        self.assertEqual(len(contract.SERVICE_REQUEST_SOURCE_SHA256), 64)
+
+    def test_a_pinned_creation_re_read_has_no_problem(self):
+        self.assertIsNone(
+            contract.create_facts_problem(create_facts(), create_expected())
+        )
+
+    def test_the_creation_re_read_is_closed_world(self):
+        self.assertEqual(
+            contract.create_facts_problem(
+                create_facts(name="HLC-CPR-9"), create_expected()
+            ),
+            "created procedure differs from the receipt",
+        )
+        self.assertEqual(
+            contract.create_facts_problem(
+                create_facts(patient="PAT-2"), create_expected()
+            ),
+            "created procedure patient differs from the service request",
+        )
+        self.assertEqual(
+            contract.create_facts_problem(
+                create_facts(procedure_template="TPL-2"), create_expected()
+            ),
+            "created procedure template differs from the service request",
+        )
+        self.assertEqual(
+            contract.create_facts_problem(
+                create_facts(service_request="HLC-SR-9"), create_expected()
+            ),
+            "created procedure is not linked to the service request",
+        )
+
+    def test_a_created_procedure_must_be_submitted_and_not_terminal(self):
+        self.assertEqual(
+            contract.create_facts_problem(
+                create_facts(docstatus=0), create_expected()
+            ),
+            "created procedure is not submitted",
+        )
+        for status in (contract.COMPLETED_STATUS, contract.CANCELLED_STATUS):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    contract.create_facts_problem(
+                        create_facts(status=status), create_expected()
+                    ),
+                    "created procedure is already in a terminal state",
+                )
+
+    def test_unreadable_creation_facts_are_refused(self):
+        self.assertEqual(
+            contract.create_facts_problem(None, create_expected()),
+            "post-create procedure facts unreadable",
         )
 
 

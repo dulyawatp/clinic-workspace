@@ -185,8 +185,13 @@ ENCOUNTER_OPERATION_KINDS = frozenset(
 # Procedure kinds are additive on the same ledger. ``procedure_complete`` carries
 # its registry name because it is also the budget key and the durable receipt
 # kind. A procedure completion is refused pre-fence once it happened, so this
-# kind can be claimed at most once per approved target.
-PROCEDURE_OPERATION_KINDS = frozenset({"procedure_complete"})
+# kind can be claimed at most once per approved target. ``procedure_create`` is
+# the one Creation write of the family (design Amendment A1): it is exactly-once
+# per submitted Service Request and its receipt carries the created native
+# procedure, so the completion path can resolve the created row.
+PROCEDURE_OPERATION_KINDS = frozenset(
+    {"procedure_complete", "procedure_create"}
+)
 # Admin kinds are additive on the same ledger. ``admin_user`` and
 # ``admin_master`` carry their registry names because they are also the budget
 # keys and the durable receipt kinds. Each admin operation creates exactly one
@@ -1013,7 +1018,8 @@ class Ledger:
         """Enumerate terminal ``COMMITTED`` procedure receipts, bounded.
 
         A separate, read-only namespace from the patient, appointment and
-        encounter enumerations: only ``procedure_complete`` rows are selected.
+        encounter enumerations: only ``procedure_complete`` and
+        ``procedure_create`` rows are selected.
         The reserved latch actor and key are excluded, as is every non-terminal
         state. ``limit`` is a hard server-side bound; an over-full page raises
         :class:`EnumerationOverflow` instead of silently truncating. The method

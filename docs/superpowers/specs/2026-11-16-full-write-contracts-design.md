@@ -273,3 +273,28 @@ write windows exactly as before.
   assignments; deploy lane; per-family UI SIT lanes with evidence; the four
   synthetic users created through the admin contract and browser-verified
   (completes the postponed follow-up item 2).
+
+## Amendment A1 — 2026-11-16 (user-approved; supersedes budget v2)
+
+### Budget v3 (FINAL as amended)
+`admin_master` 12 → **14** · NEW kind **`procedure_create` 1** · all other 16 kinds unchanged · registry **17 → 18 kinds**.
+
+### D3 — master prerequisites become contract masters
+- `MASTER_TYPES` gains `uom` (1 op) and `supplier_group` (1 op). Dependency order: **uom → supplier_group → price list → item → procedure template** (warehouse / supplier / mode-of-payment order-independent; supplier_group MUST precede supplier).
+- Designed PRE-fence refusals (`fence_calls == []`): item op when zero UOM rows exist; supplier op when zero Supplier Group rows exist; any admin_master op when no company resolves.
+
+### D2-i — company resolution fix (defect)
+- `_admin_company()` resolver: read `Global Defaults.default_company` through a frappe-16-valid API (no `frappe.defaults.get_default`); deterministic fallback — exactly one Company row → that company; nothing resolvable → designed PRE-fence refusal (never `WriteUncertain` post-claim latch).
+
+### D1 — install-preflight field check fix (defect)
+- `REQUIRED_FIELDS` validation resolves against meta fieldnames (`get_meta(doctype).fields`), which includes Table fields; `User.roles` passes on real sites. Closed-world: every required fieldname must exist in meta.
+
+### D4 — procedure_create (new capability, procedure family, actor per design's procedure-family owner)
+- Actor selects a **SUBMITTED Service Request** (created by the encounter-complete cascade) and creates the Clinical Procedure linked to it (`service_request` link + template/item + practitioner defaults), in the exact state the existing `procedure_complete` requires as its legal target (read from the contract; prefer draft-at-create when procedure_complete handles submit+complete).
+- Exactly-once: one Clinical Procedure per Service Request (PRE-fence refusal if one already exists). Budget 1.
+- UI: procedure family gains the creation path, same patterns as the family's existing UI (44px/focus, Thai/EN parity additive, Sample/Demo labels unchanged).
+
+### SIT impact
+- SIT A: 18 ops (14 admin_master + 4 admin_user); budgets consumed exactly 14 + 4.
+- SIT B: encounter cascade → Service Request → **procedure_create (budget 1)** → procedure_complete (budget 1) — all through the UI, no bench seeds.
+- Capability ids 39 → 40; 40-name lockstep across the four surfaces; verifier contract + selfcheck fixtures extended; synthetic-user check parameterized 3 → 7 (asserted post-creation).

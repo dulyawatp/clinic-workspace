@@ -94,6 +94,29 @@ def template_payload(**overrides):
     return values
 
 
+def uom_payload(**overrides):
+    values = {"uom_name": "Nos"}
+    values.update(overrides)
+    return values
+
+
+def supplier_group_payload(**overrides):
+    values = {"supplier_group_name": "SIT Suppliers"}
+    values.update(overrides)
+    return values
+
+
+def prerequisites(**overrides):
+    values = {
+        "company": "SIT Synthetic Company",
+        "uom_rows": 1,
+        "supplier_group": "All Supplier Groups",
+        "supplier_group_rows": 1,
+    }
+    values.update(overrides)
+    return values
+
+
 ROLE_MAP = {
     "DOC": ("Physician",),
     "NUR": ("Nursing User",),
@@ -225,6 +248,8 @@ class EditMasterBodyTests(unittest.TestCase):
         ("price_list", price_list_payload),
         ("mode_of_payment", payment_payload),
         ("procedure_template", template_payload),
+        ("uom", uom_payload),
+        ("supplier_group", supplier_group_payload),
     )
 
     def test_every_designed_variant_normalises(self):
@@ -258,6 +283,8 @@ class EditMasterBodyTests(unittest.TestCase):
             ("price_list", {}),
             ("mode_of_payment", {"mode_of_payment": "Cash"}),
             ("procedure_template", {"template_name": "T"}),
+            ("uom", {"uom_name": ""}),
+            ("supplier_group", {}),
         )
         for master_type, payload in cases:
             with self.subTest(master_type=master_type):
@@ -305,12 +332,114 @@ class EditMasterBodyTests(unittest.TestCase):
             ),
             "Dressing",
         )
+        self.assertEqual(
+            contract.identifier_for("uom", {"uom_name": "Nos"}), "Nos"
+        )
+        self.assertEqual(
+            contract.identifier_for(
+                "supplier_group", {"supplier_group_name": "SIT Suppliers"}
+            ),
+            "SIT Suppliers",
+        )
+
+
+class PrerequisiteTests(unittest.TestCase):
+    """Amendment A1: the master prerequisites are decided before the fence."""
+
+    def test_a_resolved_site_has_no_problem_for_every_variant(self):
+        for master_type in contract.MASTER_TYPES:
+            with self.subTest(master_type=master_type):
+                self.assertIsNone(
+                    contract.prerequisite_problem(master_type, prerequisites())
+                )
+
+    def test_no_company_refuses_every_admin_master_op(self):
+        for master_type in contract.MASTER_TYPES:
+            with self.subTest(master_type=master_type):
+                self.assertEqual(
+                    contract.prerequisite_problem(
+                        master_type, prerequisites(company=None)
+                    ),
+                    "no company resolves for the admin surface",
+                )
+
+    def test_no_uom_row_refuses_the_item_op(self):
+        self.assertEqual(
+            contract.prerequisite_problem("item", prerequisites(uom_rows=0)),
+            "no UOM rows are installed for the item unit",
+        )
+        self.assertIsNone(
+            contract.prerequisite_problem("uom", prerequisites(uom_rows=0))
+        )
+
+    def test_no_supplier_group_row_refuses_the_supplier_op(self):
+        self.assertEqual(
+            contract.prerequisite_problem(
+                "supplier",
+                prerequisites(supplier_group=None, supplier_group_rows=0),
+            ),
+            "no Supplier Group rows are installed for the supplier",
+        )
+        self.assertIsNone(
+            contract.prerequisite_problem(
+                "supplier_group",
+                prerequisites(supplier_group=None, supplier_group_rows=0),
+            )
+        )
+
+    def test_unreadable_prerequisites_are_refused(self):
+        self.assertEqual(
+            contract.prerequisite_problem("warehouse", None),
+            "master prerequisites unreadable",
+        )
+        self.assertEqual(
+            contract.prerequisite_problem(
+                "warehouse", prerequisites(uom_rows=None)
+            ),
+            "UOM rows are unreadable",
+        )
+
+    def test_the_two_new_kinds_are_installed_masters(self):
+        self.assertEqual(contract.MASTER_DOCTYPES["uom"], "UOM")
+        self.assertEqual(
+            contract.MASTER_DOCTYPES["supplier_group"], "Supplier Group"
+        )
+        self.assertEqual(
+            contract.MASTER_PAYLOAD_KEYS["uom"], frozenset({"uom_name"})
+        )
+        self.assertEqual(
+            contract.MASTER_PAYLOAD_KEYS["supplier_group"],
+            frozenset({"supplier_group_name"}),
+        )
+
+    def test_the_new_master_facts_are_their_names(self):
+        for master_type, payload in (
+            ("uom", uom_payload()),
+            ("supplier_group", supplier_group_payload()),
+        ):
+            with self.subTest(master_type=master_type):
+                identifier = contract.identifier_for(master_type, payload)
+                self.assertIsNone(
+                    contract.master_facts_problem(
+                        master_type,
+                        {"name": identifier},
+                        {"identifier": identifier, "payload": payload},
+                    )
+                )
+                self.assertEqual(
+                    contract.master_facts_problem(
+                        master_type,
+                        {"name": "SOMETHING-ELSE"},
+                        {"identifier": identifier, "payload": payload},
+                    ),
+                    "created master differs from the request",
+                )
 
 
 class BudgetTests(unittest.TestCase):
     def test_the_family_budgets_are_consumed_from_the_registry(self):
         self.assertEqual(contract.budget("admin_user"), 4)
-        self.assertEqual(contract.budget("admin_master"), 12)
+        self.assertEqual(contract.budget("admin_master"), 14)
         self.assertEqual(
             contract.ADMIN_KINDS, ("admin_user", "admin_master")
         )

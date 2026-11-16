@@ -286,6 +286,18 @@ class FakeGateway:
         self.procedure_fence_claim = FakeClaim()
         self.procedure_fence_error = None
 
+        # -- procedure creation from a submitted Service Request -----------
+        self.procedure_can_create = True
+        self.service_request_states = {}
+        self.service_request_target_calls = []
+        self.service_request_lock_calls = []
+        self.service_request_lock_error = None
+        self.create_procedure_calls = []
+        self.create_procedure_error = None
+        self.created_procedure_id = "HLC-CPR-NEW"
+        self.procedure_create_facts = {}
+        self.procedure_create_facts_calls = []
+
         # -- admin user/master write surface -------------------------------
         self.admin_install_problem = None
         self.admin_can_write = True
@@ -310,6 +322,13 @@ class FakeGateway:
         self.admin_master_facts = {}
         self.admin_user_facts_calls = []
         self.admin_master_facts_calls = []
+        self.admin_prerequisites = {
+            "company": "SIT Synthetic Company",
+            "uom_rows": 1,
+            "supplier_group": "All Supplier Groups",
+            "supplier_group_rows": 1,
+        }
+        self.admin_prerequisites_calls = []
         self.admin_receipts = {}
         self.admin_receipt_records = []
         self.admin_receipt_calls = []
@@ -1093,6 +1112,79 @@ class FakeGateway:
 
         return procedure_write.decode_receipt(receipt).stock_entry
 
+    # -- procedure creation from a submitted Service Request ---------------
+
+    def native_procedure_can_create(self):
+        return self.procedure_can_create
+
+    def native_service_request_target(self, service_request):
+        self.service_request_target_calls.append(service_request)
+        state = self.service_request_states.get(service_request)
+        if state is None:
+            return {
+                "exists": False,
+                "docstatus": None,
+                "template_dt": None,
+                "template_dn": None,
+                "patient": None,
+                "procedure_template": None,
+                "procedure_exists": False,
+                "consume_stock": False,
+            }
+        return dict(state)
+
+    def lock_service_request_target(self, service_request):
+        self.service_request_lock_calls.append(service_request)
+        if self.service_request_lock_error is not None:
+            raise self.service_request_lock_error
+        state = dict(self.service_request_states.get(service_request, {}))
+        values = dict(state)
+        values.setdefault("doc", None)
+        return FakeLockedState(**values)
+
+    def create_native_procedure(self, state):
+        self.create_procedure_calls.append(state)
+        if self.create_procedure_error is not None:
+            raise self.create_procedure_error
+        return self.created_procedure_id
+
+    def native_procedure_create_facts(self, native_procedure_id):
+        self.procedure_create_facts_calls.append(native_procedure_id)
+        state = (
+            self.create_procedure_calls[-1] if self.create_procedure_calls else None
+        )
+        values = {
+            "name": native_procedure_id,
+            "patient": getattr(state, "patient", None),
+            "procedure_template": getattr(state, "procedure_template", None),
+            "service_request": getattr(state, "service_request", None),
+            "docstatus": 1,
+            "status": "Pending",
+        }
+        values.update(self.procedure_create_facts)
+        return values
+
+    def native_procedure_from_create_receipt(self, actor, operation_key):
+        from clinic_ui.core import procedure_write
+
+        for record in self.procedure_receipt_records:
+            if (
+                record.actor == actor
+                and record.kind == "procedure_create"
+                and record.operation_key == operation_key
+            ):
+                return procedure_write.decode_receipt(
+                    record.receipt
+                ).native_procedure_id
+        receipt = self.procedure_receipts.get(
+            (actor, "procedure_create", operation_key)
+        )
+        if isinstance(receipt, str):
+            return procedure_write.decode_receipt(
+                receipt
+            ).native_procedure_id
+        return None
+
     # -- local admin user/master write path -----------------------------
 
     def native_admin_install_problem(self):
@@ -1125,6 +1217,10 @@ class FakeGateway:
         self.admin_item_price_exists_calls.append((item_code, price_list))
         return (item_code, price_list) in self.admin_item_prices
 
+    def native_admin_prerequisites(self):
+        self.admin_prerequisites_calls.append(dict(self.admin_prerequisites))
+        return dict(self.admin_prerequisites)
+
     def create_native_admin_user(self, payload):
         self.admin_user_create_calls.append(dict(payload))
         if self.admin_user_create_error is not None:
@@ -1149,6 +1245,10 @@ class FakeGateway:
             return payload["price_list_name"]
         if master_type == "mode_of_payment":
             return payload["mode_of_payment"]
+        if master_type == "supplier_group":
+            return payload["supplier_group_name"]
+        if master_type == "uom":
+            return payload["uom_name"]
         return payload["template_name"]
 
     def native_admin_user_facts(self, user):
@@ -1183,6 +1283,10 @@ class FakeGateway:
             return {"name": name, "currency": "USD", "selling": 1}
         if master_type == "mode_of_payment":
             return {"name": name, "account": payload["account"]}
+        if master_type == "supplier_group":
+            return {"name": name}
+        if master_type == "uom":
+            return {"name": name}
         return {"name": name, "item_code": payload["item_code"]}
 
     def lookup_admin_receipt(self, actor, kind, operation_key):
