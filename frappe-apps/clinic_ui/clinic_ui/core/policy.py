@@ -21,6 +21,35 @@ SUPPORTED_ROLE_CODES = frozenset({"DOC", "REC", "NUR"})
 # The synthetic directory slice is readable by these roles only.
 DIRECTORY_ROLE_CODES = frozenset({"DOC", "REC", "NUR"})
 
+# The patient detail read admits the same clinic role codes as the directory.
+# This gate is not a native grant: REC passes it and is still refused by the
+# Patient read permission check, so the native authority stays authoritative.
+PATIENT_VIEW_ROLE_CODES = frozenset({"DOC", "REC", "NUR"})
+
+# The read-only synthetic appointment list belongs to the two roles that own
+# the appointment surface. The role code gate is not a native grant: the
+# current user's document and field-level Patient Appointment read checks still
+# run before any field is fetched.
+APPOINTMENT_ROLE_CODES = frozenset({"DOC", "REC"})
+
+# Booking, rescheduling and check-in belong to the same two appointment roles.
+# The code gate is not a grant: every request still needs the exact native
+# Patient Appointment create/write check, the current user's Patient and linked
+# DocType reads, and the approved target checks.
+APPOINTMENT_WRITE_ROLE_CODES = frozenset({"DOC", "REC"})
+
+# Only these roles may resolve another clinician's created alias for a read, and
+# only through a verified committed create receipt plus the current user's
+# native Patient read permission. The creator's own actor-bound resolution and
+# every write resolution are unchanged.
+CROSS_ACTOR_READ_ROLE_CODES = frozenset({"DOC", "NUR"})
+
+# Native create/edit admits only DOC and NUR. This code gate is shared by the
+# bootstrap capability and the write/ack endpoints so they cannot drift. The
+# role code is not a grant: the exact native Patient create/write check still
+# runs before any operation-fence access. REC never reaches that check.
+PATIENT_WRITE_ROLE_CODES = frozenset({"DOC", "NUR"})
+
 NON_CLINICAL_IDENTITIES = frozenset({"", "Guest", "Administrator"})
 
 GUEST_SID = "Guest"

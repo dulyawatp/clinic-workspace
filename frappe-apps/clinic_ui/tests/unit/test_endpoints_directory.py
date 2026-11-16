@@ -7,10 +7,20 @@ gateway only.
 
 import inspect
 import unittest
+from unittest import mock
 
+from clinic_ui.core import dto, patient_alias, patient_write
+from clinic_ui.endpoints import aliases as aliases_endpoint
 from clinic_ui.endpoints import directory as directory_endpoint
 
-from .fake_gateway import Denied, FakeGateway, session_view, settings
+from .fake_gateway import (
+    Denied,
+    FakeCreateReceipt,
+    FakeGateway,
+    SECRET,
+    session_view,
+    settings,
+)
 
 ALLOWLIST = [
     {"workspace_patient_id": "WS-1", "native_patient_id": "PAT-1"},
@@ -46,12 +56,10 @@ class DirectorySuccessTests(unittest.TestCase):
                 "items": [
                     {
                         "workspace_patient_id": "WS-1",
-                        "native_patient_id": "PAT-1",
                         "display_name": "Patient One",
                     },
                     {
                         "workspace_patient_id": "WS-3",
-                        "native_patient_id": "PAT-3",
                         "display_name": "Patient Three",
                     },
                 ]
@@ -79,8 +87,8 @@ class DirectorySuccessTests(unittest.TestCase):
         fake.patient_authority["PAT-2"] = "bad\x00name"
         payload = directory_endpoint.synthetic_patients(fake)
         self.assertEqual(
-            [item["native_patient_id"] for item in payload["items"]],
-            ["PAT-1", "PAT-3"],
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-3"],
         )
 
     def test_reception_and_doctor_roles_are_accepted(self):
@@ -151,6 +159,251 @@ class DirectoryDenialTests(unittest.TestCase):
         fake = gateway(settings=settings(clinic_ui_role_map={"PHA": ["Pharmacist"]}))
         self.assertDenied(fake)
         self.assertEqual(fake.patient_reads, [])
+
+
+class CreatedPatientDirectoryTests(unittest.TestCase):
+    def created(
+        self,
+        actor="sit.doc@example.test",
+        operation_key="op-0123456789abcdef",
+        native_patient_id="PAT-NEW",
+        *,
+        alias=None,
+        site="marley.test",
+    ):
+        alias = alias or patient_alias.build_alias(
+            SECRET.encode(), site, actor, operation_key
+        )
+        receipt = patient_write.encode_receipt(
+            kind="create", alias=alias, native_patient_id=native_patient_id
+        )
+        return FakeCreateReceipt(actor, operation_key, receipt), alias
+
+    def test_merges_committed_created_patients_after_the_static_allowlist(self):
+        fake = gateway()
+        record, alias = self.created()
+        fake.created_receipts = [record]
+        fake.patient_authority["PAT-NEW"] = "Created Patient"
+
+        payload = directory_endpoint.synthetic_patients(fake)
+
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3", alias],
+        )
+        self.assertEqual(payload["items"][3]["display_name"], "Created Patient")
+        self.assertEqual(
+            set(payload["items"][3]), {"workspace_patient_id", "display_name"}
+        )
+        limit, operation_key = fake.receipt_list_calls[0]
+        self.assertIsNone(operation_key)
+        self.assertGreater(limit, 0)
+
+    def test_native_read_denial_omits_the_created_patient(self):
+        fake = gateway()
+        record, alias = self.created()
+        fake.created_receipts = [record]
+        # No display authority entry for PAT-NEW.
+        payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3"],
+        )
+        self.assertIn("PAT-NEW", fake.patient_reads)
+
+    def test_missing_or_corrupt_fence_keeps_the_static_directory(self):
+        for error in (
+            patient_write.StoreUnavailable(),
+            patient_write.WriteUncertain(),
+        ):
+            with self.subTest(error=type(error).__name__):
+                fake = gateway()
+                fake.receipt_list_error = error
+                payload = directory_endpoint.synthetic_patients(fake)
+                self.assertEqual(
+                    [item["workspace_patient_id"] for item in payload["items"]],
+                    ["WS-1", "WS-2", "WS-3"],
+                )
+                self.assertEqual(
+                    fake.patient_reads, ["PAT-1", "PAT-2", "PAT-3"]
+                )
+
+    def test_receipt_alias_must_match_creator_site_and_operation_key(self):
+        fake = gateway()
+        good, alias = self.created()
+        # Same stored alias, but the fence row names a different creator.
+        fake.created_receipts = [
+            FakeCreateReceipt("mallory@example.test", good.operation_key, good.receipt)
+        ]
+        payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3"],
+        )
+        self.assertNotIn(alias, [item["workspace_patient_id"] for item in payload["items"]])
+
+    def test_malformed_receipt_is_omitted(self):
+        fake = gateway()
+        fake.created_receipts = [
+            FakeCreateReceipt("sit.doc@example.test", "op-0123456789abcdef", "{")
+        ]
+        payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3"],
+        )
+
+    def test_duplicate_alias_is_ambiguous_and_omitted(self):
+        fake = gateway()
+        record, alias = self.created()
+        fake.created_receipts = [record, record]
+        fake.patient_authority["PAT-NEW"] = "Created Patient"
+        payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3"],
+        )
+        self.assertNotIn(alias, [item["workspace_patient_id"] for item in payload["items"]])
+
+    def test_created_alias_colliding_with_static_alias_is_skipped(self):
+        fake = gateway()
+        record, alias = self.created(alias="WS-1")
+        fake.created_receipts = [record]
+        fake.patient_authority["PAT-NEW"] = "Created Patient"
+        payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3"],
+        )
+
+    def test_directory_response_never_carries_a_native_id(self):
+        fake = gateway()
+        record, _alias = self.created()
+        fake.created_receipts = [record]
+        fake.patient_authority["PAT-NEW"] = "Created Patient"
+        payload = directory_endpoint.synthetic_patients(fake)
+        for item in payload["items"]:
+            self.assertEqual(
+                set(item), {"workspace_patient_id", "display_name"}
+            )
+
+    def test_exact_combined_item_limit_includes_the_created_slice(self):
+        fake = gateway()
+        record, alias = self.created()
+        fake.created_receipts = [record]
+        fake.patient_authority["PAT-NEW"] = "Created Patient"
+        with mock.patch.object(dto, "MAX_DIRECTORY_ITEMS", 4):
+            payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3", alias],
+        )
+
+    def test_combined_overflow_omits_the_whole_created_slice(self):
+        fake = gateway()
+        first, first_alias = self.created(operation_key="op-aaaaaaaaaaaaaaaa")
+        second, second_alias = self.created(
+            operation_key="op-bbbbbbbbbbbbbbbb", native_patient_id="PAT-NEW-2"
+        )
+        fake.created_receipts = [first, second]
+        fake.patient_authority["PAT-NEW"] = "Created One"
+        fake.patient_authority["PAT-NEW-2"] = "Created Two"
+        with mock.patch.object(dto, "MAX_DIRECTORY_ITEMS", 4):
+            payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3"],
+        )
+        self.assertNotIn(first_alias, [
+            item["workspace_patient_id"] for item in payload["items"]
+        ])
+        self.assertNotIn(second_alias, [
+            item["workspace_patient_id"] for item in payload["items"]
+        ])
+
+    def test_enumeration_overflow_omits_created_even_when_room_remains(self):
+        fake = gateway()
+        records = [
+            self.created(operation_key=f"op-{number:016d}", native_patient_id=f"PAT-{number}")[0]
+            for number in (1, 2, 3)
+        ]
+        fake.created_receipts = records
+        for number in (1, 2, 3):
+            fake.patient_authority[f"PAT-{number}"] = f"Created {number}"
+        with mock.patch.object(aliases_endpoint, "MAX_CREATED_RECEIPTS", 2):
+            payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3"],
+        )
+        # No created native field is even read when the page overflows.
+        self.assertEqual(fake.patient_reads, ["PAT-1", "PAT-2", "PAT-3"])
+
+    def test_collision_past_the_enumeration_limit_is_not_partially_trusted(self):
+        fake = gateway()
+        first, first_alias = self.created(operation_key="op-aaaaaaaaaaaaaaaa")
+        second, second_alias = self.created(
+            operation_key="op-bbbbbbbbbbbbbbbb", native_patient_id="PAT-NEW-2"
+        )
+        duplicate = FakeCreateReceipt(
+            first.actor, "op-cccccccccccccccc", first.receipt
+        )
+        fake.created_receipts = [first, second, duplicate]
+        fake.patient_authority["PAT-NEW"] = "Created One"
+        fake.patient_authority["PAT-NEW-2"] = "Created Two"
+        with mock.patch.object(aliases_endpoint, "MAX_CREATED_RECEIPTS", 2):
+            payload = directory_endpoint.synthetic_patients(fake)
+        ids = [item["workspace_patient_id"] for item in payload["items"]]
+        self.assertEqual(ids, ["WS-1", "WS-2", "WS-3"])
+        self.assertNotIn(first_alias, ids)
+        self.assertNotIn(second_alias, ids)
+
+    def test_malformed_records_do_not_consume_a_created_slot(self):
+        fake = gateway()
+        malformed = FakeCreateReceipt(
+            "sit.doc@example.test", "op-0000000000000001", "{"
+        )
+        valid, alias = self.created(operation_key="op-0000000000000002")
+        fake.created_receipts = [malformed, valid]
+        fake.patient_authority["PAT-NEW"] = "Created Patient"
+        with mock.patch.object(aliases_endpoint, "MAX_CREATED_RECEIPTS", 2):
+            payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3", alias],
+        )
+
+    def test_denied_records_do_not_consume_a_created_slot(self):
+        fake = gateway()
+        denied, denied_alias = self.created(
+            operation_key="op-0000000000000001", native_patient_id="PAT-DENIED"
+        )
+        visible, visible_alias = self.created(
+            operation_key="op-0000000000000002", native_patient_id="PAT-VISIBLE"
+        )
+        fake.created_receipts = [denied, visible]
+        fake.patient_authority["PAT-VISIBLE"] = "Visible Patient"
+        with mock.patch.object(aliases_endpoint, "MAX_CREATED_RECEIPTS", 2):
+            payload = directory_endpoint.synthetic_patients(fake)
+        ids = [item["workspace_patient_id"] for item in payload["items"]]
+        self.assertEqual(ids, ["WS-1", "WS-2", "WS-3", visible_alias])
+        self.assertNotIn(denied_alias, ids)
+
+    def test_exact_enumeration_bound_is_not_overflow(self):
+        fake = gateway()
+        first, first_alias = self.created(operation_key="op-0000000000000001")
+        second, second_alias = self.created(
+            operation_key="op-0000000000000002", native_patient_id="PAT-NEW-2"
+        )
+        fake.created_receipts = [first, second]
+        fake.patient_authority["PAT-NEW"] = "Created One"
+        fake.patient_authority["PAT-NEW-2"] = "Created Two"
+        with mock.patch.object(aliases_endpoint, "MAX_CREATED_RECEIPTS", 2):
+            payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3", first_alias, second_alias],
+        )
 
 
 if __name__ == "__main__":

@@ -14,10 +14,36 @@ PACKAGE_ROOT = APP_ROOT / "clinic_ui"
 EXPECTED_ENDPOINTS = {
     "clinic_ui.api.session.bootstrap",
     "clinic_ui.api.directory.synthetic_patients",
+    "clinic_ui.api.appointments.synthetic_appointments",
+    "clinic_ui.api.appointments.view",
+    "clinic_ui.api.appointments.book",
+    "clinic_ui.api.appointments.reschedule",
+    "clinic_ui.api.appointments.checkin",
+    "clinic_ui.api.appointments.ack",
+    "clinic_ui.api.patients.view",
+    "clinic_ui.api.patients.create",
+    "clinic_ui.api.patients.update",
+    "clinic_ui.api.patients.ack",
+}
+
+EXPECTED_METHODS = {
+    "clinic_ui.api.session.bootstrap": ["GET"],
+    "clinic_ui.api.directory.synthetic_patients": ["GET"],
+    "clinic_ui.api.appointments.synthetic_appointments": ["GET"],
+    "clinic_ui.api.appointments.view": ["GET"],
+    "clinic_ui.api.appointments.book": ["POST"],
+    "clinic_ui.api.appointments.reschedule": ["POST"],
+    "clinic_ui.api.appointments.checkin": ["POST"],
+    "clinic_ui.api.appointments.ack": ["POST"],
+    "clinic_ui.api.patients.view": ["GET"],
+    "clinic_ui.api.patients.create": ["POST"],
+    "clinic_ui.api.patients.update": ["POST"],
+    "clinic_ui.api.patients.ack": ["POST"],
 }
 
 # Guest dispatch exists only so an anonymous/expired caller receives an explicit
-# 401 and can reach sign-in. The directory endpoint stays non-guest.
+# 401 and can reach sign-in. The directory and patient view endpoints stay
+# non-guest.
 EXPECTED_GUEST_ENDPOINTS = {"clinic_ui.api.session.bootstrap"}
 
 
@@ -71,10 +97,10 @@ class WhitelistSurfaceTests(unittest.TestCase):
         found = app_whitelists()
         self.assertEqual({entry["name"] for entry in found}, EXPECTED_ENDPOINTS)
 
-    def test_every_endpoint_is_get_only(self):
+    def test_endpoint_methods_are_exact(self):
         for entry in app_whitelists():
             with self.subTest(endpoint=entry["name"]):
-                self.assertEqual(entry["methods"], ["GET"])
+                self.assertEqual(entry["methods"], EXPECTED_METHODS[entry["name"]])
 
     def test_only_bootstrap_dispatches_guests(self):
         guests = {
@@ -89,6 +115,11 @@ class WhitelistSurfaceTests(unittest.TestCase):
             if entry["name"] == "clinic_ui.api.directory.synthetic_patients":
                 self.assertIn(entry["allow_guest"], (None, False))
 
+    def test_patient_read_and_write_endpoints_stay_non_guest(self):
+        for entry in app_whitelists():
+            if entry["name"].startswith("clinic_ui.api.patients."):
+                self.assertIn(entry["allow_guest"], (None, False))
+
     def test_guest_dispatch_is_declared_in_one_module(self):
         modules = [
             path.relative_to(PACKAGE_ROOT / "api").as_posix()
@@ -97,23 +128,62 @@ class WhitelistSurfaceTests(unittest.TestCase):
         ]
         self.assertEqual(modules, ["session.py"])
 
-    def test_no_mutation_transport_helpers_are_declared(self):
-        source = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in sorted(PACKAGE_ROOT.rglob("*.py"))
-        )
-        for forbidden in (
-            "frappe.db.set_value",
-            "frappe.db.delete",
-            "frappe.new_doc",
-            ".insert(",
-            ".save(",
-            ".submit(",
-            ".cancel(",
-            "methods=[\"POST\"]",
+    def test_mutation_helpers_are_confined_to_the_runtime_adapter(self):
+        adapter = PACKAGE_ROOT / "runtime" / "frappe_gateway.py"
+        for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+            tree = _tree_without_docstrings(path)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                for keyword in node.keywords:
+                    if keyword.arg in ("ignore_permissions", "ignore_csrf"):
+                        self.fail(f"{path}: forbidden keyword {keyword.arg}")
+                if path == adapter:
+                    continue
+                func = node.func
+                if isinstance(func, ast.Attribute):
+                    if func.attr in ("insert", "save", "submit", "cancel"):
+                        self.fail(f"{path}: forbidden mutation call .{func.attr}")
+                    if (
+                        func.attr in ("set_value", "delete")
+                        and isinstance(func.value, ast.Attribute)
+                        and func.value.attr == "db"
+                    ):
+                        self.fail(f"{path}: forbidden mutation call frappe.db.{func.attr}")
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "new_doc"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "frappe"
+                ):
+                    self.fail(f"{path}: forbidden frappe.new_doc")
+
+    def test_adapter_never_bypasses_permissions_or_csrf(self):
+        adapter = PACKAGE_ROOT / "runtime" / "frappe_gateway.py"
+        tree = _tree_without_docstrings(adapter)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg in ("ignore_permissions", "ignore_csrf"):
+                    self.fail(f"adapter: forbidden keyword {keyword.arg}")
+
+
+def _tree_without_docstrings(path):
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
         ):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, source)
+            continue
+        if (
+            node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        ):
+            node.body.pop(0)
+    return tree
 
 
 class ImportSafetyTests(unittest.TestCase):

@@ -1,21 +1,33 @@
-# Clinic UI (read-only native slice)
+# Clinic UI (native read slice and default-off local write path)
 
 Isolated Frappe app candidate for the first Marley-native read slice of the
-clinic UI. It provides exactly two GET-only whitelisted methods:
+clinic UI. It provides four read methods and three default-off local POST
+methods:
 
 | Method | Path | Guest dispatch |
 | --- | --- | --- |
 | `GET` | `/api/method/clinic_ui.api.session.bootstrap` | yes — fixed 401 for anonymous/expired |
 | `GET` | `/api/method/clinic_ui.api.directory.synthetic_patients` | no — framework 403 |
+| `GET` | `/api/method/clinic_ui.api.appointments.synthetic_appointments` | no — framework 403 |
+| `GET` | `/api/method/clinic_ui.api.patients.view` | no — framework 403 |
+| `POST` | `/api/method/clinic_ui.api.patients.create` | no — default-off local write |
+| `POST` | `/api/method/clinic_ui.api.patients.update` | no — default-off local write |
+| `POST` | `/api/method/clinic_ui.api.patients.ack` | no — default-off local write acknowledgement |
 
 Status: **candidate only**. Nothing here is installed, migrated, deployed or
 activated on any site, and no account or permission is changed. Tests run with
 local stubs and prove policy, DTO and gate behaviour — not installed-site
 behaviour, the Frappe permission engine or HTTP routing.
 
-Non-goals: no mutation endpoint, no DocType, no `doc_event`, no
-`override_whitelisted_methods`, no request hook, no registration, no deployment.
-Existing `clinic_photos` behaviour is untouched.
+A separate **local-only, default-off** native Patient create/edit path exists
+under `clinic_ui.api.patients.create`, `...update` and `...ack`. It is not enabled by
+this repository and is not production-ready. Its gate, payload, fence setup,
+test commands and limitations are recorded in `LOCAL_WRITE_PATH.md`.
+
+Non-goals: no DocType, no `doc_event`, no `override_whitelisted_methods`, no
+registration and no deployment. The two local write methods are default-off,
+disabled by configuration until an explicit local-site decision, and are not a
+production capability. Existing `clinic_photos` behaviour is untouched.
 
 The app now also hosts the built SPA shell at `/clinic` and `/clinic/*` (see
 "Native SPA hosting"). That route family is the only website surface it adds.
@@ -24,7 +36,7 @@ The app now also hosts the built SPA shell at `/clinic` and `/clinic/*` (see
 
 ```
 clinic_ui/
-  api/         GET-only whitelisted entry points (the only API-facing modules)
+  api/         whitelisted read and default-off local write entry points
   endpoints/   framework-free request decisions and gate ordering
   core/        text rules, site configuration gate, session/role policy, epoch, DTOs
   core/assets.py  framework-free Vite manifest -> shell asset mapping
@@ -44,7 +56,7 @@ this slice ships no DocType, page, report or workspace.
 `www/clinic.py` is the only website module and imports Frappe directly, alongside
 `api/` and `runtime/`.
 
-## Gate order (both endpoints)
+## Gate order (read endpoints; writes add step 6)
 
 1. `Cache-Control: no-store` is set, including on the 401 and on every denial.
 2. The request is classified as anonymous/expired or as an authenticated
@@ -55,6 +67,13 @@ this slice ships no DocType, page, report or workspace.
 4. The explicit site configuration must be present and valid for **this** site.
 5. Exactly one clinic role code must resolve, and it must be allowed for the
    surface (`DOC`, `REC`, `NUR` — the whole first slice).
+6. For `POST` writes only, the explicit same-session CSRF check must pass (it
+   does not honour `ignore_csrf` or an allowed referrer), the separate
+   default-off write capability must be enabled for exactly `marley-sit.local`,
+   and a private deployment marker bound to the fence store must exist outside
+   site configuration. Then the native `Patient` create/write authority and the
+   healthcare side-effect checks run before the operation fence or alias
+   receipt is read.
 
 ### Anonymous/expired vs unauthorized
 
@@ -102,6 +121,12 @@ makes the whole feature unavailable (fail closed) — values are never repaired.
   },
   "clinic_ui_synthetic_patients": [
     {"workspace_patient_id": "WS-1", "native_patient_id": "PAT-1"}
+  ],
+  "clinic_ui_synthetic_appointments": [
+    {
+      "workspace_appointment_id": "APPT-1",
+      "native_appointment_id": "NATIVE-APPT-1"
+    }
   ]
 }
 ```
@@ -112,11 +137,18 @@ makes the whole feature unavailable (fail closed) — values are never repaired.
 | `clinic_ui_synthetic_site` | Non-blank string that must equal the current site exactly. |
 | `clinic_ui_epoch_secret` | String of at least 32 characters. Never returned or logged. |
 | `clinic_ui_role_map` | Non-empty mapping. Keys must be `DOC`/`REC`/`NUR`. Values are non-empty lists of distinct native role names (≤140 chars). A role name shared by two codes is refused. |
-| `clinic_ui_synthetic_patients` | List (≤1000) of objects with exactly `workspace_patient_id` and `native_patient_id`. Trimmed, control-free, ≤256 chars, unique per column. Order is preserved. An empty list is valid and returns no items. |
+| `clinic_ui_synthetic_patients` | List (≤1000) of objects with exactly `workspace_patient_id` and `native_patient_id`. Trimmed, control-free, ≤256 chars. Order is preserved. An empty list is valid and returns no items. |
+| `clinic_ui_synthetic_appointments` | Optional list (≤1000) of objects with exactly `workspace_appointment_id` and `native_appointment_id`. Same trimming and bounds. Missing or empty returns no appointment items. Only the workspace id is published. |
+
+The patient and appointment allowlists share one public workspace namespace and
+one server-owned native namespace. All workspace ids (patient and appointment)
+must be disjoint from all native ids (patient and appointment), including across
+entry and type boundaries. A repeated value or any public/native collision fails
+the whole configuration closed.
 
 The role map is server-owned. There is no client input, no filter, no limit and
-no user parameter on either endpoint; an unexpected query parameter becomes a
-framework error rather than an accepted input.
+no user parameter on the directory or appointment read endpoints; an unexpected
+query parameter becomes a framework error rather than an accepted input.
 
 ## DTOs
 
@@ -132,7 +164,7 @@ framework error rather than an accepted input.
       "displayName": "User Example",
       "roles": ["DOC"]
     },
-    "capabilities": {"write.patient.create": "read_only", "...": "read_only"},
+    "capabilities": {"write.patient.create": "enabled", "...": "read_only"},
     "csrfToken": "<frappe session csrf token>"
   }
 }
@@ -145,8 +177,14 @@ framework error rather than an accepted input.
   reversible and never contains the raw `sid`. It is a cache-identity value, not
   a credential.
 - `roles` always has exactly one mapped clinic code.
-- Every capability name from `contracts/capabilities.json` is present, each with
-  state `read_only`. No capability is `enabled`.
+- Every capability name from `contracts/capabilities.json` is present. The
+  default for every capability is `read_only`. Only `write.patient.create` and
+  `write.patient.update` may be `enabled`, and only for a DOC/NUR session on the
+  exact approved local site after the bootstrap endpoint verifies the write
+  flag, deployment marker, a ready fence with no unresolved operation/barrier or
+  latch, acceptable Healthcare Settings and the caller's native Patient
+  permission. The DTO rejects `enabled` on every other capability. Any failure
+  leaves them `read_only`; REC and every other role stay `read_only`.
 - `csrfToken` is the Frappe server-side session CSRF token; a missing or blank
   token fails closed. It is not cached, persisted or logged.
 
@@ -167,7 +205,6 @@ That is the whole body: no `user`, `roles`, `sessionEpoch`, `capabilities` or
     "items": [
       {
         "workspace_patient_id": "WS-1",
-        "native_patient_id": "PAT-1",
         "display_name": "Patient One"
       }
     ]
@@ -175,17 +212,50 @@ That is the whole body: no `user`, `roles`, `sessionEpoch`, `capabilities` or
 }
 ```
 
-Only configured allowlist entries for which the **current** user passes a native
-`Patient` read permission check appear. A denied, missing or malformed entry is
-omitted without any description, so the client cannot distinguish "denied" from
-"not configured". No record field other than the display name is read into the
-response.
+The response carries no native docname. Two disjoint sources are merged: the
+configured allowlist, and terminal committed create receipts discovered
+read-only in the private write fence. Each created alias is re-derived from the
+recorded creator, site and operation key, and an inconsistent, malformed,
+duplicate or colliding record is omitted. Only entries for which the **current**
+user passes a native `Patient` read permission check appear. A denied, missing or
+malformed entry is omitted without any description, so the client cannot
+distinguish "denied" from "not configured". A missing or corrupt fence leaves
+the static allowlist intact and never falls back to an unfiltered Patient list.
+No record field other than the display name is read into the response.
+
+`synthetic_appointments` (`GET /api/method/clinic_ui.api.appointments.synthetic_appointments`):
+
+```json
+{
+  "message": {
+    "items": [
+      {
+        "workspace_patient_id": "WS-1",
+        "appointment_id": "APPT-1",
+        "appointment_date": "2026-11-20",
+        "appointment_time": "09:30:00",
+        "status": "Open"
+      }
+    ]
+  }
+}
+```
+
+The endpoint takes no client input. Each allowlisted native `Patient
+Appointment` is read with the current user's own session only after the native
+document read permission and the field-level permlevel/masking checks pass for
+`patient`, `appointment_date`, `appointment_time` and `status`. The row is
+emitted only when its native patient resolves through the explicit synthetic
+patient allowlist; an unknown patient is omitted. The native patient id and the
+native appointment docname never appear: `appointment_id` is the configured
+workspace reference. A denied or malformed native read fails the whole response,
+so no partial list and no unfiltered fallback is returned.
 
 ## Error semantics
 
 | Condition | Result |
 | --- | --- |
-| No session, expired session, `Guest` sid, `Guest`/blank user | bootstrap: fixed 401 `{"code": "AUTH_EXPIRED"}`; directory: framework 403 |
+| No session, expired session, `Guest` sid, `Guest`/blank user | bootstrap: fixed 401 `{"code": "AUTH_EXPIRED"}`; directory and appointment reads: framework 403 before the endpoint body, which the native client reconciles through bootstrap to `AUTH_EXPIRED` |
 | `Administrator` or disabled user | framework permission error (403) |
 | Feature not enabled, other site name, missing/short secret | same permission error; the CSRF token is not even generated |
 | Malformed or ambiguous role map | same permission error |
@@ -313,7 +383,8 @@ Frappe and never touches a site, database or network. Coverage:
 - `test_epoch.py` — determinism, separation, hex/DT length, no raw sid,
   fail-closed inputs.
 - `test_dto.py` — exact wire shapes, single role, no extra fields, bounds.
-- `test_capabilities.py` — all capabilities `read_only`; parity with
+- `test_capabilities.py` — default capabilities `read_only`, patient writes
+  enabled only when explicitly requested; parity with
   `contracts/capabilities.json`.
 - `test_endpoints_session.py` / `test_endpoints_directory.py` — gate ordering,
   anonymous 401 dispatch vs authenticated 403 denial, CSRF fail-closed, omission

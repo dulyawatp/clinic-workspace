@@ -1,4 +1,4 @@
-"""Shared gate steps for the read-only endpoints.
+"""Shared gate steps for the native read endpoints and the local write path.
 
 Order matters and is asserted by tests:
 
@@ -16,12 +16,13 @@ authenticated but unauthorized caller — is the framework's own permission erro
 secret, role or record detail is included in either failure.
 """
 
-from clinic_ui.core import config, policy
+from clinic_ui.core import config, policy, write_fence
 
 
 def begin(gateway):
-    """Mark the response no-store before any decision is taken."""
+    """Mark the response no-store and traceback-free before any decision."""
 
+    gateway.suppress_traceback()
     gateway.mark_no_store()
 
 
@@ -63,4 +64,47 @@ def authorize(gateway, allowed_codes):
 
     settings = settings_or_deny(gateway)
     role = role_or_deny(gateway, view, settings, allowed_codes)
+    return settings, view, role
+
+
+def authorize_write(gateway, allowed_codes, csrf_token=None):
+    """Read gate, explicit CSRF check, and default-off native write gate.
+
+    Read endpoints are unaffected by the write keys. A write request must also
+    present the initialized session's CSRF token; this check is explicit and
+    does not honour ``frappe.conf.ignore_csrf`` or an allowed referrer. The
+    site must then enable writes for the exact approved site and present a
+    private deployment marker bound to the fence store.
+    """
+
+    settings, view, role = authorize(gateway, allowed_codes)
+    if view.user == write_fence.LATCH_ACTOR:
+        gateway.deny()
+    if not gateway.csrf_token_valid(csrf_token):
+        gateway.deny()
+    if not settings.write_enabled:
+        gateway.deny()
+    if not gateway.write_deployment_approved():
+        gateway.deny()
+    return settings, view, role
+
+
+def authorize_appointment_write(gateway, allowed_codes, csrf_token=None):
+    """Read gate, explicit CSRF, and the separate appointment-write gate.
+
+    The appointment gate is independent of the patient write flag. It requires
+    the exact approved site, the appointment flag and the same private
+    deployment marker bound to the fence store. Target configuration is never
+    authority: every request still performs its own native permission checks.
+    """
+
+    settings, view, role = authorize(gateway, allowed_codes)
+    if view.user == write_fence.LATCH_ACTOR:
+        gateway.deny()
+    if not gateway.csrf_token_valid(csrf_token):
+        gateway.deny()
+    if not settings.appointment_write_enabled:
+        gateway.deny()
+    if not gateway.write_deployment_approved():
+        gateway.deny()
     return settings, view, role

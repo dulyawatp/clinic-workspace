@@ -117,12 +117,19 @@ class WebsiteRouteRuleShapeTests(unittest.TestCase):
         self.assertFalse(hasattr(self.hooks, "website_path_resolver"))
         self.assertFalse(hasattr(self.hooks, "website_redirects"))
 
-    def test_no_request_or_permission_hook_is_added(self):
-        # The read-only slice stays read-only: the SPA shell must not need a
-        # request hook, an auth hook, a permission override or a doc event.
+    def test_only_the_traceback_request_hook_is_declared(self):
+        # The read-only slice stays read-only. Exactly one request hook exists:
+        # it sets Frappe's documented traceback-suppression flag for clinic API
+        # paths so error responses cannot leak stack traces or source details.
+        self.assertEqual(
+            self.hooks.before_request,
+            ["clinic_ui.runtime.traceback.suppress_api_tracebacks"],
+        )
+        self.assertEqual(
+            self.hooks.after_request,
+            ["clinic_ui.runtime.traceback.sanitize_api_error_response"],
+        )
         for hook in (
-            "before_request",
-            "after_request",
             "auth_hooks",
             "override_whitelisted_methods",
             "permission_query_conditions",

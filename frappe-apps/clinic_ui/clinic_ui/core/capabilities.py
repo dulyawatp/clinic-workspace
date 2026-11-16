@@ -1,8 +1,11 @@
 """The capability map published by the bootstrap endpoint.
 
 Names and order mirror ``contracts/capabilities.json`` exactly; the parity test
-fails if the client contract and this list drift. Every state is ``read_only``:
-the first slice enables no write and no blocked/denied claim is implied.
+fails if the client contract and this list drift. The default map is
+``read_only``. Only the reviewed patient create/edit and the three appointment
+write capabilities may be promoted to ``enabled``, and only after the bootstrap
+endpoint has verified the whole reviewed local write gate for that surface.
+Every other capability stays ``read_only``.
 """
 
 CAPABILITY_NAMES = (
@@ -44,9 +47,81 @@ CAPABILITY_NAMES = (
 )
 
 READ_ONLY_STATE = "read_only"
+ENABLED_STATE = "enabled"
+
+# Bootstrap may only publish these two states. ``denied``,
+# ``blocked_unverified`` and ``error_upstream`` are read-time outcomes, not
+# capability declarations.
+BOOTSTRAP_STATES = frozenset({READ_ONLY_STATE, ENABLED_STATE})
+
+PATIENT_WRITE_NAMES = frozenset(
+    {"write.patient.create", "write.patient.update"}
+)
+# The reviewed local appointment surface. Cancellation and the generic status
+# setter stay unavailable; these three names are the only non-patient writes
+# bootstrap may ever publish as ``enabled``.
+APPOINTMENT_WRITE_NAMES = frozenset(
+    {
+        "write.appointment.book",
+        "write.appointment.reschedule",
+        "write.appointment.checkin",
+    }
+)
+ENABLEABLE_NAMES = PATIENT_WRITE_NAMES | APPOINTMENT_WRITE_NAMES
 
 
 def read_only_capabilities():
     """Return a fresh mapping of every capability to ``read_only``."""
 
     return {name: READ_ONLY_STATE for name in CAPABILITY_NAMES}
+
+
+def bootstrap_capabilities(
+    *,
+    write_patient_create=False,
+    write_patient_update=False,
+    write_appointment_book=False,
+    write_appointment_reschedule=False,
+    write_appointment_checkin=False,
+):
+    """Return the default read-only map with reviewed writes enabled.
+
+    Callers must verify the full local write gate before passing ``True``. The
+    function itself only expresses intent; it is the bootstrap endpoint that
+    decides. Every other capability remains ``read_only``.
+    """
+
+    capabilities = read_only_capabilities()
+    if write_patient_create is True:
+        capabilities["write.patient.create"] = ENABLED_STATE
+    if write_patient_update is True:
+        capabilities["write.patient.update"] = ENABLED_STATE
+    if write_appointment_book is True:
+        capabilities["write.appointment.book"] = ENABLED_STATE
+    if write_appointment_reschedule is True:
+        capabilities["write.appointment.reschedule"] = ENABLED_STATE
+    if write_appointment_checkin is True:
+        capabilities["write.appointment.checkin"] = ENABLED_STATE
+    return capabilities
+
+
+def validate_capabilities(capabilities):
+    """Return a normalized copy or raise ``ValueError``.
+
+    Exactly the contract names are required, in contract order, and every state
+    must be a bootstrap state. ``enabled`` is accepted only for the reviewed
+    patient and appointment write names. Anything else fails closed at the DTO
+    boundary.
+    """
+
+    if not isinstance(capabilities, dict):
+        raise ValueError("invalid capability map")
+    if set(capabilities) != set(CAPABILITY_NAMES):
+        raise ValueError("invalid capability names")
+    for name in CAPABILITY_NAMES:
+        state = capabilities[name]
+        if state not in BOOTSTRAP_STATES:
+            raise ValueError("invalid capability state")
+        if state == ENABLED_STATE and name not in ENABLEABLE_NAMES:
+            raise ValueError("capability may not be enabled")
+    return {name: capabilities[name] for name in CAPABILITY_NAMES}

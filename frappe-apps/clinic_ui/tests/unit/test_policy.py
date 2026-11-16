@@ -124,6 +124,14 @@ class RoleResolutionTests(unittest.TestCase):
             policy.resolve_role(view(roles=("Physician",)), ambiguous)
         )
 
+    def test_patient_write_codes_are_doc_and_nur_only(self):
+        self.assertEqual(
+            policy.PATIENT_WRITE_ROLE_CODES, frozenset({"DOC", "NUR"})
+        )
+        self.assertTrue(
+            policy.PATIENT_WRITE_ROLE_CODES.issubset(policy.SUPPORTED_ROLE_CODES)
+        )
+
     def test_directory_codes_are_the_first_slice_codes(self):
         self.assertEqual(
             policy.DIRECTORY_ROLE_CODES, frozenset({"DOC", "REC", "NUR"})

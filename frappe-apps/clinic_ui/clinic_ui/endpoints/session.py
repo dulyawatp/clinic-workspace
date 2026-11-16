@@ -8,17 +8,107 @@ Three distinct outcomes, never merged:
 - **authenticated but unauthorized** (administrator, disabled user, wrong or
   ambiguous role, unavailable configuration): the framework permission error
   (403) with a generic message.
-- **authorized**: live session description, opaque epoch, read-only capability
-  map and the server-generated session CSRF token.
+- **authorized**: live session description, opaque epoch, capability map and
+  the server-generated session CSRF token. The map is read-only except that the
+  two patient write capabilities may be enabled for a DOC/NUR session after the
+  full reviewed local write gate passes.
 
 The raw session identifier, the cookie and the epoch secret never enter a
 payload and are never logged.
 """
 
 from clinic_ui.core import dto
+from clinic_ui.core.capabilities import bootstrap_capabilities
 from clinic_ui.core.epoch import session_epoch
-from clinic_ui.core.policy import SUPPORTED_ROLE_CODES
+from clinic_ui.core.policy import (
+    APPOINTMENT_WRITE_ROLE_CODES,
+    PATIENT_WRITE_ROLE_CODES,
+    SUPPORTED_ROLE_CODES,
+)
 from clinic_ui.endpoints import common
+
+def _patient_write_flags(gateway, settings, role):
+    """Return ``(create, update)`` after the full reviewed local write gate.
+
+    All conditions must pass: the exact-site write configuration, the private
+    deployment marker, a safely initialized fence store, Healthcare Settings
+    without automatic side effects, and the caller's native Patient permission.
+    Any false result, non-boolean result or raised error fails both capabilities
+    closed. No patient record is read.
+    """
+
+    if role not in PATIENT_WRITE_ROLE_CODES:
+        return False, False
+    try:
+        if not settings.write_enabled:
+            return False, False
+        if gateway.write_deployment_approved() is not True:
+            return False, False
+        if gateway.write_fence_ready() is not True:
+            return False, False
+        if gateway.healthcare_settings_side_effects_unsafe() is not False:
+            return False, False
+        return (
+            gateway.native_patient_can_create() is True,
+            gateway.native_patient_can_write() is True,
+        )
+    except Exception:
+        return False, False
+
+
+def _appointment_write_flags(gateway, settings, role):
+    """Return ``(book, reschedule, checkin)`` after the appointment write gate.
+
+    The gate is independent of the patient write flag: the exact approved site,
+    the appointment flag, the private deployment marker, a ready fence store,
+    safe appointment settings and the caller's own native Patient Appointment
+    and linked-doctype reads. Per-record targets and budgets are decided by the
+    write endpoints; these flags only advertise that the surface exists.
+    """
+
+    disabled = (False, False, False)
+    if role not in APPOINTMENT_WRITE_ROLE_CODES:
+        return disabled
+    try:
+        if gateway.native_appointment_boundary_problem() is not None:
+            return disabled
+        if not settings.appointment_write_enabled:
+            return disabled
+        if settings.appointment_medical_department is None:
+            return disabled
+        if settings.appointment_type is None:
+            return disabled
+        if settings.appointment_company is None:
+            return disabled
+        if gateway.write_deployment_approved() is not True:
+            return disabled
+        if gateway.write_fence_ready() is not True:
+            return disabled
+        if gateway.healthcare_appointment_side_effects_unsafe() is not False:
+            return disabled
+        if gateway.native_appointment_can_create() is not True:
+            return disabled
+        if gateway.native_appointment_can_write() is not True:
+            return disabled
+        for doctype, doc in (
+            ("Company", settings.appointment_company),
+            ("Appointment Type", settings.appointment_type),
+            ("Medical Department", settings.appointment_medical_department),
+            ("Gender", None),
+        ):
+            if gateway.native_doctype_can_read(doctype, doc) is not True:
+                return disabled
+        type_contract = gateway.native_appointment_type_contract(
+            settings.appointment_type
+        )
+        if (
+            type_contract is None
+            or type_contract["allow_booking_for"] != "Department"
+        ):
+            return disabled
+        return True, True, True
+    except Exception:
+        return disabled
 
 
 def bootstrap(gateway):
@@ -38,12 +128,26 @@ def bootstrap(gateway):
 
     try:
         epoch = session_epoch(settings.epoch_secret, gateway.site, view.sid)
+        write_create, write_update = _patient_write_flags(gateway, settings, role)
+        (
+            write_appointment_book,
+            write_appointment_reschedule,
+            write_appointment_checkin,
+        ) = _appointment_write_flags(gateway, settings, role)
+        capabilities = bootstrap_capabilities(
+            write_patient_create=write_create,
+            write_patient_update=write_update,
+            write_appointment_book=write_appointment_book,
+            write_appointment_reschedule=write_appointment_reschedule,
+            write_appointment_checkin=write_appointment_checkin,
+        )
         return dto.build_bootstrap(
             session_epoch=epoch,
             user_id=view.user,
             display_name=view.full_name,
             role=role,
             csrf_token=csrf_token,
+            capabilities=capabilities,
         )
     except ValueError:
         gateway.deny()
