@@ -4203,7 +4203,10 @@ class Gateway:
                         "doctype": admin_contract.ITEM_PRICE_DOCTYPE,
                         "item_code": doc.name,
                         "price_list": payload["price_list"],
-                        "rate": payload["rate"],
+                        # Review round 2: installed Item Price has no ``rate``;
+                        # it has ``price_list_rate`` and requires ``uom``.
+                        "price_list_rate": payload["price_list_rate"],
+                        "uom": payload["stock_uom"],
                         "currency": currency,
                         "selling": 1,
                     }
@@ -4257,11 +4260,19 @@ class Gateway:
                     {
                         "doctype": admin_contract.PROCEDURE_TEMPLATE_DOCTYPE,
                         "template": payload["template_name"],
+                        # Review round 2: the installed template has no
+                        # ``company`` and no ``uom``; it requires ``description``
+                        # and ``item_group``. The description is server-derived
+                        # from the supplied template name. The template links the
+                        # existing item (``link_existing_item``), otherwise the
+                        # installed after-insert would create a second Item and
+                        # its price inside the fence.
+                        "description": payload["template_name"],
                         "item_code": payload["item_code"],
+                        "item": payload["item_code"],
+                        "link_existing_item": 1,
                         "item_group": self._text_value(item_get("item_group")),
-                        "uom": self._text_value(item_get("stock_uom")),
                         "rate": payload["rate"],
-                        "company": company,
                     }
                 )
                 doc.insert()
@@ -4343,7 +4354,9 @@ class Gateway:
                 prices = self.frappe.get_all(
                     admin_contract.ITEM_PRICE_DOCTYPE,
                     filters={"item_code": name},
-                    fields=["price_list", "rate"],
+                    # Review round 2: the installed rate field is
+                    # ``price_list_rate``; ``rate`` does not exist.
+                    fields=["price_list", "price_list_rate"],
                     order_by="creation desc",
                     limit=1,
                 ) or ()
@@ -4356,7 +4369,7 @@ class Gateway:
                 facts["price_list"] = self._text_value(
                     price_get("price_list")
                 )
-                facts["rate"] = price_get("rate")
+                facts["price_list_rate"] = price_get("price_list_rate")
                 return facts
             if master_type == "price_list":
                 row = self.frappe.db.get_value(
@@ -4395,10 +4408,12 @@ class Gateway:
                 row = self.frappe.db.get_value(
                     admin_contract.PROCEDURE_TEMPLATE_DOCTYPE,
                     name,
-                    ["name", "template", "item_code"],
+                    ["name", "template", "item_code", "item", "description"],
                     as_dict=True,
                 )
-                return self._admin_facts_row(row, ("template", "item_code"))
+                return self._admin_facts_row(
+                    row, ("template", "item_code", "item", "description")
+                )
             if master_type == "supplier_group":
                 row = self.frappe.db.get_value(
                     admin_contract.SUPPLIER_GROUP_DOCTYPE,

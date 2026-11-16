@@ -1296,7 +1296,7 @@ class FakeGateway:
                 "name": name,
                 "item_code": payload["item_code"],
                 "price_list": payload["price_list"],
-                "rate": payload["rate"],
+                "price_list_rate": payload["price_list_rate"],
             }
         if master_type == "price_list":
             return {"name": name, "currency": "USD", "selling": 1}
@@ -1312,7 +1312,13 @@ class FakeGateway:
                 "practitioner_name": payload["practitioner_name"],
                 "user_id": payload["user"],
             }
-        return {"name": name, "item_code": payload["item_code"]}
+        return {
+            "name": name,
+            "item_code": payload["item_code"],
+            "item": payload["item_code"],
+            "template": payload["template_name"],
+            "description": payload["template_name"],
+        }
 
     def lookup_admin_receipt(self, actor, kind, operation_key):
         value = self.admin_receipts.get((actor, kind, operation_key))

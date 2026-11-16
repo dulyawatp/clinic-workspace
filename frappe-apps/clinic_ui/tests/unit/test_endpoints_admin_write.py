@@ -400,7 +400,7 @@ class EditMasterTests(unittest.TestCase):
             "item_group": "All Item Groups",
             "stock_uom": "Nos",
             "price_list": "Standard Selling",
-            "rate": 12.5,
+            "price_list_rate": 12.5,
         }
 
         result = admin_write.edit_master(
@@ -410,7 +410,7 @@ class EditMasterTests(unittest.TestCase):
         self.assertEqual(result["status"], "created")
         self.assertEqual(fake.admin_master_create_calls[0][0], "item")
         self.assertEqual(
-            fake.admin_master_create_calls[0][1]["rate"], 12.5
+            fake.admin_master_create_calls[0][1]["price_list_rate"], 12.5
         )
 
     def test_every_variant_is_accepted(self):
@@ -510,7 +510,7 @@ class EditMasterTests(unittest.TestCase):
             "item_group": "All Item Groups",
             "stock_uom": "Nos",
             "price_list": "Standard Selling",
-            "rate": 12.5,
+            "price_list_rate": 12.5,
         }
 
         result = admin_write.edit_master(
@@ -530,7 +530,7 @@ class EditMasterTests(unittest.TestCase):
             "item_group": "All Item Groups",
             "stock_uom": "Bottle",
             "price_list": "Standard Selling",
-            "rate": 12.5,
+            "price_list_rate": 12.5,
         }
 
         result = admin_write.edit_master(
@@ -585,7 +585,7 @@ class EditMasterTests(unittest.TestCase):
             "item_group": "All Item Groups",
             "stock_uom": "Nos",
             "price_list": "Standard Selling",
-            "rate": 12.5,
+            "price_list_rate": 12.5,
         }
 
         result = admin_write.edit_master(

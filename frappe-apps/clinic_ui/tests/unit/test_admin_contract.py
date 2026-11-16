@@ -63,7 +63,7 @@ def item_payload(**overrides):
         "item_group": "All Item Groups",
         "stock_uom": "Nos",
         "price_list": "Standard Selling",
-        "rate": 12.5,
+        "price_list_rate": 12.5,
     }
     values.update(overrides)
     return values
@@ -301,14 +301,15 @@ class EditMasterBodyTests(unittest.TestCase):
                     contract.validate_edit_master(master_body(master_type, payload))
 
     def test_a_non_positive_rate_is_refused(self):
-        for builder in (item_payload, template_payload):
-            with self.subTest(builder=builder.__name__):
+        cases = (
+            ("item", item_payload(price_list_rate=0)),
+            ("procedure_template", template_payload(rate=0)),
+        )
+        for master_type, payload in cases:
+            with self.subTest(master_type=master_type):
                 with self.assertRaises(contract.AdminContractError):
                     contract.validate_edit_master(
-                        master_body(
-                            "item" if builder is item_payload else "procedure_template",
-                            builder(rate=0),
-                        )
+                        master_body(master_type, payload)
                     )
 
     def test_the_natural_identifier_is_per_variant(self):
@@ -713,12 +714,12 @@ class FactsTests(unittest.TestCase):
             "name": "SIT-ITEM-1",
             "item_code": "SIT-ITEM-1",
             "price_list": "Standard Selling",
-            "rate": 12.5,
+            "price_list_rate": 12.5,
         }
         self.assertIsNone(
             contract.master_facts_problem("item", facts, expected)
         )
-        facts["rate"] = 99.0
+        facts["price_list_rate"] = 99.0
         self.assertIsNotNone(
             contract.master_facts_problem("item", facts, expected)
         )

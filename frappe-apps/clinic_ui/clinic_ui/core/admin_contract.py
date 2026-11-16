@@ -119,6 +119,9 @@ FORBIDDEN_ASSIGN_ROLES = frozenset({"System Manager", "Healthcare Administrator"
 MASTER_PAYLOAD_KEYS = {
     "warehouse": frozenset({"warehouse_name"}),
     "supplier": frozenset({"supplier_name"}),
+    # The item's price is written as the installed ``Item Price`` rate field,
+    # ``price_list_rate`` (review round 2: this stack has no ``rate`` on Item
+    # Price), so the client payload key is the installed name.
     "item": frozenset(
         {
             "item_code",
@@ -126,7 +129,7 @@ MASTER_PAYLOAD_KEYS = {
             "item_group",
             "stock_uom",
             "price_list",
-            "rate",
+            "price_list_rate",
         }
     ),
     "price_list": frozenset({"price_list_name"}),
@@ -175,9 +178,12 @@ REQUIRED_FIELDS = {
         "stock_uom": ("stock_uom",),
     },
     ITEM_PRICE_DOCTYPE: {
+        # Review round 2: this stack's Item Price has ``price_list_rate`` (reqd)
+        # and no ``rate``, and ``uom`` is required, so the contract writes it.
         "item_code": ("item_code",),
         "price_list": ("price_list",),
-        "rate": ("rate",),
+        "price_list_rate": ("price_list_rate",),
+        "uom": ("uom",),
         "currency": ("currency",),
     },
     PRICE_LIST_DOCTYPE: {
@@ -190,10 +196,17 @@ REQUIRED_FIELDS = {
         "accounts": ("accounts",),
     },
     PROCEDURE_TEMPLATE_DOCTYPE: {
+        # Review round 2: the installed template has no ``company`` field and
+        # requires ``description`` and ``item_group``; the op writes all of them,
+        # plus the ``item`` link with ``link_existing_item`` so the installed
+        # after-insert does not create a second Item.
         "template": ("template",),
+        "description": ("description",),
+        "item_group": ("item_group",),
         "item_code": ("item_code",),
+        "item": ("item",),
+        "link_existing_item": ("link_existing_item",),
         "rate": ("rate",),
-        "company": ("company",),
     },
     SUPPLIER_GROUP_DOCTYPE: {
         "supplier_group_name": ("supplier_group_name",),
@@ -494,6 +507,12 @@ def _number(value):
     )
 
 
+# The positive-number payload keys. ``price_list_rate`` is the installed Item
+# Price rate field (review round 2); ``rate`` is the installed Clinical Procedure
+# Template rate.
+RATE_KEYS = frozenset({"rate", "price_list_rate"})
+
+
 def _positive_rate(value):
     if not _number(value):
         raise AdminContractError("rate is invalid")
@@ -512,7 +531,7 @@ def _normalise_master_payload(master_type, payload):
     normalized = {}
     for key in sorted(expected):
         value = payload[key]
-        if key == "rate":
+        if key in RATE_KEYS:
             normalized[key] = _positive_rate(value)
         elif master_type == "practitioner" and key == "user":
             # Amendment A1.1: the user link is optional. An empty string is the
@@ -690,7 +709,9 @@ def master_facts_problem(master_type, facts, expected):
             return "created item code differs from the request"
         if facts.get("price_list") != payload["price_list"]:
             return "created item price list differs from the request"
-        if not _same_number(facts.get("rate"), payload["rate"]):
+        if not _same_number(
+            facts.get("price_list_rate"), payload["price_list_rate"]
+        ):
             return "created item rate differs from the request"
     elif master_type == "price_list":
         if not _present(facts.get("currency")):
@@ -703,6 +724,14 @@ def master_facts_problem(master_type, facts, expected):
     elif master_type == "procedure_template":
         if facts.get("item_code") != payload["item_code"]:
             return "created procedure template item differs from the request"
+        # The template links the existing item; a different link means the
+        # installed after-insert created its own Item instead.
+        if facts.get("item") != payload["item_code"]:
+            return "created procedure template link differs from the request"
+        # The installed template requires a description; the op derives it from
+        # the supplied template name and the re-read must match it.
+        if facts.get("description") != payload["template_name"]:
+            return "created procedure template description differs from the request"
     elif master_type == "supplier_group":
         if facts.get("name") != payload["supplier_group_name"]:
             return "created supplier group differs from the request"

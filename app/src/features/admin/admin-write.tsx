@@ -49,7 +49,9 @@ export const MASTER_SPECS: Record<MasterType, MasterSpec> = {
       { name: "item_group", label: "adminWrite.itemGroup", kind: "text", maxLength: 140 },
       { name: "stock_uom", label: "adminWrite.stockUom", kind: "text", maxLength: 140 },
       { name: "price_list", label: "adminWrite.priceList", kind: "text", maxLength: 140 },
-      { name: "rate", label: "adminWrite.rate", kind: "number" },
+      // The installed Item Price rate field is ``price_list_rate``; the label key
+      // stays the shared "Rate" copy.
+      { name: "price_list_rate", label: "adminWrite.rate", kind: "number" },
     ],
   },
   price_list: {

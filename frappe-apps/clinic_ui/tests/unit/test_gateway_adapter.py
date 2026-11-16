@@ -3150,6 +3150,177 @@ class AmendmentMetaFieldTests(GatewayTestCase):
         )
 
 
+class AdminInstalledFieldMapTests(GatewayTestCase):
+    """Review round 2: the admin field maps follow this stack's installed meta.
+
+    On the deployed image ``Item Price`` has ``price_list_rate`` (required) and no
+    ``rate``, and ``Clinical Procedure Template`` has no ``company``. The legacy
+    maps therefore denied the whole admin family pre-fence, which is what this
+    stub models.
+    """
+
+    INSTALLED_SHAPES = {
+        "Item Price": [
+            "currency",
+            "item_code",
+            "price_list",
+            "price_list_rate",
+            "uom",
+        ],
+        "Clinical Procedure Template": [
+            "description",
+            "item",
+            "item_code",
+            "item_group",
+            "link_existing_item",
+            "rate",
+            "template",
+        ],
+    }
+
+    LEGACY_SHAPES = {
+        "Item Price": {
+            "item_code": ("item_code",),
+            "price_list": ("price_list",),
+            "rate": ("rate",),
+            "currency": ("currency",),
+        },
+        "Clinical Procedure Template": {
+            "template": ("template",),
+            "item_code": ("item_code",),
+            "rate": ("rate",),
+            "company": ("company",),
+        },
+    }
+
+    def stub_with_installed_meta(self):
+        from clinic_ui.core import admin_contract
+
+        stub = AmendmentStub()
+        for doctype, fields in admin_contract.REQUIRED_FIELDS.items():
+            stub.meta_fields[doctype] = sorted(
+                {candidates[0] for candidates in fields.values()}
+            )
+        for doctype, names in self.INSTALLED_SHAPES.items():
+            stub.meta_fields[doctype] = list(names)
+        return stub
+
+    def installed_meta(self, stub):
+        from clinic_ui.core import admin_contract
+
+        return {
+            doctype: set(stub.meta_fields[doctype])
+            for doctype in admin_contract.REQUIRED_FIELDS
+        }
+
+    def legacy_required_fields(self):
+        from clinic_ui.core import admin_contract
+
+        legacy = dict(admin_contract.REQUIRED_FIELDS)
+        legacy.update(self.LEGACY_SHAPES)
+        return legacy
+
+    def test_the_legacy_rate_map_is_the_defect(self):
+        from clinic_ui.core import admin_contract
+
+        stub = self.stub_with_installed_meta()
+        legacy = self.legacy_required_fields()
+        legacy["Clinical Procedure Template"] = {
+            name: candidates
+            for name, candidates in legacy["Clinical Procedure Template"].items()
+            if name != "company"
+        }
+        with mock.patch.object(admin_contract, "REQUIRED_FIELDS", legacy):
+            self.assertEqual(
+                admin_contract.install_problem(self.installed_meta(stub)),
+                "missing field Item Price.rate",
+            )
+
+    def test_the_legacy_company_map_is_the_second_defect(self):
+        from clinic_ui.core import admin_contract
+
+        stub = self.stub_with_installed_meta()
+        legacy = self.legacy_required_fields()
+        legacy["Item Price"] = {
+            name: candidates
+            for name, candidates in legacy["Item Price"].items()
+            if name != "rate"
+        }
+        with mock.patch.object(admin_contract, "REQUIRED_FIELDS", legacy):
+            self.assertEqual(
+                admin_contract.install_problem(self.installed_meta(stub)),
+                "missing field Clinical Procedure Template.company",
+            )
+
+    def test_the_gateway_preflight_passes_on_the_installed_shape(self):
+        stub = self.stub_with_installed_meta()
+
+        self.assertIsNone(self.gateway(stub).native_admin_install_problem())
+
+    def test_a_removed_genuine_field_still_refuses(self):
+        stub = self.stub_with_installed_meta()
+        stub.meta_fields["Item Price"] = [
+            name
+            for name in stub.meta_fields["Item Price"]
+            if name != "price_list_rate"
+        ]
+
+        self.assertEqual(
+            self.gateway(stub).native_admin_install_problem(),
+            "missing field Item Price.price_list_rate",
+        )
+
+    def test_the_item_price_insert_uses_the_installed_fields(self):
+        stub = self.stub_with_installed_meta()
+        stub.all_rows["Company"] = ["SIT Synthetic Company"]
+        stub.db.values[
+            ("Company", "SIT Synthetic Company", "default_currency")
+        ] = "USD"
+
+        self.gateway(stub).create_native_admin_master(
+            "item",
+            {
+                "item_code": "SIT-ITEM-1",
+                "item_name": "SIT Item One",
+                "item_group": "All Item Groups",
+                "stock_uom": "Nos",
+                "price_list": "Standard Selling",
+                "price_list_rate": 12.5,
+            },
+        )
+
+        price = stub.created_docs[-1]
+        self.assertEqual(price.doctype, "Item Price")
+        self.assertEqual(price.price_list_rate, 12.5)
+        self.assertEqual(price.uom, "Nos")
+        # The installed Item Price has no ``rate`` column.
+        self.assertFalse(hasattr(price, "rate"))
+
+    def test_the_template_insert_links_the_existing_item(self):
+        stub = self.stub_with_installed_meta()
+        stub.all_rows["Company"] = ["SIT Synthetic Company"]
+        stub.db.values[("Item", "SIT-ITEM-1", "item_group")] = "All Item Groups"
+
+        self.gateway(stub).create_native_admin_master(
+            "procedure_template",
+            {
+                "template_name": "SIT Dressing",
+                "item_code": "SIT-ITEM-1",
+                "rate": 25.0,
+            },
+        )
+
+        doc = stub.created_docs[-1]
+        self.assertEqual(doc.doctype, "Clinical Procedure Template")
+        self.assertEqual(doc.template, "SIT Dressing")
+        self.assertEqual(doc.description, "SIT Dressing")
+        self.assertEqual(doc.item, "SIT-ITEM-1")
+        self.assertEqual(doc.link_existing_item, 1)
+        self.assertEqual(doc.item_group, "All Item Groups")
+        # The installed template has no ``company`` column.
+        self.assertFalse(hasattr(doc, "company"))
+
+
 class ProcedureDefaultFieldTests(GatewayTestCase):
     """Real frappe: ``docstatus`` is a default column, not a DocField.
 
