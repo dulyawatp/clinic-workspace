@@ -2989,6 +2989,11 @@ class AmendmentDB:
         return self.defaults.get(key)
 
     def get_value(self, doctype, name, fieldname=None, as_dict=False, **kwargs):
+        if isinstance(name, dict):
+            # Filter lookup: ``(doctype, "filter", ((field, value), ...))``.
+            return self.values.get(
+                (doctype, "filter", tuple(sorted(name.items())))
+            )
         if isinstance(fieldname, (list, tuple)):
             row = {field: self.values.get((doctype, name, field)) for field in fieldname}
             return row if as_dict else tuple(row[field] for field in fieldname)
@@ -3197,8 +3202,124 @@ class CompanyResolutionTests(GatewayTestCase):
                 "uom_rows": 1,
                 "supplier_group": "All Supplier Groups",
                 "supplier_group_rows": 1,
+                "practitioner_links": {},
             },
         )
+
+
+class PractitionerMasterTests(GatewayTestCase):
+    """Amendment A1.1: the practitioner master kind."""
+
+    def stub_with_practitioner_meta(self, **counts):
+        session_stub = AmendmentStub()
+        session_stub.all_rows["Company"] = ["SIT Synthetic Company"]
+        meta = [
+            ("first_name", "Data", 1, None),
+            ("status", "Select", 1, None),
+            ("practitioner_type", "Select", 0, None),
+            ("gender", "Link", 0, "Gender"),
+            ("user_id", "Link", 0, "User"),
+        ]
+        session_stub.get_meta = lambda doctype: types.SimpleNamespace(
+            fields=[
+                types.SimpleNamespace(
+                    fieldname=fieldname,
+                    fieldtype=fieldtype,
+                    reqd=reqd,
+                    options=options,
+                )
+                for fieldname, fieldtype, reqd, options in meta
+            ]
+        )
+        session_stub.db.counts.update(counts)
+        return session_stub
+
+    def test_no_mandatory_link_fields_means_no_link_prerequisite(self):
+        stub = self.stub_with_practitioner_meta()
+        self.assertEqual(
+            self.gateway(stub).native_admin_mandatory_link_rows(
+                "Healthcare Practitioner"
+            ),
+            {},
+        )
+
+    def test_a_mandatory_link_count_is_read_from_the_installed_meta(self):
+        stub = self.stub_with_practitioner_meta(Gender=1)
+        stub.get_meta = lambda doctype: types.SimpleNamespace(
+            fields=[
+                types.SimpleNamespace(
+                    fieldname="gender",
+                    fieldtype="Link",
+                    reqd=1,
+                    options="Gender",
+                )
+            ]
+        )
+        self.assertEqual(
+            self.gateway(stub).native_admin_mandatory_link_rows(
+                "Healthcare Practitioner"
+            ),
+            {"gender": 1},
+        )
+
+    def test_the_practitioner_insert_carries_the_supplied_name_and_user(self):
+        stub = self.stub_with_practitioner_meta()
+        gateway = self.gateway(stub)
+
+        name = gateway.create_native_admin_master(
+            "practitioner",
+            {"practitioner_name": "SIT Doctor", "user": "sit.doc@example.invalid"},
+        )
+
+        created = stub.dict_docs[-1]
+        self.assertEqual(created["doctype"], "Healthcare Practitioner")
+        self.assertEqual(created["first_name"], "SIT Doctor")
+        self.assertEqual(created["user_id"], "sit.doc@example.invalid")
+        self.assertNotIn("status", created)
+        self.assertEqual(name, "HEALTHCARE PRACTITIONER-NEW-1")
+
+    def test_the_practitioner_insert_omits_the_user_link_when_empty(self):
+        stub = self.stub_with_practitioner_meta()
+        gateway = self.gateway(stub)
+
+        gateway.create_native_admin_master(
+            "practitioner", {"practitioner_name": "SIT Doctor", "user": None}
+        )
+
+        created = stub.dict_docs[-1]
+        self.assertNotIn("user_id", created)
+
+    def test_the_linked_user_is_read_for_the_exactly_once_check(self):
+        stub = self.stub_with_practitioner_meta()
+        lookup = (
+            "Healthcare Practitioner",
+            "filter",
+            (("user_id", "sit.doc@example.invalid"),),
+        )
+        stub.db.values[lookup] = None
+        gateway = self.gateway(stub)
+        self.assertIsNone(
+            gateway.native_admin_practitioner_for_user("sit.doc@example.invalid")
+        )
+
+        stub.db.values[lookup] = "HLC-PRAC-2026-00001"
+        self.assertEqual(
+            gateway.native_admin_practitioner_for_user("sit.doc@example.invalid"),
+            "HLC-PRAC-2026-00001",
+        )
+        self.assertEqual(
+            gateway.native_admin_practitioner_for_user("sit.doc@example.invalid"),
+            "HLC-PRAC-2026-00001",
+        )
+
+    def test_the_user_enabled_flag_is_read_for_the_link(self):
+        stub = self.stub_with_practitioner_meta()
+        stub.db.values[("User", "sit.doc@example.invalid", "enabled")] = 1
+        gateway = self.gateway(stub)
+        self.assertTrue(
+            gateway.native_admin_user_enabled("sit.doc@example.invalid")
+        )
+        self.assertFalse(gateway.native_admin_user_enabled("nobody@example.invalid"))
 
 
 class SupplierGroupResolutionTests(GatewayTestCase):

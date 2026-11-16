@@ -3878,6 +3878,64 @@ class Gateway:
         except Exception:
             return False
 
+    def native_admin_practitioner_for_user(self, user):
+        """Return the practitioner row already linked to one user, or ``None``.
+
+        Amendment A1.1: one practitioner per user link, decided before the fence.
+        """
+
+        try:
+            name = self.frappe.db.get_value(
+                admin_contract.PRACTITIONER_DOCTYPE, {"user_id": user}, "name"
+            )
+        except Exception:
+            return None
+        return self._text_value(name) or None
+
+    def native_admin_user_enabled(self, user):
+        """Return whether the link target user is enabled, read before the fence.
+
+        The installed ``validate_user_id`` refuses a disabled user inside the
+        mutation, so an enabled check belongs here instead. Anything unreadable
+        fails closed as "not enabled".
+        """
+
+        try:
+            return bool(
+                self.frappe.db.get_value(
+                    admin_contract.USER_DOCTYPE, user, "enabled"
+                )
+            )
+        except Exception:
+            return False
+
+    def native_admin_mandatory_link_rows(self, doctype):
+        """Row counts of every mandatory Link field on one DocType, or ``None``.
+
+        Amendment A1.1: a mandatory Link target with zero rows on site is a
+        designed pre-fence refusal, so the counts are read from the installed
+        meta (never hardcoded) and returned as ``{fieldname: rows}``.
+        """
+
+        try:
+            meta = self.frappe.get_meta(doctype)
+            fields = getattr(meta, "fields", None) or ()
+            links = {}
+            for field in fields:
+                if getattr(field, "fieldtype", None) != "Link":
+                    continue
+                if not getattr(field, "reqd", 0):
+                    continue
+                options = getattr(field, "options", None)
+                if not options:
+                    continue
+                links[str(field.fieldname)] = int(
+                    self.frappe.db.count(options)
+                )
+            return links
+        except Exception:
+            return None
+
     def native_admin_master_exists(self, master_type, identifier):
         doctype = admin_contract.MASTER_DOCTYPES.get(master_type)
         if doctype is None:
@@ -3980,6 +4038,9 @@ class Gateway:
             "supplier_group_rows": self.native_admin_master_rows(
                 "supplier_group"
             ),
+            "practitioner_links": self.native_admin_mandatory_link_rows(
+                admin_contract.PRACTITIONER_DOCTYPE
+            ),
         }
 
     def _admin_company(self):
@@ -4064,6 +4125,21 @@ class Gateway:
                         "uom_name": payload["uom_name"],
                     }
                 )
+                doc.insert()
+                return self._text_value(doc.name)
+            if master_type == "practitioner":
+                # Amendment A1.1. The installed required ``first_name`` carries
+                # the supplied practitioner name (the installed
+                # ``set_full_name`` derives ``practitioner_name`` from it and the
+                # installed ``status`` default is Active). The user link is
+                # validated and its uniqueness decided before the fence.
+                fields = {
+                    "doctype": admin_contract.PRACTITIONER_DOCTYPE,
+                    "first_name": payload["practitioner_name"],
+                }
+                if payload.get("user"):
+                    fields["user_id"] = payload["user"]
+                doc = self.frappe.get_doc(fields)
                 doc.insert()
                 return self._text_value(doc.name)
             if master_type == "supplier_group":
@@ -4328,6 +4404,16 @@ class Gateway:
                     as_dict=True,
                 )
                 return self._admin_facts_row(row, ())
+            if master_type == "practitioner":
+                row = self.frappe.db.get_value(
+                    admin_contract.PRACTITIONER_DOCTYPE,
+                    name,
+                    ["name", "practitioner_name", "user_id"],
+                    as_dict=True,
+                )
+                return self._admin_facts_row(
+                    row, ("practitioner_name", "user_id")
+                )
             raise patient_write.WriteUncertain()
         except patient_write.WriteUncertain:
             raise

@@ -59,6 +59,8 @@ PROCEDURE_TEMPLATE_DOCTYPE = "Clinical Procedure Template"
 # install has none. Order: uom -> supplier_group -> price list -> item ->
 # procedure template (warehouse, supplier and mode of payment are
 # order-independent, but supplier_group must precede supplier).
+# Design Amendment A1.1 adds ``practitioner``: one Healthcare Practitioner for
+# the SIT doctor user, order-independent relative to that chain.
 MASTER_TYPES = (
     "warehouse",
     "supplier",
@@ -68,6 +70,7 @@ MASTER_TYPES = (
     "procedure_template",
     "supplier_group",
     "uom",
+    "practitioner",
 )
 
 MASTER_DOCTYPES = {
@@ -79,6 +82,7 @@ MASTER_DOCTYPES = {
     "procedure_template": PROCEDURE_TEMPLATE_DOCTYPE,
     "supplier_group": SUPPLIER_GROUP_DOCTYPE,
     "uom": UOM_DOCTYPE,
+    "practitioner": PRACTITIONER_DOCTYPE,
 }
 
 # The first supplier group the install/contract supplies. The supplier row needs
@@ -130,6 +134,9 @@ MASTER_PAYLOAD_KEYS = {
     "procedure_template": frozenset({"template_name", "item_code", "rate"}),
     "supplier_group": frozenset({"supplier_group_name"}),
     "uom": frozenset({"uom_name"}),
+    # Amendment A1.1. ``user`` is the installed ``user_id`` link; it is optional
+    # and may be sent empty. Every other key is required text.
+    "practitioner": frozenset({"practitioner_name", "user"}),
 }
 
 # Installed-field preflight. Logical name -> installed candidates, per DocType.
@@ -144,6 +151,13 @@ REQUIRED_FIELDS = {
     },
     ROLE_DOCTYPE: {"role_name": ("role_name", "name")},
     PRACTITIONER_DOCTYPE: {
+        # Amendment A1.1: the practitioner master op writes these installed
+        # fields. ``practitioner_name`` is the contract payload name; the
+        # installed required ``first_name`` carries the same text, and the
+        # installed ``status`` default (Active) satisfies its own requirement.
+        "practitioner_name": ("practitioner_name",),
+        "first_name": ("first_name",),
+        "status": ("status",),
         "user_id": ("user_id",),
     },
     WAREHOUSE_DOCTYPE: {
@@ -500,6 +514,15 @@ def _normalise_master_payload(master_type, payload):
         value = payload[key]
         if key == "rate":
             normalized[key] = _positive_rate(value)
+        elif master_type == "practitioner" and key == "user":
+            # Amendment A1.1: the user link is optional. An empty string is the
+            # explicit "no link" the form sends, never a missing key.
+            if value is None or (isinstance(value, str) and not value.strip()):
+                normalized[key] = None
+            else:
+                normalized[key] = _require_text(
+                    value, key, MAX_NAME_LENGTH
+                )
         else:
             normalized[key] = _require_text(value, key, MAX_TEXT_LENGTH)
     return normalized
@@ -542,6 +565,11 @@ def identifier_for(master_type, payload):
         return payload["supplier_group_name"]
     if master_type == "uom":
         return payload["uom_name"]
+    if master_type == "practitioner":
+        # The installed docname is autonamed (HLC-PRAC-.YYYY.-), so the receipt
+        # identifier is the supplied practitioner name. Exactly-once for the
+        # variant is per linked user, decided by the endpoint before the fence.
+        return payload["practitioner_name"]
     raise AdminContractError("master_type is not supported")
 
 
@@ -561,8 +589,10 @@ def prerequisite_problem(master_type, prerequisites):
     """Return the named pre-fence prerequisite problem, or ``None``.
 
     ``prerequisites`` is the server-read site state: the resolved company, the
-    installed UOM row count, the resolved supplier group and the installed
-    supplier-group row count. Nothing here is client input.
+    installed UOM row count, the resolved supplier group, the installed
+    supplier-group row count and — Amendment A1.1 — the installed row count of
+    every mandatory Link field on Healthcare Practitioner. Nothing here is
+    client input.
     """
 
     if master_type_problem(master_type) is not None:
@@ -581,6 +611,18 @@ def prerequisite_problem(master_type, prerequisites):
         prerequisites.get("supplier_group")
     ):
         return "no Supplier Group rows are installed for the supplier"
+    if master_type == "practitioner":
+        links = prerequisites.get("practitioner_links")
+        if not isinstance(links, dict):
+            return "practitioner link targets unreadable"
+        for field, rows in sorted(links.items()):
+            if not _count(rows):
+                return f"practitioner link rows unreadable for {field}"
+            if rows == 0:
+                return (
+                    "no rows are installed for the mandatory practitioner "
+                    f"link {field}"
+                )
     return None
 
 
@@ -624,6 +666,16 @@ def master_facts_problem(master_type, facts, expected):
     payload = expected.get("payload")
     if not isinstance(payload, dict):
         return "expected master payload unreadable"
+    if master_type == "practitioner":
+        # Amendment A1.1: the row is autonamed, so the closed-world check reads
+        # the installed name and compares the supplied name and the user link.
+        if not _present(facts.get("name")):
+            return "created practitioner has no name"
+        if facts.get("practitioner_name") != payload["practitioner_name"]:
+            return "created practitioner differs from the request"
+        if (facts.get("user_id") or None) != payload["user"]:
+            return "created practitioner user differs from the request"
+        return None
     if facts.get("name") != expected.get("identifier"):
         return "created master differs from the request"
 

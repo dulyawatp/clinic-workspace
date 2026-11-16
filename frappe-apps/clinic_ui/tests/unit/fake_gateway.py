@@ -327,7 +327,15 @@ class FakeGateway:
             "uom_rows": 1,
             "supplier_group": "All Supplier Groups",
             "supplier_group_rows": 1,
+            # Amendment A1.1: mandatory Link row counts on Healthcare
+            # Practitioner, read from installed meta. The probe found none
+            # mandatory on this stack, so the fixture is empty.
+            "practitioner_links": {},
         }
+        self.admin_practitioner_users = {}
+        self.admin_enabled_users = set()
+        self.admin_practitioner_for_user_calls = []
+        self.admin_user_enabled_calls = []
         self.admin_prerequisites_calls = []
         self.admin_receipts = {}
         self.admin_receipt_records = []
@@ -1213,6 +1221,14 @@ class FakeGateway:
         self.admin_master_exists_calls.append((master_type, identifier))
         return (master_type, identifier) in self.admin_masters
 
+    def native_admin_practitioner_for_user(self, user):
+        self.admin_practitioner_for_user_calls.append(user)
+        return self.admin_practitioner_users.get(user)
+
+    def native_admin_user_enabled(self, user):
+        self.admin_user_enabled_calls.append(user)
+        return user in self.admin_enabled_users
+
     def native_admin_item_price_exists(self, item_code, price_list):
         self.admin_item_price_exists_calls.append((item_code, price_list))
         return (item_code, price_list) in self.admin_item_prices
@@ -1249,6 +1265,9 @@ class FakeGateway:
             return payload["supplier_group_name"]
         if master_type == "uom":
             return payload["uom_name"]
+        if master_type == "practitioner":
+            # The installed row is autonamed; the fake returns a stable docname.
+            return "HLC-PRAC-2026-00001"
         return payload["template_name"]
 
     def native_admin_user_facts(self, user):
@@ -1287,6 +1306,12 @@ class FakeGateway:
             return {"name": name}
         if master_type == "uom":
             return {"name": name}
+        if master_type == "practitioner":
+            return {
+                "name": name,
+                "practitioner_name": payload["practitioner_name"],
+                "user_id": payload["user"],
+            }
         return {"name": name, "item_code": payload["item_code"]}
 
     def lookup_admin_receipt(self, actor, kind, operation_key):

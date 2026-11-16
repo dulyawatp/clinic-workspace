@@ -611,7 +611,7 @@ class EditMasterTests(unittest.TestCase):
 
     def test_an_exhausted_master_budget_is_refused_before_the_fence(self):
         fake = gateway()
-        for index in range(14):
+        for index in range(15):
             committed_master(fake, f"admin-master-key-{index:04d}-01")
 
         payload = admin_write.edit_master(fake, master_body(), CSRF)
@@ -640,6 +640,132 @@ class EditMasterTests(unittest.TestCase):
         self.assertEqual(fake.admin_fence_claim.committed, [])
         self.assertEqual(fake.commit_calls, 0)
         self.assertEqual(fake.rollback_calls, 1)
+
+
+class PractitionerMasterTests(unittest.TestCase):
+    """Amendment A1.1: the practitioner master op through the contract."""
+
+    def body(self, **overrides):
+        payload = {"practitioner_name": "SIT Doctor", "user": ""}
+        payload.update(overrides.pop("payload", {}))
+        return master_body("practitioner", payload, **overrides)
+
+    def test_creates_one_practitioner_and_receipts_the_supplied_name(self):
+        fake = gateway()
+
+        payload = admin_write.edit_master(fake, self.body(), CSRF)
+
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(payload["master"]["master_type"], "practitioner")
+        self.assertEqual(payload["master"]["master_id"], "HLC-PRAC-2026-00001")
+        self.assertEqual(fake.admin_fence_calls[0][1], "admin_master")
+        self.assertEqual(len(fake.admin_master_create_calls), 1)
+        master_type, sent = fake.admin_master_create_calls[0]
+        self.assertEqual(master_type, "practitioner")
+        self.assertEqual(
+            sent, {"practitioner_name": "SIT Doctor", "user": None}
+        )
+        receipt = admin_contract.decode_receipt(
+            fake.admin_fence_claim.committed[0]
+        )
+        self.assertEqual(receipt.master_type, "practitioner")
+        # The installed row is autonamed; the receipt carries the created name.
+        self.assertEqual(receipt.identifier, "HLC-PRAC-2026-00001")
+
+    def test_a_linked_user_is_validated_and_linked(self):
+        fake = gateway()
+        fake.admin_users.add("sit.doc@example.invalid")
+        fake.admin_enabled_users.add("sit.doc@example.invalid")
+
+        payload = admin_write.edit_master(
+            fake, self.body(payload={"user": "sit.doc@example.invalid"}), CSRF
+        )
+
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(
+            fake.admin_master_create_calls[0][1]["user"],
+            "sit.doc@example.invalid",
+        )
+        self.assertEqual(
+            set(fake.admin_practitioner_for_user_calls),
+            {"sit.doc@example.invalid"},
+        )
+
+    def test_an_unknown_user_is_refused_before_the_fence(self):
+        fake = gateway()
+
+        payload = admin_write.edit_master(
+            fake, self.body(payload={"user": "sit.doc@example.invalid"}), CSRF
+        )
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_master_create_calls, [])
+
+    def test_a_disabled_user_is_refused_before_the_fence(self):
+        fake = gateway()
+        fake.admin_users.add("sit.doc@example.invalid")
+
+        payload = admin_write.edit_master(
+            fake, self.body(payload={"user": "sit.doc@example.invalid"}), CSRF
+        )
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_master_create_calls, [])
+
+    def test_a_second_practitioner_for_the_same_user_is_refused_before_the_fence(
+        self,
+    ):
+        fake = gateway()
+        fake.admin_enabled_users.add("sit.doc@example.invalid")
+        fake.admin_practitioner_users["sit.doc@example.invalid"] = (
+            "HLC-PRAC-2026-00001"
+        )
+
+        payload = admin_write.edit_master(
+            fake, self.body(payload={"user": "sit.doc@example.invalid"}), CSRF
+        )
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_master_create_calls, [])
+
+    def test_a_mandatory_link_with_zero_rows_is_refused_before_the_fence(self):
+        fake = gateway()
+        fake.admin_prerequisites = dict(
+            fake.admin_prerequisites, practitioner_links={"gender": 0}
+        )
+
+        payload = admin_write.edit_master(fake, self.body(), CSRF)
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.admin_fence_calls, [])
+
+    def test_the_practitioner_payload_shape_is_strict(self):
+        cases = (
+            {"practitioner_name": "SIT Doctor"},
+            {"practitioner_name": "SIT Doctor", "user": "", "extra": "x"},
+            {"practitioner_name": "", "user": ""},
+            {"practitioner_name": "SIT Doctor", "user": 7},
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                fake = gateway()
+                result = admin_write.edit_master(
+                    fake, master_body("practitioner", payload), CSRF
+                )
+                self.assertEqual(result, {"code": "VALIDATION"})
+                self.assertEqual(fake.admin_fence_calls, [])
+
+    def test_the_practitioner_op_needs_the_native_create_authority(self):
+        fake = gateway()
+        fake.admin_can_create = {"Healthcare Practitioner": False}
+
+        with self.assertRaises(Denied):
+            admin_write.edit_master(fake, self.body(), CSRF)
+        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_master_create_calls, [])
 
 
 class AckTests(unittest.TestCase):

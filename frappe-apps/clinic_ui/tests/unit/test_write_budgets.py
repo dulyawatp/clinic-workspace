@@ -28,7 +28,7 @@ EXPECTED = {
     "invoice_submit": (1, "invoice"),
     "payment_receive": (1, "payment"),
     "admin_user": (4, "admin"),
-    "admin_master": (14, "admin"),
+    "admin_master": (15, "admin"),
 }
 
 

@@ -177,7 +177,19 @@ def _master_problems(gateway, payload):
     if problem:
         return problem
     identifier = admin_contract.identifier_for(master_type, body)
-    if gateway.native_admin_master_exists(master_type, identifier):
+    if master_type == "practitioner":
+        # Amendment A1.1: the installed row is autonamed, so the supplied name is
+        # not a key. Exactly-once is per linked user (checked here) plus the
+        # one-shot fence receipt.
+        user = body["user"]
+        if user:
+            if not gateway.native_admin_user_exists(user):
+                return "practitioner user does not exist"
+            if not gateway.native_admin_user_enabled(user):
+                return "practitioner user is disabled"
+            if gateway.native_admin_practitioner_for_user(user):
+                return "practitioner already exists for the user"
+    elif gateway.native_admin_master_exists(master_type, identifier):
         return "master already exists"
     if master_type == "item":
         if not gateway.native_admin_master_exists("uom", body["stock_uom"]):

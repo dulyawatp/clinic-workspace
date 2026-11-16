@@ -193,3 +193,7 @@
 ## Amendment 2026-11-16 — Task 11A inserted (user decisions D3/D4)
 
 Task 11 (SIT A) is split by controller ruling: **Task 11A** = contract amendment implementing budget v3 per design Amendment A1 (D1/D2 defect fixes; MASTER_TYPES += uom + supplier_group under admin_master 14; new capability procedure_create 1; registry 18 kinds; capability ids 40; pre-fence prerequisite refusals; verifier/selfcheck extensions) — implementation + full review gate, code only, no live-stack writes. **Task 11B** = the SIT A window (bootstrap ADM; scheduler pause; admin gates open; 18 ops through the UI as bootstrap identity; budgets exactly 14+4; fence receipts + side-effect closure; gates closed; scheduler restore; verify.py 3→7 parameterized + full verify post-ops), resumed on the original task-11 child after 11A's review passes. Tasks 12–14 unchanged except SIT B: encounter cascade → Service Request → procedure_create → procedure_complete through the UI (no bench seed). Budget v3 supersedes v2 per user decision 2026-11-16.
+
+## Correction 2026-11-16 — A1.1 practitioner kind
+
+User approved folding a third new master kind (`practitioner`, admin_master 14→15) into the same budget-v3 amendment batch (A1.1 in the design doc). SIT A becomes 19 ops (15+4). Task 11A child resumed to implement it; review, rebuild, redeploy cover the whole amendment.

@@ -106,12 +106,21 @@ def supplier_group_payload(**overrides):
     return values
 
 
+def practitioner_payload(**overrides):
+    values = {"practitioner_name": "SIT Doctor", "user": ""}
+    values.update(overrides)
+    return values
+
+
 def prerequisites(**overrides):
     values = {
         "company": "SIT Synthetic Company",
         "uom_rows": 1,
         "supplier_group": "All Supplier Groups",
         "supplier_group_rows": 1,
+        # Probe-verified: Healthcare Practitioner has no mandatory Link fields on
+        # this stack (Amendment A1.1), so the map is empty.
+        "practitioner_links": {},
     }
     values.update(overrides)
     return values
@@ -399,10 +408,39 @@ class PrerequisiteTests(unittest.TestCase):
             "UOM rows are unreadable",
         )
 
-    def test_the_two_new_kinds_are_installed_masters(self):
+    def test_the_practitioner_link_prerequisites_are_probe_derived(self):
+        self.assertEqual(
+            contract.prerequisite_problem("practitioner", prerequisites()),
+            None,
+        )
+        self.assertEqual(
+            contract.prerequisite_problem(
+                "practitioner",
+                prerequisites(practitioner_links={"gender": 0}),
+            ),
+            "no rows are installed for the mandatory practitioner link gender",
+        )
+        self.assertEqual(
+            contract.prerequisite_problem(
+                "practitioner", prerequisites(practitioner_links=None)
+            ),
+            "practitioner link targets unreadable",
+        )
+        self.assertEqual(
+            contract.prerequisite_problem(
+                "practitioner",
+                prerequisites(practitioner_links={"gender": None}),
+            ),
+            "practitioner link rows unreadable for gender",
+        )
+
+    def test_the_three_new_kinds_are_installed_masters(self):
         self.assertEqual(contract.MASTER_DOCTYPES["uom"], "UOM")
         self.assertEqual(
             contract.MASTER_DOCTYPES["supplier_group"], "Supplier Group"
+        )
+        self.assertEqual(
+            contract.MASTER_DOCTYPES["practitioner"], "Healthcare Practitioner"
         )
         self.assertEqual(
             contract.MASTER_PAYLOAD_KEYS["uom"], frozenset({"uom_name"})
@@ -410,6 +448,100 @@ class PrerequisiteTests(unittest.TestCase):
         self.assertEqual(
             contract.MASTER_PAYLOAD_KEYS["supplier_group"],
             frozenset({"supplier_group_name"}),
+        )
+        self.assertEqual(
+            contract.MASTER_PAYLOAD_KEYS["practitioner"],
+            frozenset({"practitioner_name", "user"}),
+        )
+
+
+class PractitionerMasterContractTests(unittest.TestCase):
+    """Amendment A1.1: payload, identifier and facts for the practitioner kind."""
+
+    def test_an_empty_user_link_normalises_to_none(self):
+        payload = contract.validate_edit_master(
+            master_body("practitioner", practitioner_payload())
+        )["payload"]
+        self.assertIsNone(payload["user"])
+
+    def test_a_named_user_link_is_kept(self):
+        payload = contract.validate_edit_master(
+            master_body(
+                "practitioner",
+                practitioner_payload(user="sit.doc@example.invalid"),
+            )
+        )["payload"]
+        self.assertEqual(payload["user"], "sit.doc@example.invalid")
+
+    def test_the_payload_shape_is_closed_world(self):
+        cases = (
+            {"practitioner_name": "SIT Doctor"},
+            {"user": ""},
+            {"practitioner_name": "SIT Doctor", "user": "", "designation": "x"},
+            {"practitioner_name": "", "user": ""},
+            {"practitioner_name": "SIT Doctor", "user": 7},
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                with self.assertRaises(contract.AdminContractError):
+                    contract.validate_edit_master(
+                        master_body("practitioner", payload)
+                    )
+
+    def test_the_identifier_is_the_supplied_name(self):
+        self.assertEqual(
+            contract.identifier_for("practitioner", practitioner_payload()),
+            "SIT Doctor",
+        )
+
+    def test_the_facts_compare_the_name_and_the_user_link(self):
+        payload = practitioner_payload(user="sit.doc@example.invalid")
+        expected = {"identifier": "HLC-PRAC-2026-00001", "payload": payload}
+        self.assertIsNone(
+            contract.master_facts_problem(
+                "practitioner",
+                {
+                    "name": "HLC-PRAC-2026-00001",
+                    "practitioner_name": "SIT Doctor",
+                    "user_id": "sit.doc@example.invalid",
+                },
+                expected,
+            )
+        )
+        self.assertEqual(
+            contract.master_facts_problem(
+                "practitioner",
+                {
+                    "name": "HLC-PRAC-2026-00001",
+                    "practitioner_name": "Someone Else",
+                    "user_id": "sit.doc@example.invalid",
+                },
+                expected,
+            ),
+            "created practitioner differs from the request",
+        )
+        self.assertEqual(
+            contract.master_facts_problem(
+                "practitioner",
+                {
+                    "name": "HLC-PRAC-2026-00001",
+                    "practitioner_name": "SIT Doctor",
+                    "user_id": None,
+                },
+                expected,
+            ),
+            "created practitioner user differs from the request",
+        )
+
+    def test_the_practitioner_mandatory_fields_are_the_installed_ones(self):
+        self.assertEqual(
+            contract.REQUIRED_FIELDS[contract.PRACTITIONER_DOCTYPE],
+            {
+                "practitioner_name": ("practitioner_name",),
+                "first_name": ("first_name",),
+                "status": ("status",),
+                "user_id": ("user_id",),
+            },
         )
 
     def test_the_new_master_facts_are_their_names(self):
@@ -439,7 +571,7 @@ class PrerequisiteTests(unittest.TestCase):
 class BudgetTests(unittest.TestCase):
     def test_the_family_budgets_are_consumed_from_the_registry(self):
         self.assertEqual(contract.budget("admin_user"), 4)
-        self.assertEqual(contract.budget("admin_master"), 14)
+        self.assertEqual(contract.budget("admin_master"), 15)
         self.assertEqual(
             contract.ADMIN_KINDS, ("admin_user", "admin_master")
         )

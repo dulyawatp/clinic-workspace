@@ -298,3 +298,11 @@ write windows exactly as before.
 - SIT A: 18 ops (14 admin_master + 4 admin_user); budgets consumed exactly 14 + 4.
 - SIT B: encounter cascade → Service Request → **procedure_create (budget 1)** → procedure_complete (budget 1) — all through the UI, no bench seeds.
 - Capability ids 39 → 40; 40-name lockstep across the four surfaces; verifier contract + selfcheck fixtures extended; synthetic-user check parameterized 3 → 7 (asserted post-creation).
+
+### A1.1 — practitioner master kind (user-approved 2026-11-16)
+
+- Third new MASTER_TYPES entry: `practitioner` (creates one Healthcare Practitioner). `admin_master` 14 → **15** (registry stays 18 kinds — master kinds share the `write.admin.master` capability id; capability ids remain 40).
+- Op semantics: practitioner_name (required), practitioner_type + any other mandatory Link fields per installed meta (probe on-site READ-ONLY first), optional `user` link validated to exist (SIT A target: `sit.doc@example.invalid`). Exactly-once per user link: PRE-fence refusal when the linked User already has a practitioner row.
+- Dependency order: practitioner is order-independent relative to the admin chain (uom → supplier_group → price list → item → procedure template; supplier_group before supplier).
+- SIT A ops: **19** (15 admin_master + 4 admin_user); budgets consumed exactly 15 + 4.
+- Task-12 preflight (config writes, gate-flip class, documented in evidence): set `clinic_ui_encounter_practitioner` → the created practitioner; set `clinic_ui_encounter_company` → `SIT Synthetic Company` (if the encounter path requires it). No bench seed.
