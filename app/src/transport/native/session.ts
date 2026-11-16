@@ -88,6 +88,7 @@ const NATIVE_ENABLEABLE = new Set<string>([
   "write.patient.update",
   "write.appointment.book",
   "write.appointment.reschedule",
+  "write.appointment.cancel",
   "write.appointment.checkin",
   "write.appointment.no_show",
   "write.encounter.amend",

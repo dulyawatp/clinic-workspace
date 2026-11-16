@@ -112,6 +112,8 @@ class BootstrapCapabilityTests(unittest.TestCase):
         capabilities = bootstrap_capabilities(
             write_appointment_book=True,
             write_appointment_reschedule=True,
+            write_appointment_cancel=True,
+            write_appointment_no_show=True,
             write_appointment_checkin=True,
         )
         self.assertEqual(
@@ -123,23 +125,38 @@ class BootstrapCapabilityTests(unittest.TestCase):
             {
                 "write.appointment.book",
                 "write.appointment.reschedule",
+                "write.appointment.cancel",
+                "write.appointment.no_show",
                 "write.appointment.checkin",
             },
         )
         self.assertEqual(
-            capabilities["write.appointment.cancel"], READ_ONLY_STATE
+            capabilities["write.patient.create"], READ_ONLY_STATE
         )
-        self.assertEqual(capabilities["write.patient.create"], READ_ONLY_STATE)
 
     def test_appointment_writes_are_independently_requested(self):
         book_only = bootstrap_capabilities(write_appointment_book=True)
         self.assertEqual(book_only["write.appointment.book"], ENABLED_STATE)
-        self.assertEqual(
-            book_only["write.appointment.reschedule"], READ_ONLY_STATE
-        )
-        self.assertEqual(
-            book_only["write.appointment.checkin"], READ_ONLY_STATE
-        )
+        for name in (
+            "write.appointment.reschedule",
+            "write.appointment.cancel",
+            "write.appointment.no_show",
+            "write.appointment.checkin",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(book_only[name], READ_ONLY_STATE)
+
+    def test_cancel_and_no_show_ride_the_appointment_gate(self):
+        for kwargs, name in (
+            ({"write_appointment_cancel": True}, "write.appointment.cancel"),
+            ({"write_appointment_no_show": True}, "write.appointment.no_show"),
+        ):
+            with self.subTest(name=name):
+                capabilities = bootstrap_capabilities(**kwargs)
+                self.assertEqual(capabilities[name], ENABLED_STATE)
+                self.assertEqual(
+                    capabilities["write.appointment.book"], READ_ONLY_STATE
+                )
 
     def test_bootstrap_map_is_a_fresh_mapping(self):
         first = bootstrap_capabilities(write_patient_create=True)
@@ -160,7 +177,7 @@ class BootstrapCapabilityTests(unittest.TestCase):
             {**valid, "unknown.capability": READ_ONLY_STATE},
             {**valid, "read.patient": "enabledish"},
             {**valid, "read.patient": ENABLED_STATE},
-            {**valid, "write.appointment.cancel": ENABLED_STATE},
+            {**valid, "write.photo.upload": ENABLED_STATE},
             {**valid, "write.admin.master": ENABLED_STATE},
         )
         for candidate in invalid_maps:
@@ -175,6 +192,8 @@ class BootstrapCapabilityTests(unittest.TestCase):
             "write.patient.update",
             "write.appointment.book",
             "write.appointment.reschedule",
+            "write.appointment.cancel",
+            "write.appointment.no_show",
             "write.appointment.checkin",
             *NEW_WRITE_NAMES,
         }

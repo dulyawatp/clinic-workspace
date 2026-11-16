@@ -77,7 +77,7 @@ class BootstrapDTOTests(unittest.TestCase):
         )
         cases = cases + (
             {**read_only_capabilities(), "read.patient": "enabled"},
-            {**read_only_capabilities(), "write.appointment.cancel": "enabled"},
+            {**read_only_capabilities(), "write.photo.upload": "enabled"},
         )
         for capabilities in cases:
             with self.subTest(capabilities=capabilities):

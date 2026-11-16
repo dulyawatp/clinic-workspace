@@ -160,22 +160,27 @@ describe("native session bootstrap", () => {
     }
   });
 
-  it("enables appointment book, reschedule and check-in but never cancellation", async () => {
+  it("enables the five appointment writes only on an exact enabled state", async () => {
     serveBootstrap(
       liveMessage({
         capabilities: {
           "write.appointment.book": "enabled",
           "write.appointment.reschedule": "enabled",
-          "write.appointment.checkin": "enabled",
           "write.appointment.cancel": "enabled",
+          "write.appointment.no_show": "enabled",
+          "write.appointment.checkin": "enabled",
+          "write.admin.master": "enabled",
         },
       }),
     );
     expect((await fetchNativeSession())?.capabilities).toEqual({
       "write.appointment.book": "enabled",
       "write.appointment.reschedule": "enabled",
+      "write.appointment.cancel": "enabled",
+      "write.appointment.no_show": "enabled",
       "write.appointment.checkin": "enabled",
-      "write.appointment.cancel": "read_only",
+      // Not enableable by deployment yet: it has no reviewed write family.
+      "write.admin.master": "read_only",
     });
 
     for (const value of [null, true, {}, "ENABLED", "enabled ", "denied"]) {
@@ -184,6 +189,8 @@ describe("native session bootstrap", () => {
           capabilities: {
             "write.appointment.book": value,
             "write.appointment.reschedule": value,
+            "write.appointment.cancel": value,
+            "write.appointment.no_show": value,
             "write.appointment.checkin": value,
           },
         }),
@@ -191,6 +198,8 @@ describe("native session bootstrap", () => {
       expect((await fetchNativeSession())?.capabilities).toEqual({
         "write.appointment.book": "read_only",
         "write.appointment.reschedule": "read_only",
+        "write.appointment.cancel": "read_only",
+        "write.appointment.no_show": "read_only",
         "write.appointment.checkin": "read_only",
       });
     }

@@ -119,16 +119,18 @@ class AppointmentCapabilityTests(unittest.TestCase):
     def capabilities(self, fake):
         return session_endpoint.bootstrap(fake)["capabilities"]
 
-    def test_enables_the_three_appointment_writes_and_never_cancel(self):
+    def test_enables_the_five_appointment_writes_only(self):
         capabilities = self.capabilities(self.appointment_gateway())
         for name in (
             "write.appointment.book",
             "write.appointment.reschedule",
+            "write.appointment.cancel",
+            "write.appointment.no_show",
             "write.appointment.checkin",
         ):
             self.assertEqual(capabilities[name], "enabled")
-        self.assertEqual(capabilities["write.appointment.cancel"], "read_only")
         self.assertEqual(capabilities["write.patient.create"], "read_only")
+        self.assertEqual(capabilities["write.admin.master"], "read_only")
 
     def test_every_gate_failure_leaves_appointment_writes_read_only(self):
         cases = {

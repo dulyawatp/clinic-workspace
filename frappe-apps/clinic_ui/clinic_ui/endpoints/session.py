@@ -57,7 +57,7 @@ def _patient_write_flags(gateway, settings, role):
 
 
 def _appointment_write_flags(gateway, settings, role):
-    """Return ``(book, reschedule, checkin)`` after the appointment write gate.
+    """Return ``(book, reschedule, cancel, no_show, checkin)`` after the gate.
 
     The gate is independent of the patient write flag: the exact approved site,
     the appointment flag, the private deployment marker, a ready fence store,
@@ -66,7 +66,7 @@ def _appointment_write_flags(gateway, settings, role):
     write endpoints; these flags only advertise that the surface exists.
     """
 
-    disabled = (False, False, False)
+    disabled = (False, False, False, False, False)
     if role not in APPOINTMENT_WRITE_ROLE_CODES:
         return disabled
     try:
@@ -106,7 +106,7 @@ def _appointment_write_flags(gateway, settings, role):
             or type_contract["allow_booking_for"] != "Department"
         ):
             return disabled
-        return True, True, True
+        return True, True, True, True, True
     except Exception:
         return disabled
 
@@ -132,6 +132,8 @@ def bootstrap(gateway):
         (
             write_appointment_book,
             write_appointment_reschedule,
+            write_appointment_cancel,
+            write_appointment_no_show,
             write_appointment_checkin,
         ) = _appointment_write_flags(gateway, settings, role)
         capabilities = bootstrap_capabilities(
@@ -139,6 +141,8 @@ def bootstrap(gateway):
             write_patient_update=write_update,
             write_appointment_book=write_appointment_book,
             write_appointment_reschedule=write_appointment_reschedule,
+            write_appointment_cancel=write_appointment_cancel,
+            write_appointment_no_show=write_appointment_no_show,
             write_appointment_checkin=write_appointment_checkin,
         )
         return dto.build_bootstrap(

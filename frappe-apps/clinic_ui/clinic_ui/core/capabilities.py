@@ -2,11 +2,11 @@
 
 Names and order mirror ``contracts/capabilities.json`` exactly; the parity test
 fails if the client contract and this list drift. The default map is
-``read_only``. Only the reviewed patient create/edit, the three appointment
-write capabilities and the deployment-gated writes added by the full
-write-contract wave may be promoted to ``enabled``, and only after the
-bootstrap endpoint has verified the whole reviewed local write gate for that
-surface. Every other capability stays ``read_only``.
+``read_only``. Only the reviewed patient create/edit, the five appointment
+writes (book, reschedule, cancel, no-show, check-in) and the deployment-gated
+writes added by the full write-contract wave may be promoted to ``enabled``,
+and only after the bootstrap endpoint has verified the whole reviewed local
+write gate for that surface. Every other capability stays ``read_only``.
 """
 
 CAPABILITY_NAMES = (
@@ -62,12 +62,17 @@ BOOTSTRAP_STATES = frozenset({READ_ONLY_STATE, ENABLED_STATE})
 PATIENT_WRITE_NAMES = frozenset(
     {"write.patient.create", "write.patient.update"}
 )
-# The reviewed local appointment surface. Cancellation and the generic status
-# setter stay unavailable; no-show is deployment-gated by its own family gate.
+# The reviewed local appointment surface. The designed cancel transition and
+# the manual no-show ride the same reviewed appointment gate as booking,
+# rescheduling and check-in: the exact approved site, the appointment flag, the
+# private deployment marker, a ready store, safe controller settings and the
+# caller's own native authority. Only the generic status setter stays absent.
 APPOINTMENT_WRITE_NAMES = frozenset(
     {
         "write.appointment.book",
         "write.appointment.reschedule",
+        "write.appointment.cancel",
+        "write.appointment.no_show",
         "write.appointment.checkin",
     }
 )
@@ -76,7 +81,6 @@ APPOINTMENT_WRITE_NAMES = frozenset(
 # publishes them read-only until that gate is wired.
 DEPLOYMENT_GATED_WRITE_NAMES = frozenset(
     {
-        "write.appointment.no_show",
         "write.encounter.amend",
         "write.invoice.void_amend",
         "write.stock.consume",
@@ -99,6 +103,8 @@ def bootstrap_capabilities(
     write_patient_update=False,
     write_appointment_book=False,
     write_appointment_reschedule=False,
+    write_appointment_cancel=False,
+    write_appointment_no_show=False,
     write_appointment_checkin=False,
 ):
     """Return the default read-only map with reviewed writes enabled.
@@ -117,6 +123,10 @@ def bootstrap_capabilities(
         capabilities["write.appointment.book"] = ENABLED_STATE
     if write_appointment_reschedule is True:
         capabilities["write.appointment.reschedule"] = ENABLED_STATE
+    if write_appointment_cancel is True:
+        capabilities["write.appointment.cancel"] = ENABLED_STATE
+    if write_appointment_no_show is True:
+        capabilities["write.appointment.no_show"] = ENABLED_STATE
     if write_appointment_checkin is True:
         capabilities["write.appointment.checkin"] = ENABLED_STATE
     return capabilities
