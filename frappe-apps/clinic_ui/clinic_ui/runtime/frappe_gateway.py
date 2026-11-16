@@ -4276,6 +4276,11 @@ class Gateway:
     def _stock_purchase_order(self, purchase_order, item_code):
         if not purchase_order:
             return {"po_pending_qty": None, "po_item": None}
+        docstatus = self.frappe.db.get_value(
+            "Purchase Order", purchase_order, "docstatus"
+        )
+        if docstatus != 1:
+            return {"po_pending_qty": None, "po_item": None}
         row = self.frappe.db.get_value(
             "Purchase Order Item",
             {"parent": purchase_order, "item_code": item_code},
