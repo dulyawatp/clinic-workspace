@@ -676,7 +676,14 @@ def user_facts_problem(facts, expected):
 
 
 def master_facts_problem(master_type, facts, expected):
-    """Check the closed-world state after one master mutation."""
+    """Check the closed-world state after one master mutation.
+
+    Facts are type-preserving (review round 3): a Check fact is the installed
+    ``0``/``1`` int (``True`` is accepted too), an Int/Float/Currency fact is a
+    number, Data/Link/Select is text and an unset column is ``None``. Nothing is
+    stringified on the way out, so an expected value and a re-read value can be
+    compared directly.
+    """
 
     if not isinstance(facts, dict):
         return "post-create master facts unreadable"
@@ -716,6 +723,8 @@ def master_facts_problem(master_type, facts, expected):
     elif master_type == "price_list":
         if not _present(facts.get("currency")):
             return "created price list has no currency"
+        # ``selling`` is an installed Check: the re-read carries 0/1 (int) and
+        # either that or a real bool counts as the truthy encoding.
         if facts.get("selling") not in (1, True):
             return "created price list is not a selling list"
     elif master_type == "mode_of_payment":

@@ -4447,6 +4447,18 @@ class Gateway:
             raise patient_write.WriteUncertain() from None
 
     def _admin_facts_row(self, row, fields):
+        """Type-preserving fact row: only ``name`` is normalised as text.
+
+        Review round 3: routing every fact through ``_text_value`` returned
+        ``None`` for non-strings, so a Check (``selling`` on a Price List, stored
+        as 0/1) read back as ``None`` and the closed-world compare refused
+        *after* the fence claim, latching the site. Non-text installed values are
+        therefore returned exactly as the database gives them: ``Check``/``Int``
+        as ``0``/``1`` ints, ``Float``/``Currency`` as numbers, ``Data``/``Link``/
+        ``Select`` as strings, and ``None`` when the column is null. The contract
+        accepts both ``1`` and ``True`` for boolean facts.
+        """
+
         if row is None:
             raise patient_write.WriteUncertain()
         get = (
@@ -4456,7 +4468,7 @@ class Gateway:
         )
         facts = {"name": self._text_value(get("name"))}
         for field in fields:
-            facts[field] = self._text_value(get(field))
+            facts[field] = get(field)
         return facts
 
     # -- admin fence, receipts and acknowledgement -----------------------

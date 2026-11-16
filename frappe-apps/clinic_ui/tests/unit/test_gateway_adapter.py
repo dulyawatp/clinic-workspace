@@ -16,15 +16,34 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from clinic_ui.core import (
+    admin_contract,
     appointment_contract,
     appointment_write,
     config,
     deployment_marker,
+    encounter_contract,
     fence_store,
     patient_write,
     write_fence,
 )
 from clinic_ui.runtime import frappe_gateway
+
+# Master type -> installed DocType, for the typed-facts round-trip test.
+MASTER_TYPE_DOCTYPES = {
+    "uom": "UOM",
+    "supplier_group": "Supplier Group",
+    "warehouse": "Warehouse",
+    "supplier": "Supplier",
+    "item": "Item",
+    "price_list": "Price List",
+    "mode_of_payment": "Mode of Payment",
+    "procedure_template": "Clinical Procedure Template",
+    "practitioner": "Healthcare Practitioner",
+}
+
+
+def master_type_docname(master_type):
+    return MASTER_TYPE_DOCTYPES[master_type]
 
 
 class FakePermissionError(Exception):
@@ -3319,6 +3338,256 @@ class AdminInstalledFieldMapTests(GatewayTestCase):
         self.assertEqual(doc.item_group, "All Item Groups")
         # The installed template has no ``company`` column.
         self.assertFalse(hasattr(doc, "company"))
+
+
+class AdminTypedFactsTests(GatewayTestCase):
+    """Review round 3: admin facts keep the installed types.
+
+    The observed failure: a Price List insert succeeded, then the fact reader
+    pushed the Check ``selling`` through the text normaliser, which returns
+    ``None`` for non-strings, so the post-claim compare said "not a selling
+    list", raised ``WriteUncertain`` after the claim and latched the site.
+    """
+
+    def price_list_gateway(self, selling):
+        stub = AmendmentStub()
+        for field, value in (
+            ("name", "Standard Selling"),
+            ("currency", "USD"),
+            ("selling", selling),
+        ):
+            stub.db.values[("Price List", "Standard Selling", field)] = value
+        return self.gateway(stub)
+
+    def price_list_expected(self):
+        return {
+            "identifier": "Standard Selling",
+            "payload": {"price_list_name": "Standard Selling"},
+        }
+
+    def test_the_observed_price_list_failure_is_fixed(self):
+        facts = self.price_list_gateway(1).native_admin_master_facts(
+            "price_list", "Standard Selling"
+        )
+
+        self.assertEqual(facts["selling"], 1)
+        self.assertIsNotNone(facts["selling"])
+        self.assertIsNone(
+            admin_contract.master_facts_problem(
+                "price_list", facts, self.price_list_expected()
+            )
+        )
+
+    def test_a_real_bool_is_accepted_identically(self):
+        facts = self.price_list_gateway(True).native_admin_master_facts(
+            "price_list", "Standard Selling"
+        )
+
+        self.assertIs(facts["selling"], True)
+        self.assertIsNone(
+            admin_contract.master_facts_problem(
+                "price_list", facts, self.price_list_expected()
+            )
+        )
+
+    def test_a_non_selling_list_is_still_refused(self):
+        facts = self.price_list_gateway(0).native_admin_master_facts(
+            "price_list", "Standard Selling"
+        )
+
+        self.assertEqual(
+            admin_contract.master_facts_problem(
+                "price_list", facts, self.price_list_expected()
+            ),
+            "created price list is not a selling list",
+        )
+
+    def test_every_master_type_round_trips_its_installed_types(self):
+        cases = (
+            ("uom", "Nos", (), {}, {"name": "Nos"}),
+            ("supplier_group", "SIT Suppliers", (), {}, {"name": "SIT Suppliers"}),
+            (
+                "warehouse",
+                "SIT Pharmacy",
+                (("company", "SIT Synthetic Company"),),
+                {},
+                {"name": "SIT Pharmacy", "company": "SIT Synthetic Company"},
+            ),
+            (
+                "supplier",
+                "SIT Supplier",
+                (("supplier_name", "SIT Supplier"),),
+                {},
+                {"name": "SIT Supplier", "supplier_name": "SIT Supplier"},
+            ),
+            (
+                "item",
+                "SIT-ITEM-1",
+                (("item_code", "SIT-ITEM-1"),),
+                {
+                    "Item Price": [
+                        {
+                            "price_list": "Standard Selling",
+                            "price_list_rate": 12.5,
+                        }
+                    ]
+                },
+                {
+                    "name": "SIT-ITEM-1",
+                    "item_code": "SIT-ITEM-1",
+                    "price_list": "Standard Selling",
+                    "price_list_rate": 12.5,
+                },
+            ),
+            (
+                "price_list",
+                "Standard Selling",
+                (("currency", "USD"), ("selling", 1)),
+                {},
+                {
+                    "name": "Standard Selling",
+                    "currency": "USD",
+                    "selling": 1,
+                },
+            ),
+            (
+                "mode_of_payment",
+                "Cash",
+                (),
+                {"Mode of Payment Account": [{"default_account": "Cash - SITCO"}]},
+                {"name": "Cash", "account": "Cash - SITCO"},
+            ),
+            (
+                "procedure_template",
+                "HLC-PROC-1",
+                (
+                    ("template", "SIT Dressing"),
+                    ("item_code", "SIT-ITEM-1"),
+                    ("item", "SIT-ITEM-1"),
+                    ("description", "SIT Dressing"),
+                ),
+                {},
+                {
+                    "name": "HLC-PROC-1",
+                    "template": "SIT Dressing",
+                    "item_code": "SIT-ITEM-1",
+                    "item": "SIT-ITEM-1",
+                    "description": "SIT Dressing",
+                },
+            ),
+            (
+                "practitioner",
+                "HLC-PRAC-2026-00001",
+                (
+                    ("practitioner_name", "SIT Doctor"),
+                    ("user_id", "sit.doc@example.invalid"),
+                ),
+                {},
+                {
+                    "name": "HLC-PRAC-2026-00001",
+                    "practitioner_name": "SIT Doctor",
+                    "user_id": "sit.doc@example.invalid",
+                },
+            ),
+        )
+        for master_type, name, values, tables, expected in cases:
+            with self.subTest(master_type=master_type):
+                stub = AmendmentStub()
+                stub.db.values[(master_type_docname(master_type), name, "name")] = name
+                for field, value in values:
+                    stub.db.values[
+                        (master_type_docname(master_type), name, field)
+                    ] = value
+                for doctype, rows in tables.items():
+                    stub.all_rows[doctype] = [dict(row) for row in rows]
+
+                facts = self.gateway(stub).native_admin_master_facts(
+                    master_type, name
+                )
+
+                self.assertEqual(facts, expected)
+                for field, value in expected.items():
+                    self.assertIs(type(facts[field]), type(value), field)
+
+    def test_an_unset_typed_column_stays_none(self):
+        stub = AmendmentStub()
+        stub.db.values[("Price List", "Standard Selling", "name")] = (
+            "Standard Selling"
+        )
+        stub.db.values[("Price List", "Standard Selling", "currency")] = "USD"
+        stub.db.values[("Price List", "Standard Selling", "selling")] = None
+
+        facts = self.gateway(stub).native_admin_master_facts(
+            "price_list", "Standard Selling"
+        )
+
+        self.assertIsNone(facts["selling"])
+
+    def test_the_user_enabled_check_stays_an_int(self):
+        stub = AmendmentStub()
+        stub.db.values[("User", "sit.doc@example.invalid", "name")] = (
+            "sit.doc@example.invalid"
+        )
+        stub.db.values[("User", "sit.doc@example.invalid", "enabled")] = 1
+
+        facts = self.gateway(stub).native_admin_user_facts(
+            "sit.doc@example.invalid"
+        )
+
+        self.assertEqual(facts["enabled"], 1)
+
+
+class EncounterAmendFactsTypingTests(GatewayTestCase):
+    """Review round 3 sweep: the encounter facts keep dates as ISO text.
+
+    ``modified`` columns come back from frappe as ``datetime`` objects on both
+    sides, and ``_text_value`` renders them with ``isoformat()``, so the compare
+    is type-consistent (no ``None`` from a non-string).
+    """
+
+    def test_datetime_facts_are_iso_on_both_sides(self):
+        moment = datetime(2026, 11, 16, 9, 30, 15, 123456)
+        stub = AmendmentStub()
+        stub.db.values[
+            ("Clinical Note", "HLC-NOTE-ADD-1", "note")
+        ] = "Addendum text"
+        stub.db.values[("Patient Encounter", "HLC-ENC-1", "modified")] = moment
+        stub.db.values[
+            ("Clinical Note", "HLC-NOTE-1", "modified")
+        ] = moment
+
+        facts = self.gateway(stub).native_encounter_amend_facts(
+            "HLC-ENC-1",
+            "HLC-NOTE-ADD-1",
+            "Addendum text",
+            "HLC-NOTE-1",
+            # The endpoint hands over the detail value, which the reader
+            # normalises with ``str()`` (space-separated), not isoformat().
+            str(moment),
+        )
+
+        self.assertEqual(facts["encounter_modified"], moment.isoformat())
+        self.assertEqual(
+            facts["clinical_note_modified"], str(moment)
+        )
+        self.assertIs(facts["addendum_created"], True)
+        # The reader echoes the preimage it was handed instead of re-reading it;
+        # the contract compares the re-read ``clinical_note_modified`` against
+        # that preimage, which is the check that matters here.
+        self.assertEqual(
+            facts["original_note_modified"], str(moment)
+        )
+        self.assertEqual(
+            encounter_contract.amend_postcondition_problem(
+                encounter_modified=facts["encounter_modified"],
+                expected_encounter_modified=moment.isoformat(),
+                clinical_note_modified=facts["clinical_note_modified"],
+                original_note_modified=facts["original_note_modified"],
+                addendum_created=facts["addendum_created"],
+                expected_note=facts["addendum_note"],
+            ),
+            None,
+        )
 
 
 class ProcedureDefaultFieldTests(GatewayTestCase):
