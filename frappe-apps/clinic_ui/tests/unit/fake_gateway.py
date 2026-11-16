@@ -172,6 +172,13 @@ class FakeGateway:
         self.appointment_locked = {}
         self.appointment_lock_calls = []
         self.appointment_lock_error = None
+        self.appointment_action_details = {}
+        self.appointment_action_detail_calls = []
+        self.appointment_action_detail_error = None
+        self.cancel_calls = []
+        self.cancel_error = None
+        self.no_show_calls = []
+        self.no_show_error = None
         self.save_reschedule_calls = []
         self.save_reschedule_error = None
         self.checkin_state_calls = []
@@ -452,6 +459,15 @@ class FakeGateway:
             "appointment_date": self.site_today_value,
             "appointment_time": "08:00:00",
             "modified": base_modified,
+            "notes": None,
+            "practitioner": None,
+            "event": None,
+            "invoiced": 0,
+            "ref_sales_invoice": None,
+            "paid_amount": 0,
+            "insurance_coverage": None,
+            "service_request": None,
+            "mode_of_payment": None,
         }
         values.update(self.appointment_locked.get(native_appointment_id, {}))
         return FakeLockedState(**values)
@@ -498,6 +514,23 @@ class FakeGateway:
         self.checkin_calls.append((state, today))
         if self.checkin_error is not None:
             raise self.checkin_error
+
+    def native_appointment_action_detail(self, native_appointment_id):
+        self.appointment_action_detail_calls.append(native_appointment_id)
+        if self.appointment_action_detail_error is not None:
+            raise self.appointment_action_detail_error
+        value = self.appointment_action_details.get(native_appointment_id)
+        return dict(value) if value is not None else None
+
+    def cancel_native_appointment(self, state, reason, actor):
+        self.cancel_calls.append((state, reason, actor))
+        if self.cancel_error is not None:
+            raise self.cancel_error
+
+    def no_show_native_appointment(self, state, reason, actor):
+        self.no_show_calls.append((state, reason, actor))
+        if self.no_show_error is not None:
+            raise self.no_show_error
 
     def site_today(self):
         if self.site_today_error is not None:

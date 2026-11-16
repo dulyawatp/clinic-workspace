@@ -1693,6 +1693,15 @@ class AppointmentWriteAdapterTests(GatewayTestCase):
             modified=doc.modified,
             patient_name=doc.patient_name,
             patient_sex=doc.patient_sex,
+            notes=getattr(doc, "notes", None),
+            practitioner=getattr(doc, "practitioner", None),
+            event=getattr(doc, "event", None),
+            invoiced=getattr(doc, "invoiced", None),
+            ref_sales_invoice=getattr(doc, "ref_sales_invoice", None),
+            paid_amount=getattr(doc, "paid_amount", None),
+            insurance_coverage=getattr(doc, "insurance_coverage", None),
+            service_request=getattr(doc, "service_request", None),
+            mode_of_payment=getattr(doc, "mode_of_payment", None),
         )
 
     def locked_stub(self, **kwargs):
@@ -2286,6 +2295,209 @@ class AppointmentWriteAdapterTests(GatewayTestCase):
         stub.db.values[("Patient Appointment", self.NATIVE, "status")] = "Open"
         with self.assertRaises(patient_write.WriteUncertain):
             self.gateway(stub).native_appointment_checkin(state, self.TODAY)
+
+    # -- cancel and manual no-show ----------------------------------------
+
+    def inject_cancel(self, function):
+        module = types.ModuleType(frappe_gateway.NATIVE_CHECKIN_MODULE)
+        module.cancel_appointment = function
+        sys.modules[frappe_gateway.NATIVE_CHECKIN_MODULE] = module
+        self.addCleanup(sys.modules.pop, frappe_gateway.NATIVE_CHECKIN_MODULE, None)
+        return module
+
+    def transition_stub(self, *, status="Scheduled", **doc_kwargs):
+        stub, doc = self.locked_stub(status=status, **doc_kwargs)
+        stub.utils = types.SimpleNamespace(
+            nowdate=lambda: self.TODAY, now=lambda: "2026-11-14 09:30:00"
+        )
+        doc.notes = None
+        doc.practitioner = None
+        doc.event = None
+        doc.ref_sales_invoice = None
+        doc.paid_amount = 0
+        doc.insurance_coverage = None
+        doc.service_request = None
+        doc.mode_of_payment = None
+        return stub, doc
+
+    def test_cancel_drives_the_pinned_handler_then_the_terminal_save(self):
+        stub, doc = self.transition_stub()
+        calls = []
+
+        def cancel_appointment(appointment_id):
+            calls.append(appointment_id)
+
+        self.inject_cancel(cancel_appointment)
+        gateway = self.gateway(stub)
+        result = gateway.cancel_native_appointment(
+            self.locked_state(doc), "Patient called.", "reception@example.test"
+        )
+
+        self.assertEqual(calls, [self.NATIVE])
+        self.assertTrue(doc.saved)
+        self.assertEqual(doc.status, "Cancelled")
+        self.assertEqual(
+            doc.notes,
+            "[2026-11-14 09:30:00] appointment_cancel by reception@example.test: "
+            "Patient called.",
+        )
+        self.assertIs(result, doc)
+
+    def test_cancel_preserves_the_exact_notes_preimage(self):
+        stub, doc = self.transition_stub()
+        doc.notes = "Existing note."
+        self.inject_cancel(lambda appointment_id: None)
+
+        self.gateway(stub).cancel_native_appointment(
+            self.locked_state(doc), "Cancelled at the desk.", "doc@example.test"
+        )
+
+        self.assertEqual(
+            doc.notes,
+            "Existing note.\n[2026-11-14 09:30:00] appointment_cancel by "
+            "doc@example.test: Cancelled at the desk.",
+        )
+
+    def test_cancel_refuses_terminal_and_linked_targets_before_mutation(self):
+        stub, doc = self.transition_stub(status="Cancelled")
+        with self.assertRaises(appointment_write.AppointmentTargetNotEligible):
+            self.gateway(stub).cancel_native_appointment(
+                self.locked_state(doc), "reason", "reception@example.test"
+            )
+        self.assertFalse(doc.saved)
+
+        stub, doc = self.transition_stub()
+        doc.ref_sales_invoice = "SINV-1"
+        with self.assertRaises(appointment_write.AppointmentTargetNotEligible):
+            self.gateway(stub).cancel_native_appointment(
+                self.locked_state(doc), "reason", "reception@example.test"
+            )
+        self.assertFalse(doc.saved)
+
+    def test_cancel_fails_closed_without_the_pinned_handler(self):
+        stub, doc = self.transition_stub()
+        sys.modules.pop(frappe_gateway.NATIVE_CHECKIN_MODULE, None)
+        with self.assertRaises(patient_write.WriteUncertain):
+            self.gateway(stub).cancel_native_appointment(
+                self.locked_state(doc), "reason", "reception@example.test"
+            )
+        self.assertFalse(doc.saved)
+
+    def test_cancel_fails_closed_when_the_status_did_not_stick(self):
+        stub, doc = self.transition_stub()
+        self.inject_cancel(lambda appointment_id: None)
+
+        def rejected_save():
+            doc.saved = True
+            doc.status = "Open"
+
+        doc.save = rejected_save
+        with self.assertRaises(patient_write.WriteUncertain):
+            self.gateway(stub).cancel_native_appointment(
+                self.locked_state(doc), "reason", "reception@example.test"
+            )
+
+    def test_cancel_verifies_the_practitioner_event_branch(self):
+        # The department booking surface never sets a practitioner, and the
+        # pinned controller only creates/cancels a calendar Event on that
+        # branch. A practitioner-populated target is therefore outside the
+        # reviewed classification and is refused rather than half-handled.
+        stub, doc = self.transition_stub(status="Confirmed")
+        doc.practitioner = "PRAC-1"
+        doc.event = "EVENT-1"
+        calls = []
+        self.inject_cancel(lambda appointment_id: calls.append(appointment_id))
+        with self.assertRaises(appointment_write.AppointmentTargetNotEligible):
+            self.gateway(stub).cancel_native_appointment(
+                self.locked_state(doc), "reason", "reception@example.test"
+            )
+        self.assertEqual(calls, [])
+        self.assertFalse(doc.saved)
+
+    def test_no_show_writes_the_installed_terminal_status_and_note(self):
+        stub, doc = self.transition_stub(status="Scheduled")
+        result = self.gateway(stub).no_show_native_appointment(
+            self.locked_state(doc), "Patient did not arrive.", "doc@example.test"
+        )
+
+        self.assertTrue(doc.saved)
+        self.assertEqual(doc.status, "No Show")
+        self.assertEqual(
+            doc.notes,
+            "[2026-11-14 09:30:00] appointment_no_show by doc@example.test: "
+            "Patient did not arrive.",
+        )
+        self.assertIs(result, doc)
+
+    def test_no_show_refuses_seen_or_terminal_statuses(self):
+        for status in ("Checked In", "Closed", "Cancelled", "No Show"):
+            with self.subTest(status=status):
+                stub, doc = self.transition_stub(status=status)
+                with self.assertRaises(
+                    appointment_write.AppointmentTargetNotEligible
+                ):
+                    self.gateway(stub).no_show_native_appointment(
+                        self.locked_state(doc), "reason", "doc@example.test"
+                    )
+                self.assertFalse(doc.saved)
+
+    def test_no_show_fails_closed_when_the_controller_rejected_the_status(self):
+        stub, doc = self.transition_stub(status="Scheduled")
+
+        def rejected_save():
+            doc.saved = True
+            doc.status = "Scheduled"
+
+        doc.save = rejected_save
+        with self.assertRaises(patient_write.WriteUncertain):
+            self.gateway(stub).no_show_native_appointment(
+                self.locked_state(doc), "reason", "doc@example.test"
+            )
+
+    def test_a_malformed_site_timestamp_fails_closed(self):
+        stub, doc = self.transition_stub()
+        stub.utils = types.SimpleNamespace(
+            nowdate=lambda: self.TODAY, now=lambda: "14/11/2026 09:30"
+        )
+        with self.assertRaises(patient_write.WriteUncertain):
+            self.gateway(stub).no_show_native_appointment(
+                self.locked_state(doc), "reason", "doc@example.test"
+            )
+        self.assertFalse(doc.saved)
+
+    def test_action_detail_reads_the_reviewed_decision_fields(self):
+        stub, doc = self.transition_stub()
+        doc.notes = "Existing note."
+        self.grant_reads(stub, self.NATIVE, "PAT-2")
+        for field in ("patient", "appointment_date", "appointment_time", "status"):
+            stub.db.values[("Patient Appointment", self.NATIVE, field)] = getattr(
+                doc, field
+            )
+        for field in doc.__dict__:
+            if field in frappe_gateway.APPOINTMENT_ACTION_FIELDS:
+                stub.db.values[("Patient Appointment", self.NATIVE, field)] = (
+                    getattr(doc, field)
+                )
+        detail = self.gateway(stub).native_appointment_action_detail(self.NATIVE)
+
+        self.assertEqual(detail["status"], "Scheduled")
+        self.assertEqual(detail["notes"], "Existing note.")
+        self.assertEqual(detail["invoiced"], 0)
+        for field in frappe_gateway.APPOINTMENT_ACTION_FIELDS:
+            self.assertIn(field, detail)
+
+    def test_action_detail_fails_closed_on_a_masked_or_missing_field(self):
+        stub, doc = self.transition_stub()
+        self.grant_reads(stub, "PAT-2")
+        stub.meta.masked = ["notes"]
+        self.assertIsNone(
+            self.gateway(stub).native_appointment_action_detail(self.NATIVE)
+        )
+        stub.meta.masked = []
+        stub.meta.permlevels.pop("notes")
+        self.assertIsNone(
+            self.gateway(stub).native_appointment_action_detail(self.NATIVE)
+        )
 
     # -- pinned boundary, fetch sources and closed-world targets ----------
 

@@ -573,8 +573,10 @@ def metadata_problem(fields):
     return _metadata_difference(fields, APPOINTMENT_FIELD_METADATA)
 
 
-def _identity_problem(values, expected=None):
+def _identity_problem(values, expected=None, ignore=frozenset()):
     for name, kind in APPOINTMENT_FIELD_CLASSES.items():
+        if name in ignore:
+            continue
         value = _value(values, name)
         if kind == LAYOUT:
             continue
@@ -736,7 +738,22 @@ def inserted_problem(values, expected, *, today):
 def target_problem(values):
     """Check a locked or read-only target before it may be mutated."""
 
-    problem = _identity_problem(values)
+    return _target_problem(values)
+
+
+def transition_problem(values):
+    """Check a target after the cancel/no-show transition wrote its note.
+
+    ``notes`` is the only field this contract's transitions populate, so it is
+    the single reviewed exception to the closed-world EMPTY classification. The
+    post-condition already compares it verbatim against the pinned postimage.
+    """
+
+    return _target_problem(values, ignore=frozenset({"notes"}))
+
+
+def _target_problem(values, ignore=frozenset()):
+    problem = _identity_problem(values, ignore=ignore)
     if problem is not None:
         return problem
     if _value(values, "appointment_for") != "Department":

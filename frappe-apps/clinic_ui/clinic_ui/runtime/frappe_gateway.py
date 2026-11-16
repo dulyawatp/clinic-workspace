@@ -48,6 +48,22 @@ APPOINTMENT_DOCFIELD_FIELDS = (
     "appointment_time",
     "status",
 )
+# Cancel/no-show decision fields. They are reviewed contract fields at
+# permlevel 0 and are read only after the same document and field-level checks
+# as the list rows, so the pre-fence decision never depends on configuration.
+APPOINTMENT_ACTION_TEXT_FIELDS = (
+    "notes",
+    "practitioner",
+    "event",
+    "ref_sales_invoice",
+    "insurance_coverage",
+    "service_request",
+    "mode_of_payment",
+)
+APPOINTMENT_ACTION_RAW_FIELDS = ("invoiced", "paid_amount")
+APPOINTMENT_ACTION_FIELDS = (
+    APPOINTMENT_ACTION_TEXT_FIELDS + APPOINTMENT_ACTION_RAW_FIELDS
+)
 # DocFields that carry a permlevel and can be masked. Verified against Frappe
 # v16: ``Meta._fields`` is ``{field.fieldname: field for field in self.fields}``
 # (``frappe/model/meta.py:514-515``), so it contains DocFields only.
@@ -89,6 +105,10 @@ PATIENT_CREATE_TRIGGER_FIELDS = (
 # unread, so no identifier, contact value or clinical field can reach the DTO.
 PATIENT_VIEW_FIELDS = PATIENT_DOCFIELD_FIELDS + PATIENT_STANDARD_FIELDS
 APPOINTMENT_TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
+# The site timestamp recorded verbatim in an appended cancel/no-show note,
+# exactly as ``frappe.utils.now()`` returns it.
+NOTE_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+NOTE_EVENT_DOCTYPE = "Event"
 
 # Pinned native contract (installed healthcare v16.6.1,
 # `healthcare/healthcare/doctype/patient_appointment/patient_appointment.py`):
@@ -151,6 +171,15 @@ class AppointmentLockedState:
     modified: str | None
     patient_name: str | None = None
     patient_sex: str | None = None
+    notes: str | None = None
+    practitioner: str | None = None
+    event: str | None = None
+    invoiced: object = None
+    ref_sales_invoice: str | None = None
+    paid_amount: object = None
+    insurance_coverage: str | None = None
+    service_request: str | None = None
+    mode_of_payment: str | None = None
 NO_STORE_HEADER = "Cache-Control"
 NO_STORE_VALUE = "no-store"
 DENIAL_MESSAGE = "Not permitted"
@@ -804,6 +833,22 @@ class Gateway:
                 "__name__",
                 None,
             ),
+            "cancel_module": getattr(
+                frappe.get_attr(
+                    f"{appointment_contract.CANCEL_MODULE}."
+                    f"{appointment_contract.CANCEL_NAME}"
+                ),
+                "__module__",
+                None,
+            ),
+            "cancel_name": getattr(
+                frappe.get_attr(
+                    f"{appointment_contract.CANCEL_MODULE}."
+                    f"{appointment_contract.CANCEL_NAME}"
+                ),
+                "__name__",
+                None,
+            ),
             "doc_events_patient_appointment": tuple(
                 doc_events.get(appointment_contract.APPOINTMENT_DOCTYPE) or ()
             ),
@@ -827,6 +872,13 @@ class Gateway:
                 whitelisted.get(
                     f"{appointment_contract.CHECKIN_MODULE}."
                     f"{appointment_contract.CHECKIN_NAME}"
+                )
+                or ()
+            ),
+            "cancel_whitelisted_override": tuple(
+                whitelisted.get(
+                    f"{appointment_contract.CANCEL_MODULE}."
+                    f"{appointment_contract.CANCEL_NAME}"
                 )
                 or ()
             ),
@@ -1157,7 +1209,7 @@ class Gateway:
         self._require_row_links_readable(doc)
 
     def lock_appointment_target(
-        self, native_appointment_id, *, base_modified, expected=None
+        self, native_appointment_id, *, base_modified=None, expected=None
     ):
         """Lock and freshly re-verify one writable target before any save.
 
@@ -1167,6 +1219,13 @@ class Gateway:
         and settings, then locks the Patient and Appointment Type rows in that
         deterministic order and verifies the exact fetched values. Every value
         used after the lock is the currently committed value.
+
+        ``base_modified`` is the client's optimistic-concurrency token for the
+        reschedule and check-in paths. Cancel and manual no-show have no client
+        version input (their body names a target and a reason only), so they
+        pass ``None``: every decision they make is re-read under this lock and
+        the ``notes`` preimage is taken from the locked row, so there is no
+        stale value to overwrite.
         """
 
         frappe = self.frappe
@@ -1216,8 +1275,11 @@ class Gateway:
         ]:
             raise patient_write.UnsafeSideEffect("appointment_for fetch mismatch")
 
-        if not patient_write.modified_matches(
-            self._text_value(getattr(doc, "modified", None)), base_modified
+        if (
+            base_modified is not None
+            and not patient_write.modified_matches(
+                self._text_value(getattr(doc, "modified", None)), base_modified
+            )
         ):
             raise patient_write.StaleVersion()
 
@@ -1245,6 +1307,23 @@ class Gateway:
                 getattr(doc, "patient_name", None)
             ),
             patient_sex=self._text_value(getattr(doc, "patient_sex", None)),
+            notes=self._text_value(getattr(doc, "notes", None)),
+            practitioner=self._text_value(getattr(doc, "practitioner", None)),
+            event=self._text_value(getattr(doc, "event", None)),
+            invoiced=getattr(doc, "invoiced", None),
+            ref_sales_invoice=self._text_value(
+                getattr(doc, "ref_sales_invoice", None)
+            ),
+            paid_amount=getattr(doc, "paid_amount", None),
+            insurance_coverage=self._text_value(
+                getattr(doc, "insurance_coverage", None)
+            ),
+            service_request=self._text_value(
+                getattr(doc, "service_request", None)
+            ),
+            mode_of_payment=self._text_value(
+                getattr(doc, "mode_of_payment", None)
+            ),
         )
 
     def save_appointment_reschedule(self, state, fields, today=None):
@@ -1399,6 +1478,187 @@ class Gateway:
         position = getattr(doc, "position_in_queue", None)
         if isinstance(position, bool) or not isinstance(position, int) or position < 1:
             raise patient_write.WriteUncertain()
+
+    def native_appointment_action_detail(self, native_appointment_id):
+        """Read the cancel/no-show decision fields under the same read checks.
+
+        The list fields come from :meth:`native_appointment_view` (document
+        read, permlevel and masking checks). The remaining decision fields are
+        reviewed permlevel-0 DocFields, checked with the same helper before any
+        value is fetched. ``None`` fails the caller closed.
+        """
+
+        detail = self.native_appointment_view(native_appointment_id)
+        if detail is None:
+            return None
+        try:
+            frappe = self.frappe
+            meta = frappe.get_meta(APPOINTMENT_DOCTYPE)
+            if not self._fields_readable(meta, APPOINTMENT_ACTION_FIELDS):
+                return None
+            for field in APPOINTMENT_ACTION_TEXT_FIELDS:
+                detail[field] = self._text_value(
+                    frappe.db.get_value(
+                        APPOINTMENT_DOCTYPE, native_appointment_id, field
+                    )
+                )
+            for field in APPOINTMENT_ACTION_RAW_FIELDS:
+                detail[field] = frappe.db.get_value(
+                    APPOINTMENT_DOCTYPE, native_appointment_id, field
+                )
+        except Exception:
+            return None
+        return detail
+
+    @staticmethod
+    def _native_cancel_function():
+        """Import the pinned module-level ``cancel_appointment`` or fail closed."""
+
+        try:
+            module = __import__(
+                appointment_contract.CANCEL_MODULE,
+                fromlist=[appointment_contract.CANCEL_NAME],
+            )
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        function = getattr(module, appointment_contract.CANCEL_NAME, None)
+        if not callable(function):
+            raise patient_write.WriteUncertain()
+        return function
+
+    def _site_now(self):
+        """Return the site timestamp used verbatim in the appended note line."""
+
+        try:
+            value = self.frappe.utils.now()
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        if not isinstance(value, str) or NOTE_TIMESTAMP.fullmatch(value) is None:
+            raise patient_write.WriteUncertain()
+        return value
+
+    def _append_note(self, state, kind, reason, actor):
+        """Return the contract-pinned ``notes`` postimage for one transition."""
+
+        line = appointment_contract.note_line(
+            kind, actor=actor, reason=reason, recorded_at=self._site_now()
+        )
+        return appointment_contract.note_postimage(state.notes, line)
+
+    def _verify_transition(self, state, postimage, postcondition):
+        """Re-read the saved row and assert the closed-world post-conditions."""
+
+        try:
+            doc = self.frappe.get_doc(
+                APPOINTMENT_DOCTYPE, state.doc.name, for_update=True
+            )
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        if doc is None:
+            raise patient_write.WriteUncertain()
+        if postcondition(doc, postimage) is not None:
+            raise patient_write.WriteUncertain()
+        if appointment_contract.transition_problem(doc) is not None:
+            raise patient_write.WriteUncertain()
+        for field, expected in (
+            ("patient", state.patient),
+            ("company", state.company),
+            ("department", state.department),
+            ("appointment_type", state.appointment_type),
+            ("appointment_for", state.appointment_for),
+            ("appointment_date", state.appointment_date),
+            ("appointment_time", state.appointment_time),
+            ("patient_name", state.patient_name),
+            ("patient_sex", state.patient_sex),
+        ):
+            value = (
+                self._time_value(getattr(doc, field, None))
+                if field == "appointment_time"
+                else self._text_value(getattr(doc, field, None))
+            )
+            if value != expected:
+                raise patient_write.WriteUncertain()
+        if getattr(doc, "duration", None) != state.duration:
+            raise patient_write.WriteUncertain()
+        return doc
+
+    def cancel_native_appointment(self, state, reason, actor):
+        """Drive the pinned cancel transition inside the locked transaction.
+
+        The reviewed rule (design ruling 4) is: call the installed
+        ``cancel_appointment(appointment_id)`` handler, then write the terminal
+        ``Cancelled`` status and the reason line through the controller's own
+        ``save()``, whose ``set_status`` preserves terminal values. The returned
+        state is read back: status, verbatim note and every reviewed identity
+        field unchanged. The fee-validity and calendar branches are attested
+        from that state, not deep-verified; the linked-record branches are
+        refused pre-fence by the contract.
+        """
+
+        problem = appointment_contract.cancel_target_problem(state)
+        if problem is not None or appointment_contract.transition_problem(state.doc) is not None:
+            raise appointment_write.AppointmentTargetNotEligible()
+
+        postimage = self._append_note(
+            state, appointment_contract.CANCEL_KIND, reason, actor
+        )
+        cancel = self._native_cancel_function()
+        try:
+            cancel(state.doc.name)
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+        state.doc.status = appointment_contract.CANCELLED_STATUS
+        state.doc.notes = postimage
+        try:
+            state.doc.save()
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+        doc = self._verify_transition(
+            state, postimage, appointment_contract.cancel_postcondition_problem
+        )
+
+        # The pinned handler cancels the linked calendar Event only on the
+        # practitioner branch; on that branch the Event status is verified.
+        if appointment_contract.cancel_event_expected(state) and state.event:
+            try:
+                event_status = self.frappe.db.get_value(
+                    NOTE_EVENT_DOCTYPE, state.event, "status"
+                )
+            except Exception:
+                raise patient_write.WriteUncertain() from None
+            if event_status != appointment_contract.CANCELLED_STATUS:
+                raise patient_write.WriteUncertain()
+        return doc
+
+    def no_show_native_appointment(self, state, reason, actor):
+        """Write the installed terminal ``No Show`` status and the reason line.
+
+        The installed ``set_status`` treats ``No Show`` as terminal and tolerates
+        it on save (patient_appointment.py:133-150), so this is the designed
+        transition rather than a bare status write: the controller's own
+        validate/on_update path runs, and the returned state is checked for the
+        exact status, the verbatim note and every reviewed identity field.
+        """
+
+        problem = appointment_contract.no_show_target_problem(state)
+        if problem is not None or appointment_contract.transition_problem(state.doc) is not None:
+            raise appointment_write.AppointmentTargetNotEligible()
+
+        postimage = self._append_note(
+            state, appointment_contract.NO_SHOW_KIND, reason, actor
+        )
+        state.doc.status = appointment_contract.NO_SHOW_STATUS
+        state.doc.notes = postimage
+        try:
+            state.doc.save()
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+        return self._verify_transition(
+            state, postimage, appointment_contract.no_show_postcondition_problem
+        )
 
     def native_patient_view(self, native_patient_id):
         """Allowlisted detail fields under document and field-level read rights.
