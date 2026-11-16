@@ -11,7 +11,17 @@ const LOCK = "clinic.appointment-write.pending";
 const ACK_TOKEN = /^[0-9a-f]{64}$/;
 
 export type AppointmentWriteKind = "book" | "reschedule" | "checkin";
-export type AppointmentWriteStatus = "booked" | "rescheduled" | "checked_in";
+/** Fence kinds of the designed cancel/no-show transitions. */
+export type AppointmentTransitionKind =
+  | "appointment_cancel"
+  | "appointment_no_show";
+export type AppointmentAckKind = AppointmentWriteKind | AppointmentTransitionKind;
+export type AppointmentWriteStatus =
+  | "booked"
+  | "rescheduled"
+  | "checked_in"
+  | "cancelled"
+  | "no_show";
 
 export type AppointmentWriteFailure =
   | "locked"
@@ -54,17 +64,38 @@ export interface CheckinAppointmentInput {
   base_modified: string;
 }
 
+/** Cancel and manual no-show share one request shape (reason required). */
+export interface CancelAppointmentInput {
+  operation_key: string;
+  patient: string;
+  appointment_id: string;
+  reason: string;
+}
+
+export type NoShowAppointmentInput = CancelAppointmentInput;
+
 export interface AppointmentWriteResult {
   status: AppointmentWriteStatus;
   appointment: NativeAppointmentDetail;
 }
 
-const STATUS_BY_KIND: Readonly<
-  Record<AppointmentWriteKind, AppointmentWriteStatus>
-> = {
-  book: "booked",
-  reschedule: "rescheduled",
-  checkin: "checked_in",
+const STATUS_BY_KIND: Readonly<Record<AppointmentAckKind, AppointmentWriteStatus>> =
+  {
+    book: "booked",
+    reschedule: "rescheduled",
+    checkin: "checked_in",
+    appointment_cancel: "cancelled",
+    appointment_no_show: "no_show",
+  };
+
+/**
+ * Transitions that must return their own terminal status. The client never
+ * writes a status: this only refuses a success envelope whose re-read status
+ * contradicts the operation it claims to have completed.
+ */
+const EXPECTED_DETAIL_STATUS: Readonly<Record<string, string>> = {
+  appointment_cancel: "Cancelled",
+  appointment_no_show: "No Show",
 };
 
 const listeners = new Set<() => void>();
@@ -140,6 +171,28 @@ function validBookInput(input: BookAppointmentInput): void {
     throw new NativeAppointmentWriteError("validation");
 }
 
+/**
+ * Cancel/no-show inputs: the reason is copied verbatim into the appointment's
+ * notes by the server, so it must be a single bounded line. Nothing is
+ * dispatched when it is not.
+ */
+function validTransitionInput(input: CancelAppointmentInput): void {
+  if (
+    !isText(input.operation_key) ||
+    !isText(input.patient) ||
+    !isText(input.appointment_id) ||
+    typeof input.reason !== "string" ||
+    input.reason.trim() !== input.reason ||
+    input.reason.length === 0 ||
+    input.reason.length > 200 ||
+    [...input.reason].some((char) => {
+      const code = char.charCodeAt(0);
+      return code < 32 || code === 127;
+    })
+  )
+    throw new NativeAppointmentWriteError("validation");
+}
+
 function validTargetInput(
   input: RescheduleAppointmentInput | CheckinAppointmentInput,
 ): void {
@@ -175,7 +228,7 @@ function failure(
 }
 
 function parseWriteResult(
-  kind: AppointmentWriteKind,
+  ackKind: AppointmentAckKind,
   expectedAlias: string | undefined,
   body: unknown,
 ): AppointmentWriteResult {
@@ -188,7 +241,7 @@ function parseWriteResult(
 
   const message = body.message;
   if (
-    message.status !== STATUS_BY_KIND[kind] ||
+    message.status !== STATUS_BY_KIND[ackKind] ||
     typeof message.ackToken !== "string" ||
     !ACK_TOKEN.test(message.ackToken)
   )
@@ -204,15 +257,19 @@ function parseWriteResult(
     throw new NativeAppointmentWriteError("uncertain");
   }
 
+  const expectedStatus = EXPECTED_DETAIL_STATUS[ackKind];
+  if (expectedStatus !== undefined && appointment.status !== expectedStatus)
+    throw new NativeAppointmentWriteError("uncertain");
+
   return {
-    status: STATUS_BY_KIND[kind],
+    status: STATUS_BY_KIND[ackKind],
     appointment,
   };
 }
 
 async function acknowledge(
   token: string,
-  kind: AppointmentWriteKind,
+  kind: AppointmentAckKind,
   operationKey: string,
   ackToken: string,
 ): Promise<void> {
@@ -240,7 +297,8 @@ async function acknowledge(
 }
 
 async function writeAppointment(
-  kind: AppointmentWriteKind,
+  ackKind: AppointmentAckKind,
+  method: string,
   operationKey: string,
   expectedAlias: string | undefined,
   payload: Record<string, string>,
@@ -255,7 +313,7 @@ async function writeAppointment(
 
   let response: Response;
   try {
-    response = await frappeRequest(`clinic_ui.api.appointments.${kind}`, {
+    response = await frappeRequest(method, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -276,7 +334,7 @@ async function writeAppointment(
 
   let result: AppointmentWriteResult;
   try {
-    result = parseWriteResult(kind, expectedAlias, body);
+    result = parseWriteResult(ackKind, expectedAlias, body);
   } catch {
     notifyLock();
     throw new NativeAppointmentWriteError("uncertain");
@@ -291,7 +349,7 @@ async function writeAppointment(
   // is never written to storage. A lost or failed acknowledgement keeps the
   // browser locked for manual reconciliation.
   try {
-    await acknowledge(token, kind, operationKey, ackToken);
+    await acknowledge(token, ackKind, operationKey, ackToken);
   } catch {
     notifyLock();
     throw new NativeAppointmentWriteError("uncertain");
@@ -305,7 +363,7 @@ export async function bookNativeAppointment(
   input: BookAppointmentInput,
 ): Promise<AppointmentWriteResult> {
   validBookInput(input);
-  return writeAppointment("book", input.operation_key, undefined, {
+  return writeAppointment("book", "clinic_ui.api.appointments.book", input.operation_key, undefined, {
     operation_key: input.operation_key,
     workspace_patient_id: input.workspace_patient_id,
     appointment_date: input.appointment_date,
@@ -324,6 +382,7 @@ export async function rescheduleNativeAppointment(
     throw new NativeAppointmentWriteError("validation");
   return writeAppointment(
     "reschedule",
+    "clinic_ui.api.appointments.reschedule",
     input.operation_key,
     input.workspace_appointment_id,
     {
@@ -342,12 +401,55 @@ export async function checkinNativeAppointment(
   validTargetInput(input);
   return writeAppointment(
     "checkin",
+    "clinic_ui.api.appointments.checkin",
     input.operation_key,
     input.workspace_appointment_id,
     {
       operation_key: input.operation_key,
       workspace_appointment_id: input.workspace_appointment_id,
       base_modified: input.base_modified,
+    },
+  );
+}
+
+/**
+ * Cancel one appointment through the designed transition. The server decides
+ * eligibility and writes the terminal status; the browser only sends the
+ * target alias, the workspace patient and the operator's reason.
+ */
+export async function cancelNativeAppointment(
+  input: CancelAppointmentInput,
+): Promise<AppointmentWriteResult> {
+  validTransitionInput(input);
+  return writeAppointment(
+    "appointment_cancel",
+    "clinic_ui.api.appointments_cancel_write.cancel",
+    input.operation_key,
+    input.appointment_id,
+    {
+      operation_key: input.operation_key,
+      patient: input.patient,
+      appointment_id: input.appointment_id,
+      reason: input.reason,
+    },
+  );
+}
+
+/** Record a manual no-show through the designed transition. */
+export async function noShowNativeAppointment(
+  input: NoShowAppointmentInput,
+): Promise<AppointmentWriteResult> {
+  validTransitionInput(input);
+  return writeAppointment(
+    "appointment_no_show",
+    "clinic_ui.api.appointments_cancel_write.no_show",
+    input.operation_key,
+    input.appointment_id,
+    {
+      operation_key: input.operation_key,
+      patient: input.patient,
+      appointment_id: input.appointment_id,
+      reason: input.reason,
     },
   );
 }

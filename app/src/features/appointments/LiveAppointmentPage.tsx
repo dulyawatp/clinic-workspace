@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -9,12 +9,16 @@ import { PageHeader } from "../../ui/PageHeader";
 import { StatePanel } from "../../ui/StatePanel";
 import { WriteGate } from "../../ui/WriteGate";
 import {
+  cancelNativeAppointment,
   NativeAppointmentWriteError,
+  noShowNativeAppointment,
   rescheduleNativeAppointment,
 } from "../../transport/native/appointment-write";
 import { useLiveAppointment } from "./live-appointment";
 import { ReturnVisitLink } from "./ReturnVisitLink";
 import { useAppointmentWriteLock } from "./useAppointmentWriteLock";
+
+const TERMINAL_STATUSES = new Set(["Closed", "Cancelled", "No Show", "Checked Out"]);
 
 function failureKey(code: string): string {
   switch (code) {
@@ -37,13 +41,16 @@ export function LiveAppointmentPage({ id }: { id: string }) {
   const queryClient = useQueryClient();
   const detail = useLiveAppointment(id);
   const { locked, refreshLock } = useAppointmentWriteLock();
-  const unavailableId = useId();
   const [open, setOpen] = useState(false);
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const [transition, setTransition] = useState<"cancel" | "no_show" | null>(
+    null,
+  );
+  const [reason, setReason] = useState("");
 
   if (detail.isPending)
     return (
@@ -67,6 +74,9 @@ export function LiveAppointmentPage({ id }: { id: string }) {
 
   const appointment = detail.data;
   const canReschedule = appointment.can_reschedule;
+  // Display only: a terminal row has no designed source transition left. The
+  // server remains the authority and refuses every ineligible target.
+  const transitionUnavailable = TERMINAL_STATUSES.has(appointment.status);
 
   function openForm() {
     setDate(appointment.appointment_date);
@@ -104,6 +114,58 @@ export function LiveAppointmentPage({ id }: { id: string }) {
         }),
       );
       setOpen(false);
+      void queryClient.invalidateQueries({ queryKey: ["live-appointments"] });
+      void queryClient.invalidateQueries({ queryKey: ["live-appointment"] });
+    } catch (error) {
+      setFailure(
+        error instanceof NativeAppointmentWriteError ? error.code : "uncertain",
+      );
+    } finally {
+      refreshLock();
+      setSaving(false);
+    }
+  }
+
+  function openTransition(kind: "cancel" | "no_show") {
+    setTransition(kind);
+    setReason("");
+    setFailure(null);
+    setSuccess(null);
+  }
+
+  /**
+   * One-shot cancel/no-show submit. The confirmation step is explicit, the
+   * lock is shared with every other appointment write, and the reason is
+   * required: the server records it verbatim on the appointment.
+   */
+  async function submitTransition(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || locked || transition === null) return;
+    if (reason.trim() === "" || reason.trim() !== reason) {
+      setFailure("validation");
+      return;
+    }
+    setFailure(null);
+    setSuccess(null);
+    setSaving(true);
+    const input = {
+      operation_key: crypto.randomUUID(),
+      patient: appointment.workspace_patient_id,
+      appointment_id: id,
+      reason,
+    };
+    try {
+      if (transition === "cancel") await cancelNativeAppointment(input);
+      else await noShowNativeAppointment(input);
+      setSuccess(
+        t(
+          transition === "cancel"
+            ? "appointmentWrite.cancelled"
+            : "appointmentWrite.noShowRecorded",
+        ),
+      );
+      setTransition(null);
+      setReason("");
       void queryClient.invalidateQueries({ queryKey: ["live-appointments"] });
       void queryClient.invalidateQueries({ queryKey: ["live-appointment"] });
     } catch (error) {
@@ -187,24 +249,102 @@ export function LiveAppointmentPage({ id }: { id: string }) {
           </div>
 
           <div className="appointment-actions">
-            <Button
-              variant="secondary"
-              disabled
-              aria-describedby={unavailableId}
-            >
-              {t("appointment.cancel")}
-            </Button>
-            <Button
-              variant="secondary"
-              disabled
-              aria-describedby={unavailableId}
-            >
-              {t("appointment.noShow")}
-            </Button>
+            {transitionUnavailable || transition !== null ? null : (
+              <>
+                <WriteGate capability="write.appointment.cancel">
+                  <Button
+                    variant="secondary"
+                    disabled={locked}
+                    disabledReason={
+                      locked ? t("appointmentWrite.locked") : undefined
+                    }
+                    onClick={() => openTransition("cancel")}
+                  >
+                    {t("appointment.cancel")}
+                  </Button>
+                </WriteGate>
+                <WriteGate capability="write.appointment.no_show">
+                  <Button
+                    variant="secondary"
+                    disabled={locked}
+                    disabledReason={
+                      locked ? t("appointmentWrite.locked") : undefined
+                    }
+                    onClick={() => openTransition("no_show")}
+                  >
+                    {t("appointment.noShow")}
+                  </Button>
+                </WriteGate>
+              </>
+            )}
           </div>
-          <p id={unavailableId} className="appointment-write-note">
-            {t("appointmentWrite.cancelNoShowUnavailable")}
-          </p>
+          {transitionUnavailable && transition === null && (
+            <p className="appointment-write-note" role="status">
+              {t("appointmentWrite.actionUnavailable")}
+            </p>
+          )}
+          {transition !== null && (
+            <form
+              className="appointment-write-form"
+              role="group"
+              aria-label={t(
+                transition === "cancel"
+                  ? "appointmentWrite.cancelConfirmLabel"
+                  : "appointmentWrite.noShowConfirmLabel",
+              )}
+              onSubmit={(event) => void submitTransition(event)}
+              noValidate
+            >
+              <p>
+                {t(
+                  transition === "cancel"
+                    ? "appointmentWrite.cancelConfirm"
+                    : "appointmentWrite.noShowConfirm",
+                  { reference: appointment.appointment_id },
+                )}
+              </p>
+              <label>
+                {t("appointmentWrite.reasonLabel")}
+                <textarea
+                  value={reason}
+                  maxLength={200}
+                  required
+                  onChange={(event) => setReason(event.target.value)}
+                />
+              </label>
+              <div className="appointment-write-actions">
+                <Button
+                  type="submit"
+                  disabled={saving || locked || reason.trim() === ""}
+                  disabledReason={
+                    locked
+                      ? t("appointmentWrite.locked")
+                      : reason.trim() === ""
+                        ? t("appointmentWrite.reasonRequired")
+                        : undefined
+                  }
+                >
+                  {saving
+                    ? t("appointmentWrite.saving")
+                    : t(
+                        transition === "cancel"
+                          ? "appointmentWrite.cancelConfirmLabel"
+                          : "appointmentWrite.noShowConfirmLabel",
+                      )}
+                </Button>
+                <Button
+                  variant="secondary"
+                  disabled={saving}
+                  onClick={() => {
+                    setTransition(null);
+                    setReason("");
+                  }}
+                >
+                  {t("appointmentWrite.close")}
+                </Button>
+              </div>
+            </form>
+          )}
 
           {locked && (
             <p role="alert" className="appointment-write-alert">

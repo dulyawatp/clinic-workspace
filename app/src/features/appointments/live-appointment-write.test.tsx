@@ -17,6 +17,8 @@ const ACK = "/api/method/clinic_ui.api.appointments.ack";
 const BOOK = "/api/method/clinic_ui.api.appointments.book";
 const RESCHEDULE = "/api/method/clinic_ui.api.appointments.reschedule";
 const CHECKIN = "/api/method/clinic_ui.api.appointments.checkin";
+const CANCEL = "/api/method/clinic_ui.api.appointments_cancel_write.cancel";
+const NO_SHOW = "/api/method/clinic_ui.api.appointments_cancel_write.no_show";
 const TOKEN = "a".repeat(64);
 const ALIAS = "appointment-alias-1";
 
@@ -60,12 +62,12 @@ function serveBase(caps: Record<string, string>) {
   );
 }
 
-function writeSuccess(status: string) {
+function writeSuccess(status: string, appointment = DETAIL) {
   return HttpResponse.json({
     message: {
       status,
       ackToken: TOKEN,
-      appointment: DETAIL,
+      appointment,
     },
   });
 }
@@ -332,17 +334,243 @@ it.each([390, 834, 1440])(
   },
 );
 
-it("renders cancellation and no-show as unavailable even when capability payload says enabled", async () => {
+it("keeps cancellation and no-show capability-gated without posting when not enabled", async () => {
   serveBase({
     "write.appointment.book": "enabled",
     "write.appointment.reschedule": "enabled",
     "write.appointment.checkin": "enabled",
-    "write.appointment.cancel": "enabled",
   });
   server.use(
     http.get(VIEW, () =>
       HttpResponse.json({
         message: { ...DETAIL, can_reschedule: true, can_checkin: true },
+      }),
+    ),
+  );
+  const cancel = vi.fn();
+  const noShow = vi.fn();
+  const ack = vi.fn();
+  server.use(
+    http.post(CANCEL, ({ request }) => {
+      cancel(request.url);
+      return writeSuccess("cancelled", { ...DETAIL, status: "Cancelled" });
+    }),
+    http.post(NO_SHOW, ({ request }) => {
+      noShow(request.url);
+      return writeSuccess("no_show", { ...DETAIL, status: "No Show" });
+    }),
+    http.post(ACK, () => {
+      ack();
+      return acknowledge();
+    }),
+  );
+  const user = userEvent.setup();
+  renderWithFixtures(
+    <Routes>
+      <Route path="/clinic/appointments/:id" element={<AppointmentPage />} />
+    </Routes>,
+    { path: `/clinic/appointments/${ALIAS}` },
+  );
+  await screen.findByRole("button", { name: "เลื่อนนัด" });
+  const cancelButton = screen.getByRole("button", { name: /ยกเลิก|cancel/i });
+  const noShowButton = screen.getByRole("button", { name: /ไม่มา|no-show/i });
+  expect(cancelButton).toBeDisabled();
+  expect(noShowButton).toBeDisabled();
+  await user.click(cancelButton);
+  await user.click(noShowButton);
+
+  expect(cancel).not.toHaveBeenCalled();
+  expect(noShow).not.toHaveBeenCalled();
+  expect(ack).not.toHaveBeenCalled();
+});
+
+it("cancels through the confirmation step, the cancel endpoint and one ack", async () => {
+  serveBase({ "read.patient": "read_only", "write.appointment.cancel": "enabled" });
+  server.use(
+    http.get(VIEW, () =>
+      HttpResponse.json({
+        message: { ...DETAIL, can_reschedule: false, can_checkin: false },
+      }),
+    ),
+  );
+  const cancel = vi.fn();
+  const ack = vi.fn();
+  server.use(
+    http.post(CANCEL, async ({ request }) => {
+      cancel(await request.json());
+      return writeSuccess("cancelled", { ...DETAIL, status: "Cancelled" });
+    }),
+    http.post(ACK, async ({ request }) => {
+      ack(await request.json());
+      return acknowledge();
+    }),
+  );
+  const user = userEvent.setup();
+  renderWithFixtures(
+    <Routes>
+      <Route path="/clinic/appointments/:id" element={<AppointmentPage />} />
+    </Routes>,
+    { path: `/clinic/appointments/${ALIAS}` },
+  );
+
+  await user.click(
+    await screen.findByRole("button", { name: "ยกเลิกนัด" }),
+  );
+  const group = screen.getByRole("group", { name: "ยืนยันการยกเลิกนัด" });
+  const confirm = within(group).getByRole("button", {
+    name: "ยืนยันการยกเลิกนัด",
+  });
+  expect(confirm).toBeDisabled();
+  expect(cancel).not.toHaveBeenCalled();
+
+  await user.type(
+    within(group).getByLabelText("เหตุผล (บันทึกไว้ในนัดหมาย)"),
+    "ผู้ป่วยโทรขอยกเลิก",
+  );
+  await user.click(confirm);
+
+  expect(await screen.findByText("ยกเลิกนัดหมายแล้ว")).toBeVisible();
+  expect(cancel).toHaveBeenCalledWith({
+    operation_key: expect.any(String),
+    patient: "WS-1",
+    appointment_id: ALIAS,
+    reason: "ผู้ป่วยโทรขอยกเลิก",
+  });
+  expect(ack).toHaveBeenCalledWith({
+    operation_key: expect.any(String),
+    kind: "appointment_cancel",
+    ack_token: TOKEN,
+  });
+  expect(
+    localStorage.getItem("clinic.appointment-write.pending"),
+  ).toBeNull();
+});
+
+it("records a no-show through its own endpoint and acknowledgement kind", async () => {
+  serveBase({ "write.appointment.no_show": "enabled" });
+  server.use(
+    http.get(VIEW, () =>
+      HttpResponse.json({
+        message: { ...DETAIL, can_reschedule: false, can_checkin: false },
+      }),
+    ),
+  );
+  const noShow = vi.fn();
+  const ack = vi.fn();
+  server.use(
+    http.post(NO_SHOW, async ({ request }) => {
+      noShow(await request.json());
+      return writeSuccess("no_show", { ...DETAIL, status: "No Show" });
+    }),
+    http.post(ACK, async ({ request }) => {
+      ack(await request.json());
+      return acknowledge();
+    }),
+  );
+  const user = userEvent.setup();
+  renderWithFixtures(
+    <Routes>
+      <Route path="/clinic/appointments/:id" element={<AppointmentPage />} />
+    </Routes>,
+    { path: `/clinic/appointments/${ALIAS}` },
+  );
+
+  await user.click(
+    await screen.findByRole("button", { name: "ระบุว่าไม่มา" }),
+  );
+  const group = screen.getByRole("group", { name: "ยืนยันว่าไม่มา" });
+  await user.type(
+    within(group).getByLabelText("เหตุผล (บันทึกไว้ในนัดหมาย)"),
+    "ไม่มาตามนัด",
+  );
+  await user.click(
+    within(group).getByRole("button", { name: "ยืนยันว่าไม่มา" }),
+  );
+
+  expect(await screen.findByText("บันทึกว่าไม่มาแล้ว")).toBeVisible();
+  expect(noShow).toHaveBeenCalledWith({
+    operation_key: expect.any(String),
+    patient: "WS-1",
+    appointment_id: ALIAS,
+    reason: "ไม่มาตามนัด",
+  });
+  expect(ack).toHaveBeenCalledWith({
+    operation_key: expect.any(String),
+    kind: "appointment_no_show",
+    ack_token: TOKEN,
+  });
+});
+
+it("keeps the lock after an uncertain cancel and never retries", async () => {
+  serveBase({ "write.appointment.cancel": "enabled" });
+  server.use(
+    http.get(VIEW, () =>
+      HttpResponse.json({
+        message: { ...DETAIL, can_reschedule: false, can_checkin: false },
+      }),
+    ),
+  );
+  const cancel = vi.fn();
+  server.use(
+    http.post(CANCEL, async ({ request }) => {
+      cancel(await request.json());
+      return writeSuccess("cancelled", { ...DETAIL, status: "Cancelled" });
+    }),
+    http.post(ACK, () =>
+      HttpResponse.json({ message: { acknowledged: false } }, { status: 200 }),
+    ),
+  );
+  const user = userEvent.setup();
+  renderWithFixtures(
+    <Routes>
+      <Route path="/clinic/appointments/:id" element={<AppointmentPage />} />
+    </Routes>,
+    { path: `/clinic/appointments/${ALIAS}` },
+  );
+
+  await user.click(
+    await screen.findByRole("button", { name: "ยกเลิกนัด" }),
+  );
+  const group = screen.getByRole("group", { name: "ยืนยันการยกเลิกนัด" });
+  await user.type(
+    within(group).getByLabelText("เหตุผล (บันทึกไว้ในนัดหมาย)"),
+    "ผู้ป่วยโทรขอยกเลิก",
+  );
+  await user.click(
+    within(group).getByRole("button", { name: "ยืนยันการยกเลิกนัด" }),
+  );
+
+  expect(await screen.findByText(/ไม่ยืนยันผลการจอง/)).toBeVisible();
+  expect(
+    localStorage.getItem("clinic.appointment-write.pending"),
+  ).toBe("1");
+  expect(cancel).toHaveBeenCalledTimes(1);
+  const lockedGroup = screen.getByRole("group", {
+    name: "ยืนยันการยกเลิกนัด",
+  });
+  expect(
+    within(lockedGroup).getByRole("button", { name: "ยืนยันการยกเลิกนัด" }),
+  ).toBeDisabled();
+  await user.click(
+    within(lockedGroup).getByRole("button", { name: "ยืนยันการยกเลิกนัด" }),
+  );
+  expect(cancel).toHaveBeenCalledTimes(1);
+});
+
+it("offers no cancel or no-show action on a terminal appointment", async () => {
+  serveBase({
+    "write.appointment.cancel": "enabled",
+    "write.appointment.no_show": "enabled",
+  });
+  server.use(
+    http.get(VIEW, () =>
+      HttpResponse.json({
+        message: {
+          ...DETAIL,
+          status: "Cancelled",
+          can_reschedule: false,
+          can_checkin: false,
+        },
       }),
     ),
   );
@@ -352,16 +580,16 @@ it("renders cancellation and no-show as unavailable even when capability payload
     </Routes>,
     { path: `/clinic/appointments/${ALIAS}` },
   );
-  await screen.findByRole("button", { name: "เลื่อนนัด" });
-  expect(screen.getByRole("button", { name: /ยกเลิก|cancel/i })).toBeDisabled();
+
   expect(
-    screen.getByRole("button", { name: /ไม่มา|no-show/i }),
-  ).toBeDisabled();
-  expect(
-    screen.getByText(
-      /ไม่มีในสัญญานี้|not available in this contract/i,
-    ),
+    await screen.findByText(/อยู่ในสถานะสิ้นสุดแล้ว/),
   ).toBeVisible();
+  expect(
+    screen.queryByRole("button", { name: "ยกเลิกนัด" }),
+  ).toBeNull();
+  expect(
+    screen.queryByRole("button", { name: "ระบุว่าไม่มา" }),
+  ).toBeNull();
 });
 
 it("keeps reschedule read-only when the server did not enable it", async () => {

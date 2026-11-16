@@ -67,7 +67,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it("renders cancel and no-show as explicit unavailable controls without posting", async () => {
+it("keeps cancel and no-show refusal coverage when the capability is not enabled", async () => {
   serveLive();
   const fetchSpy = vi.spyOn(globalThis, "fetch");
   const user = userEvent.setup();
@@ -77,11 +77,9 @@ it("renders cancel and no-show as explicit unavailable controls without posting"
   const noShow = screen.getByRole("button", { name: "ระบุว่าไม่มา" });
   expect(cancel).toBeDisabled();
   expect(noShow).toBeDisabled();
-  expect(
-    screen.getByText(
-      "การยกเลิกนัดและบันทึกไม่มาไม่มีในสัญญานี้ ระบบจะไม่ส่งคำขอ",
-    ),
-  ).toBeVisible();
+  expect(screen.getAllByText(/ยังไม่เปิดใช้งาน|read-only/i).length).toBeGreaterThan(
+    0,
+  );
   await user.click(cancel);
   await user.click(noShow);
 

@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appointmentWriteLocked,
   bookNativeAppointment,
+  cancelNativeAppointment,
   checkinNativeAppointment,
   NativeAppointmentWriteError,
+  noShowNativeAppointment,
   rescheduleNativeAppointment,
 } from "./appointment-write";
 
@@ -22,7 +24,7 @@ const DETAIL = {
 };
 
 function success(
-  status: "booked" | "rescheduled" | "checked_in",
+  status: "booked" | "rescheduled" | "checked_in" | "cancelled" | "no_show",
   appointment: Record<string, unknown> = DETAIL,
 ) {
   return new Response(
@@ -63,6 +65,15 @@ function checkinInput() {
     operation_key: OPERATION,
     workspace_appointment_id: ALIAS,
     base_modified: "2026-11-20 09:00:00.000000",
+  };
+}
+
+function cancelInput() {
+  return {
+    operation_key: OPERATION,
+    patient: "WS-1",
+    appointment_id: ALIAS,
+    reason: "Patient called to cancel.",
   };
 }
 
@@ -265,5 +276,108 @@ describe("native appointment writes", () => {
       code: "validation",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels through the cancel endpoint and acknowledges the cancel kind", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        success("cancelled", { ...DETAIL, status: "Cancelled" }),
+      )
+      .mockResolvedValueOnce(acknowledged());
+
+    await expect(cancelNativeAppointment(cancelInput())).resolves.toEqual({
+      status: "cancelled",
+      appointment: { ...DETAIL, status: "Cancelled" },
+    });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "/api/method/clinic_ui.api.appointments_cancel_write.cancel",
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      operation_key: OPERATION,
+      patient: "WS-1",
+      appointment_id: ALIAS,
+      reason: "Patient called to cancel.",
+    });
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
+      "/api/method/clinic_ui.api.appointments.ack",
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      operation_key: OPERATION,
+      kind: "appointment_cancel",
+      ack_token: TOKEN,
+    });
+    expect(appointmentWriteLocked()).toBe(false);
+  });
+
+  it("records a no-show through its own endpoint and kind", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(success("no_show", { ...DETAIL, status: "No Show" }))
+      .mockResolvedValueOnce(acknowledged());
+
+    await expect(
+      noShowNativeAppointment(cancelInput()),
+    ).resolves.toMatchObject({ status: "no_show" });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "/api/method/clinic_ui.api.appointments_cancel_write.no_show",
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      operation_key: OPERATION,
+      kind: "appointment_no_show",
+      ack_token: TOKEN,
+    });
+  });
+
+  it.each([
+    ["empty", ""],
+    ["blank", "   "],
+    ["too long", "x".repeat(201)],
+    ["multiline", "line\nbreak"],
+  ])("refuses a %s reason before dispatching", async (_label, reason) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    await expect(
+      cancelNativeAppointment({ ...cancelInput(), reason }),
+    ).rejects.toMatchObject({ code: "validation" });
+    await expect(
+      noShowNativeAppointment({ ...cancelInput(), reason }),
+    ).rejects.toMatchObject({ code: "validation" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(appointmentWriteLocked()).toBe(false);
+  });
+
+  it("keeps the lock and never retries when the cancel acknowledgement is lost", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(success("cancelled", { ...DETAIL, status: "Cancelled" }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: { acknowledged: false } }), {
+          status: 200,
+        }),
+      );
+
+    await expect(cancelNativeAppointment(cancelInput())).rejects.toMatchObject({
+      code: "uncertain",
+    });
+    expect(appointmentWriteLocked()).toBe(true);
+    await expect(cancelNativeAppointment(cancelInput())).rejects.toMatchObject({
+      code: "locked",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the lock after a cancel response that names the wrong status", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(success("cancelled", DETAIL));
+
+    await expect(cancelNativeAppointment(cancelInput())).rejects.toMatchObject({
+      code: "uncertain",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(appointmentWriteLocked()).toBe(true);
   });
 });
