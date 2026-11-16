@@ -16,9 +16,10 @@ Keys
     At least 32 characters of server-owned secret entropy. Used only to derive
     the opaque session epoch; never returned, logged or stored elsewhere.
 ``clinic_ui_role_map``
-    Mapping of clinic role code (``DOC``/``REC``/``NUR``) to a non-empty list of
-    native Frappe role names. Codes outside the first slice, duplicate role
-    names and a role name shared by two codes are refused.
+    Mapping of clinic role code (``DOC``/``REC``/``NUR``/``PHA``/``CAS``/``MGR``/
+    ``ADM``) to a non-empty list of native Frappe role names. Codes outside the
+    supported set, duplicate role names and a role name shared by two codes are
+    refused.
 ``clinic_ui_synthetic_patients``
     Server-owned allowlist of ``{"workspace_patient_id", "native_patient_id"}``
     objects. Order is preserved. Duplicates and extra keys are refused.
