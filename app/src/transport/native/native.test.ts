@@ -179,8 +179,8 @@ describe("native session bootstrap", () => {
       "write.appointment.cancel": "enabled",
       "write.appointment.no_show": "enabled",
       "write.appointment.checkin": "enabled",
-      // Not enableable by deployment yet: it has no reviewed write family.
-      "write.admin.master": "read_only",
+      // Admin user/master writes are enableable by their own deployment gate.
+      "write.admin.master": "enabled",
     });
 
     for (const value of [null, true, {}, "ENABLED", "enabled ", "denied"]) {
