@@ -140,5 +140,48 @@ class RoleResolutionTests(unittest.TestCase):
             self.assertIn(code, policy.SUPPORTED_ROLE_CODES)
 
 
+class RoleCodeSetTests(unittest.TestCase):
+    """The full write-contract wave publishes seven clinic role codes.
+
+    The names are consumed verbatim by the per-family gates; the exact literals
+    are the contract, so they are asserted here rather than derived.
+    """
+
+    EXPECTED = {
+        "APPOINTMENT_CANCEL_ROLE_CODES": {"DOC", "REC"},
+        "APPOINTMENT_NOSHOW_ROLE_CODES": {"DOC", "REC"},
+        "ENCOUNTER_ROLE_CODES": {"DOC", "NUR"},
+        "ENCOUNTER_COMPLETE_ROLE_CODES": {"DOC"},
+        "ENCOUNTER_AMEND_ROLE_CODES": {"DOC"},
+        "PROCEDURE_ROLE_CODES": {"DOC"},
+        "STOCK_ROLE_CODES": {"PHA"},
+        "ADJUST_ROLE_CODES": {"ADM"},
+        "PO_ROLE_CODES": {"PHA", "MGR"},
+        "INVOICE_ROLE_CODES": {"CAS"},
+        "INVOICE_VOID_ROLE_CODES": {"MGR"},
+        "PAYMENT_ROLE_CODES": {"CAS"},
+        "ADMIN_ROLE_CODES": {"ADM"},
+    }
+
+    def test_supported_codes_are_the_seven_clinic_roles(self):
+        self.assertEqual(
+            policy.SUPPORTED_ROLE_CODES,
+            frozenset({"DOC", "REC", "NUR", "PHA", "CAS", "MGR", "ADM"}),
+        )
+
+    def test_each_family_gate_is_the_frozen_frozenset(self):
+        for name, codes in self.EXPECTED.items():
+            with self.subTest(name=name):
+                gate = getattr(policy, name)
+                self.assertIsInstance(gate, frozenset)
+                self.assertEqual(gate, frozenset(codes))
+
+    def test_every_family_gate_is_supported(self):
+        for name in self.EXPECTED:
+            with self.subTest(name=name):
+                gate = getattr(policy, name)
+                self.assertTrue(gate.issubset(policy.SUPPORTED_ROLE_CODES))
+
+
 if __name__ == "__main__":
     unittest.main()

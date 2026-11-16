@@ -2,10 +2,11 @@
 
 Names and order mirror ``contracts/capabilities.json`` exactly; the parity test
 fails if the client contract and this list drift. The default map is
-``read_only``. Only the reviewed patient create/edit and the three appointment
-write capabilities may be promoted to ``enabled``, and only after the bootstrap
-endpoint has verified the whole reviewed local write gate for that surface.
-Every other capability stays ``read_only``.
+``read_only``. Only the reviewed patient create/edit, the three appointment
+write capabilities and the deployment-gated writes added by the full
+write-contract wave may be promoted to ``enabled``, and only after the
+bootstrap endpoint has verified the whole reviewed local write gate for that
+surface. Every other capability stays ``read_only``.
 """
 
 CAPABILITY_NAMES = (
@@ -14,9 +15,11 @@ CAPABILITY_NAMES = (
     "write.appointment.book",
     "write.appointment.reschedule",
     "write.appointment.cancel",
+    "write.appointment.no_show",
     "write.appointment.checkin",
     "write.encounter.draft",
     "write.encounter.complete",
+    "write.encounter.amend",
     "write.medication.order",
     "write.procedure.complete",
     "write.lab.order",
@@ -28,9 +31,11 @@ CAPABILITY_NAMES = (
     "write.stock.receive",
     "write.stock.transfer",
     "write.stock.adjust",
+    "write.stock.consume",
     "write.purchase_order.draft",
     "write.purchase_order.submit",
     "write.invoice.submit",
+    "write.invoice.void_amend",
     "write.payment.receive",
     "write.payment.refund",
     "write.admin.user",
@@ -58,8 +63,7 @@ PATIENT_WRITE_NAMES = frozenset(
     {"write.patient.create", "write.patient.update"}
 )
 # The reviewed local appointment surface. Cancellation and the generic status
-# setter stay unavailable; these three names are the only non-patient writes
-# bootstrap may ever publish as ``enabled``.
+# setter stay unavailable; no-show is deployment-gated by its own family gate.
 APPOINTMENT_WRITE_NAMES = frozenset(
     {
         "write.appointment.book",
@@ -67,7 +71,20 @@ APPOINTMENT_WRITE_NAMES = frozenset(
         "write.appointment.checkin",
     }
 )
-ENABLEABLE_NAMES = PATIENT_WRITE_NAMES | APPOINTMENT_WRITE_NAMES
+# The full write-contract wave: every new write id may be promoted by its own
+# site-config deployment gate exactly like the reviewed writes above. Bootstrap
+# publishes them read-only until that gate is wired.
+DEPLOYMENT_GATED_WRITE_NAMES = frozenset(
+    {
+        "write.appointment.no_show",
+        "write.encounter.amend",
+        "write.invoice.void_amend",
+        "write.stock.consume",
+    }
+)
+ENABLEABLE_NAMES = (
+    PATIENT_WRITE_NAMES | APPOINTMENT_WRITE_NAMES | DEPLOYMENT_GATED_WRITE_NAMES
+)
 
 
 def read_only_capabilities():
@@ -110,8 +127,8 @@ def validate_capabilities(capabilities):
 
     Exactly the contract names are required, in contract order, and every state
     must be a bootstrap state. ``enabled`` is accepted only for the reviewed
-    patient and appointment write names. Anything else fails closed at the DTO
-    boundary.
+    patient/appointment writes and the deployment-gated wave writes. Anything
+    else fails closed at the DTO boundary.
     """
 
     if not isinstance(capabilities, dict):

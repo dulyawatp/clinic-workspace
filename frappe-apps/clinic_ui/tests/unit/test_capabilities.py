@@ -7,16 +7,27 @@ outside the repository.
 """
 
 import json
+import re
 import unittest
 from pathlib import Path
 
 from clinic_ui.core.capabilities import (
     CAPABILITY_NAMES,
+    ENABLEABLE_NAMES,
     ENABLED_STATE,
     READ_ONLY_STATE,
     bootstrap_capabilities,
     read_only_capabilities,
     validate_capabilities,
+)
+from clinic_ui.core.policy import SUPPORTED_ROLE_CODES
+
+# The ids added by the full write-contract wave, frozen by the design.
+NEW_WRITE_NAMES = (
+    "write.appointment.no_show",
+    "write.encounter.amend",
+    "write.invoice.void_amend",
+    "write.stock.consume",
 )
 
 
@@ -26,6 +37,22 @@ def contract_path():
         if candidate.is_file():
             return candidate
     return None
+
+
+def _repo_file(*parts):
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent.joinpath(*parts)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _quoted(text, marker, terminator):
+    """Return the quoted literals between ``marker`` and ``terminator``."""
+
+    start = text.index(marker) + len(marker)
+    end = text.index(terminator, start)
+    return re.findall(r'"([^"]+)"', text[start:end])
 
 
 class CapabilityTests(unittest.TestCase):
@@ -149,6 +176,7 @@ class BootstrapCapabilityTests(unittest.TestCase):
             "write.appointment.book",
             "write.appointment.reschedule",
             "write.appointment.checkin",
+            *NEW_WRITE_NAMES,
         }
         for name in CAPABILITY_NAMES:
             if name in allowed:
@@ -156,6 +184,22 @@ class BootstrapCapabilityTests(unittest.TestCase):
             with self.subTest(name=name):
                 with self.assertRaises(ValueError):
                     validate_capabilities({**valid, name: ENABLED_STATE})
+
+    def test_new_write_ids_are_published_read_only(self):
+        capabilities = read_only_capabilities()
+        for name in NEW_WRITE_NAMES:
+            with self.subTest(name=name):
+                self.assertIn(name, CAPABILITY_NAMES)
+                self.assertEqual(capabilities[name], READ_ONLY_STATE)
+
+    def test_new_write_ids_are_enableable_only_by_deployment_gate(self):
+        valid = read_only_capabilities()
+        for name in NEW_WRITE_NAMES:
+            with self.subTest(name=name):
+                self.assertIn(name, ENABLEABLE_NAMES)
+                # Bootstrap enables only the reviewed flags it knows; the new
+                # ids stay read_only until their own gate is wired.
+                self.assertEqual(bootstrap_capabilities()[name], READ_ONLY_STATE)
 
 
 class ContractParityTests(unittest.TestCase):
@@ -165,6 +209,38 @@ class ContractParityTests(unittest.TestCase):
             self.skipTest("contracts/capabilities.json is not reachable")
         names = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(list(CAPABILITY_NAMES), list(names))
+
+    def test_all_client_surfaces_stay_in_lockstep(self):
+        """One lockstep check over every published capability surface.
+
+        Drift between the contract JSON, the Python names, the client closed
+        union, the client enableable subset and the policy role codes fails
+        here. Later tasks extend this test rather than adding new parity ones.
+        """
+
+        json_path = contract_path()
+        capability_ts = _repo_file("app", "src", "domain", "capability.ts")
+        session_ts = _repo_file("app", "src", "transport", "native", "session.ts")
+        if json_path is None or capability_ts is None or session_ts is None:
+            self.skipTest("client contract surfaces are not reachable")
+
+        names = json.loads(json_path.read_text(encoding="utf-8"))
+        self.assertEqual(list(CAPABILITY_NAMES), list(names))
+
+        client_source = capability_ts.read_text(encoding="utf-8")
+        client_union = _quoted(
+            client_source, "export type Capability =", ";"
+        )
+        self.assertEqual(client_union, list(names))
+
+        client_roles = _quoted(client_source, "export type RoleCode =", ";")
+        self.assertEqual(set(client_roles), set(SUPPORTED_ROLE_CODES))
+
+        session_source = session_ts.read_text(encoding="utf-8")
+        client_enableable = _quoted(
+            session_source, "const NATIVE_ENABLEABLE", "]);"
+        )
+        self.assertEqual(set(client_enableable), set(ENABLEABLE_NAMES))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 import { waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CAPABILITY_NAMES } from "../../domain/capability";
 import { server } from "../../test/msw/server";
 import { fetchNativeDirectoryBody } from "./directory";
 import { nativeTransportEnabled } from "./flag";
@@ -45,6 +46,56 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
   clearNativeCsrfToken();
+});
+
+// Frozen by the full write-contract design. Kept literal so a contract edit
+// without a client union update fails here, not at runtime.
+const FROZEN_CAPABILITY_NAMES = [
+  "write.patient.create",
+  "write.patient.update",
+  "write.appointment.book",
+  "write.appointment.reschedule",
+  "write.appointment.cancel",
+  "write.appointment.no_show",
+  "write.appointment.checkin",
+  "write.encounter.draft",
+  "write.encounter.complete",
+  "write.encounter.amend",
+  "write.medication.order",
+  "write.procedure.complete",
+  "write.lab.order",
+  "write.lab.review",
+  "write.photo.consent",
+  "write.photo.upload",
+  "write.photo.link",
+  "write.photo.annotate",
+  "write.stock.receive",
+  "write.stock.transfer",
+  "write.stock.adjust",
+  "write.stock.consume",
+  "write.purchase_order.draft",
+  "write.purchase_order.submit",
+  "write.invoice.submit",
+  "write.invoice.void_amend",
+  "write.payment.receive",
+  "write.payment.refund",
+  "write.admin.user",
+  "write.admin.master",
+  "read.patient",
+  "read.appointment",
+  "read.encounter",
+  "read.lab",
+  "read.photo",
+  "read.inventory",
+  "read.billing",
+  "read.report",
+  "read.admin",
+];
+
+describe("native capability contract", () => {
+  it("keeps the contract JSON, closed union and order in lockstep", () => {
+    expect(CAPABILITY_NAMES).toEqual(FROZEN_CAPABILITY_NAMES);
+  });
 });
 
 describe("native transport opt-in", () => {

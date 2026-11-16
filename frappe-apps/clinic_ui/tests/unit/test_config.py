@@ -92,7 +92,7 @@ class RoleMapValidationTests(unittest.TestCase):
         cases = {
             "not a mapping": ["DOC"],
             "empty": {},
-            "unknown code": {"PHA": ["Pharmacist"]},
+            "unknown code": {"XYZ": ["Pharmacist"]},
             "lowercase code": {"doc": ["Physician"]},
             "value not a sequence": {"DOC": "Physician"},
             "empty sequence": {"DOC": []},

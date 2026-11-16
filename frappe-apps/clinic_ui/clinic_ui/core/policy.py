@@ -14,9 +14,11 @@ from dataclasses import dataclass
 
 from clinic_ui.core.text import is_valid_text
 
-# Clinic role codes supported by the first slice. A configured role map may only
-# use these codes; anything else is refused as an invalid configuration.
-SUPPORTED_ROLE_CODES = frozenset({"DOC", "REC", "NUR"})
+# Clinic role codes supported by the full write-contract wave. A configured
+# role map may only use these codes; anything else is refused as an invalid
+# configuration. The write families are gated by the frozensets below; the code
+# itself never grants native authority.
+SUPPORTED_ROLE_CODES = frozenset({"DOC", "REC", "NUR", "PHA", "CAS", "MGR", "ADM"})
 
 # The synthetic directory slice is readable by these roles only.
 DIRECTORY_ROLE_CODES = frozenset({"DOC", "REC", "NUR"})
@@ -49,6 +51,24 @@ CROSS_ACTOR_READ_ROLE_CODES = frozenset({"DOC", "NUR"})
 # role code is not a grant: the exact native Patient create/write check still
 # runs before any operation-fence access. REC never reaches that check.
 PATIENT_WRITE_ROLE_CODES = frozenset({"DOC", "NUR"})
+
+# Per-family code gates for the full write-contract wave. These narrow; the
+# exact native DocType permission check still runs on every write and stays
+# authoritative. Qualifier tokens in the requirements fold to these base codes,
+# with the qualifier expressed as an extra condition, never a role code.
+APPOINTMENT_CANCEL_ROLE_CODES = frozenset({"DOC", "REC"})
+APPOINTMENT_NOSHOW_ROLE_CODES = frozenset({"DOC", "REC"})
+ENCOUNTER_ROLE_CODES = frozenset({"DOC", "NUR"})
+ENCOUNTER_COMPLETE_ROLE_CODES = frozenset({"DOC"})
+ENCOUNTER_AMEND_ROLE_CODES = frozenset({"DOC"})
+PROCEDURE_ROLE_CODES = frozenset({"DOC"})
+STOCK_ROLE_CODES = frozenset({"PHA"})
+ADJUST_ROLE_CODES = frozenset({"ADM"})
+PO_ROLE_CODES = frozenset({"PHA", "MGR"})
+INVOICE_ROLE_CODES = frozenset({"CAS"})
+INVOICE_VOID_ROLE_CODES = frozenset({"MGR"})
+PAYMENT_ROLE_CODES = frozenset({"CAS"})
+ADMIN_ROLE_CODES = frozenset({"ADM"})
 
 NON_CLINICAL_IDENTITIES = frozenset({"", "Guest", "Administrator"})
 

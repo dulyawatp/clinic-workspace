@@ -102,7 +102,7 @@ class BootstrapDTOTests(unittest.TestCase):
             )
 
     def test_unsupported_role_code_is_refused(self):
-        for role in ("PHA", "MGR", "ADM", "", "doc"):
+        for role in ("XYZ", "PHA-LIMITED", "", "doc"):
             with self.subTest(role=role):
                 with self.assertRaises(ValueError):
                     dto.build_bootstrap(

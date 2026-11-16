@@ -76,7 +76,9 @@ function identityOf(session: SessionDTO): string {
 
 /**
  * Only the reviewed native write capabilities can be enabled by bootstrap:
- * patient create/update and appointment book/reschedule/checkin. Every other
+ * patient create/update, appointment book/reschedule/checkin, and the
+ * deployment-gated writes from the full write-contract wave (appointment
+ * no-show, encounter amend, invoice void/amend, stock consume). Every other
  * known capability stays read-only, so cancellation can never be enabled by a
  * malformed or substituted session payload. Unknown keys are dropped and
  * malformed values never enable a write.
@@ -87,6 +89,10 @@ const NATIVE_ENABLEABLE = new Set<string>([
   "write.appointment.book",
   "write.appointment.reschedule",
   "write.appointment.checkin",
+  "write.appointment.no_show",
+  "write.encounter.amend",
+  "write.invoice.void_amend",
+  "write.stock.consume",
 ]);
 
 function nativeCapabilities(value: unknown): CapabilityMap {
