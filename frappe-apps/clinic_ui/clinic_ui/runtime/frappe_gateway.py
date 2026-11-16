@@ -34,6 +34,7 @@ from clinic_ui.core import (
     encounter_contract,
     encounter_write,
     fence_store,
+    finance_contract,
     patient_write,
     procedure_contract,
     procedure_write,
@@ -5249,6 +5250,787 @@ class Gateway:
     @contextmanager
     def purchase_write_fence(self, actor, kind, operation_key, payload_digest):
         if kind not in write_fence.PURCHASE_OPERATION_KINDS:
+            raise patient_write.WriteUncertain()
+        ledger = self._ledger()
+        try:
+            with ledger.fence(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                payload_digest=payload_digest,
+            ) as claim:
+                yield claim
+        except write_fence.OperationLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.SiteLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.OperationConflict as exc:
+            raise patient_write.WriteConflict() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    # -- finance (invoice submit + payment receive) ------------------------
+
+    def _finance_meta_fields(self):
+        """Resolve the installed field names through the metadata cache.
+
+        The discount child is optional: a site without it still lands invoices
+        (only the discount sub-capability is cut), so an absent DocType is
+        recorded as an empty column set instead of failing the preflight.
+        """
+
+        cached = getattr(self, "_finance_fields_cache", None)
+        if cached is not None:
+            return cached
+        frappe = self.frappe
+        get_meta = getattr(getattr(frappe, "db", None), "get_meta", None)
+        if not callable(get_meta):
+            get_meta = frappe.get_meta
+        fields = {}
+        for doctype in finance_contract.INSTALLED_CANDIDATES:
+            try:
+                fields[doctype] = set(get_meta(doctype).get_valid_columns())
+            except Exception:
+                if doctype in finance_contract.OPTIONAL_DOCTYPES:
+                    fields[doctype] = set()
+                    continue
+                raise
+        self._finance_fields_cache = fields
+        return fields
+
+    def native_finance_install_problem(self):
+        """Preflight the installed DocType/field set; a gap is a refusal."""
+
+        try:
+            return finance_contract.install_problem(self._finance_meta_fields())
+        except Exception:
+            return "installed metadata unreadable"
+
+    def native_finance_boundary_problem(self):
+        """Return pinned-boundary drift for the finance family, or ``None``.
+
+        The two controllers are driven only through their public insert/submit
+        lifecycle, so the reviewed boundary is the pinned versions, the
+        controller MRO, the submittable flags, the absence of class overrides
+        and document events, the wildcard hooks and our own fence kinds.
+        """
+
+        try:
+            snapshot = getattr(self.frappe, "finance_boundary_snapshot", None)
+            if snapshot is None:
+                snapshot = self._collect_finance_boundary_snapshot()
+            return finance_contract.boundary_problem(snapshot)
+        except Exception:
+            return "boundary unreadable"
+
+    def _collect_finance_boundary_snapshot(self):
+        import importlib
+
+        frappe = self.frappe
+
+        def version(module_name, module=None):
+            if module is not None:
+                return getattr(module, "__version__", None)
+            try:
+                return getattr(
+                    importlib.import_module(module_name), "__version__", None
+                )
+            except Exception:
+                return None
+
+        mro = {}
+        for doctype in finance_contract.GUARDED_DOCTYPES:
+            controller = type(frappe.get_doc({"doctype": doctype}))
+            mro[doctype] = tuple(
+                f"{base.__module__}.{base.__name__}" for base in controller.__mro__
+            )
+
+        hooks = frappe.get_hooks() or {}
+        doc_events = hooks.get("doc_events") or {}
+        wildcard = doc_events.get("*") or {}
+        overrides = hooks.get("override_doctype_class") or {}
+        extends = hooks.get("extend_doctype_class") or {}
+        server_scripts = frappe.get_all(
+            "Server Script", filters={"disabled": 0}, limit=1, pluck="name"
+        ) or ()
+        return {
+            "versions": {
+                "frappe": version("frappe", frappe),
+                "erpnext": version("erpnext"),
+                "healthcare": version("healthcare"),
+            },
+            "controller_mro": mro,
+            "submittable": {
+                doctype: (
+                    1 if frappe.get_meta(doctype).get("is_submittable") else 0
+                )
+                for doctype in (
+                    finance_contract.INVOICE_DOCTYPE,
+                    finance_contract.PAYMENT_DOCTYPE,
+                )
+            },
+            "enabled_server_scripts": len(server_scripts),
+            "doc_events": {
+                doctype: tuple(doc_events.get(doctype) or ())
+                for doctype in finance_contract.GUARDED_DOCTYPES
+            },
+            "wildcard_doc_events": {
+                event: tuple(wildcard.get(event) or ())
+                for event in finance_contract.REVIEWED_WILDCARD_EVENTS
+            },
+            "scheduler_finance_jobs": tuple(
+                path
+                for handlers in (hooks.get("scheduler_events") or {}).values()
+                for path in (handlers or ())
+                if any(
+                    token in str(path)
+                    for token in finance_contract.SCHEDULER_FINANCE_TOKENS
+                )
+            ),
+            "class_overrides": {
+                doctype: tuple(overrides.get(doctype) or ())
+                + tuple(extends.get(doctype) or ())
+                for doctype in finance_contract.GUARDED_DOCTYPES
+            },
+            "fence_kinds": tuple(finance_contract.FINANCE_KINDS),
+        }
+
+    def _finance_money(self, value):
+        """Coerce an installed numeric (float or Decimal) or return ``None``."""
+
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def native_finance_can_write(self, doctype):
+        """The acting user's native create authority on one accounting document."""
+
+        try:
+            return bool(
+                self.frappe.has_permission(
+                    doctype,
+                    ptype="create",
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
+    def _finance_price_list(self, name):
+        if not name:
+            return {"exists": False}
+        try:
+            row = self.frappe.db.get_value(
+                finance_contract.PRICE_LIST_DOCTYPE,
+                name,
+                ["selling", "enabled", "currency"],
+                as_dict=True,
+            )
+        except Exception:
+            row = None
+        if row is None:
+            return {"exists": False}
+        get = getattr(row, "get", lambda key, default=None: default)
+        return {
+            "exists": True,
+            "selling": bool(get("selling")),
+            "enabled": bool(get("enabled")),
+            "currency": self._text_value(get("currency")),
+        }
+
+    def _finance_item(self, item_code):
+        try:
+            row = self.frappe.db.get_value(
+                finance_contract.ITEM_DOCTYPE,
+                item_code,
+                ["is_sales_item", "stock_uom"],
+                as_dict=True,
+            )
+        except Exception:
+            row = None
+        if row is None:
+            return {"exists": False}
+        get = getattr(row, "get", lambda key, default=None: default)
+        return {
+            "exists": True,
+            "is_sales_item": bool(get("is_sales_item")),
+            "stock_uom": self._text_value(get("stock_uom")),
+        }
+
+    def _finance_item_price(self, item_code, price_list):
+        if not price_list:
+            return None
+        try:
+            return self._finance_money(
+                self.frappe.db.get_value(
+                    "Item Price",
+                    {"item_code": item_code, "price_list": price_list},
+                    "price_list_rate",
+                )
+            )
+        except Exception:
+            return None
+
+    def _finance_company_defaults(self, company):
+        if not company:
+            return {}
+        try:
+            row = self.frappe.db.get_value(
+                finance_contract.COMPANY_DOCTYPE,
+                company,
+                [
+                    "default_currency",
+                    "default_receivable_account",
+                    "default_income_account",
+                    "cost_center",
+                ],
+                as_dict=True,
+            )
+        except Exception:
+            row = None
+        if row is None:
+            return {}
+        get = getattr(row, "get", lambda key, default=None: default)
+        return {
+            "default_currency": self._text_value(get("default_currency")),
+            "default_receivable_account": self._text_value(
+                get("default_receivable_account")
+            ),
+            "default_income_account": self._text_value(
+                get("default_income_account")
+            ),
+            "cost_center": self._text_value(get("cost_center")),
+        }
+
+    def _finance_item_defaults(self, item_code, company):
+        if not item_code or not company:
+            return {}
+        try:
+            rows = self.frappe.db.get_all(
+                finance_contract.ITEM_DEFAULT_DOCTYPE,
+                filters={"parent": item_code, "company": company},
+                fields=["income_account", "cost_center"],
+                limit=1,
+            ) or ()
+        except Exception:
+            rows = ()
+        if not rows:
+            return {}
+        get = getattr(rows[0], "get", lambda key, default=None: default)
+        return {
+            "income_account": self._text_value(get("income_account")),
+            "cost_center": self._text_value(get("cost_center")),
+        }
+
+    def native_finance_invoice_detail(self, payload, discount_enabled=False):
+        """Read the pre-fence invoice decision fields under native authority."""
+
+        try:
+            company, currency = self._purchase_company_currency()
+            defaults = self._finance_company_defaults(company)
+            price_list = self._finance_price_list(payload["selling_price_list"])
+            prices = {}
+            items = {}
+            income_accounts = {}
+            cost_center = ""
+            for line in payload["items"]:
+                code = line["item_code"]
+                if code in items:
+                    continue
+                items[code] = self._finance_item(code)
+                prices[code] = self._finance_item_price(
+                    code, payload["selling_price_list"]
+                )
+                own = self._finance_item_defaults(code, company)
+                income_accounts[code] = (
+                    own.get("income_account")
+                    or defaults.get("default_income_account")
+                    or ""
+                )
+                if not cost_center:
+                    cost_center = own.get("cost_center") or ""
+            if not cost_center:
+                cost_center = defaults.get("cost_center") or ""
+            discount_available = (
+                finance_contract.discount_problem(
+                    self._finance_meta_fields(), enabled=discount_enabled
+                )
+                is None
+            )
+            return {
+                "today": self.site_today(),
+                "company": company,
+                "currency": currency,
+                "customer_exists": bool(
+                    self.frappe.db.exists(
+                        finance_contract.CUSTOMER_DOCTYPE, payload["customer"]
+                    )
+                ),
+                "price_list": price_list,
+                "prices": prices,
+                "items": items,
+                "receivable_account": (
+                    defaults.get("default_receivable_account") or ""
+                ),
+                "income_accounts": income_accounts,
+                "cost_center": cost_center,
+                "discount_available": discount_available,
+            }
+        except Exception:
+            raise patient_write.StoreUnavailable() from None
+
+    def _finance_invoice_state(self, invoice):
+        if not invoice:
+            return {"exists": False}
+        try:
+            row = self.frappe.db.get_value(
+                finance_contract.INVOICE_DOCTYPE,
+                invoice,
+                [
+                    "docstatus",
+                    "status",
+                    "outstanding_amount",
+                    "grand_total",
+                    "customer",
+                ],
+                as_dict=True,
+            )
+        except Exception:
+            row = None
+        if row is None:
+            return {"exists": False}
+        get = getattr(row, "get", lambda key, default=None: default)
+        return {
+            "exists": True,
+            "docstatus": get("docstatus"),
+            "status": self._text_value(get("status")),
+            "outstanding_amount": self._finance_money(
+                get("outstanding_amount")
+            ),
+            "grand_total": self._finance_money(get("grand_total")),
+            "customer": self._text_value(get("customer")),
+        }
+
+    def _finance_mode_of_payment(self, name, company):
+        if not name:
+            return {"exists": False, "account": "", "accepted": False}
+        try:
+            exists = bool(
+                self.frappe.db.exists(
+                    finance_contract.MODE_OF_PAYMENT_DOCTYPE, name
+                )
+            )
+        except Exception:
+            exists = False
+        account = ""
+        if exists and company:
+            try:
+                account = self._text_value(
+                    self.frappe.db.get_value(
+                        finance_contract.MODE_OF_PAYMENT_ACCOUNT_DOCTYPE,
+                        {"parent": name, "company": company},
+                        "default_account",
+                    )
+                )
+            except Exception:
+                account = ""
+        return {
+            "exists": exists,
+            "account": account,
+            "accepted": name in finance_contract.ACCEPTED_PAYMENT_MODES,
+        }
+
+    def _finance_payment_recorded(self, invoice):
+        """True when a committed payment receipt already names this invoice."""
+
+        try:
+            records = self._ledger().committed_finance_receipts(
+                limit=write_fence.MAX_RECEIPT_ENUMERATION,
+                kind=finance_contract.PAYMENT_KIND,
+            )
+        except write_fence.EnumerationOverflow as exc:
+            raise finance_contract.FinanceBudgetExhausted() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+        for record in records:
+            try:
+                receipt = finance_contract.decode_receipt(record.receipt)
+            except finance_contract.FinanceContractError:
+                raise patient_write.WriteUncertain() from None
+            if receipt.invoice == invoice:
+                return True
+        return False
+
+    def native_finance_payment_detail(self, payload):
+        """Read the pre-fence payment decision fields."""
+
+        try:
+            company, _currency = self._purchase_company_currency()
+            defaults = self._finance_company_defaults(company)
+            return {
+                "today": self.site_today(),
+                "company": company,
+                "currency": self._text_value(
+                    defaults.get("default_currency")
+                ),
+                "invoice": self._finance_invoice_state(payload["invoice"]),
+                "mode": self._finance_mode_of_payment(
+                    payload["mode_of_payment"], company
+                ),
+                "payment_exists": self._finance_payment_recorded(
+                    payload["invoice"]
+                ),
+                "receivable_account": (
+                    defaults.get("default_receivable_account") or ""
+                ),
+            }
+        except Exception:
+            raise patient_write.StoreUnavailable() from None
+
+    def _finance_counts(self):
+        vouchers = (
+            finance_contract.INVOICE_DOCTYPE,
+            finance_contract.PAYMENT_DOCTYPE,
+        )
+        return {
+            "gl_rows": int(
+                self.frappe.db.count(
+                    finance_contract.GL_ENTRY_DOCTYPE,
+                    filters={"voucher_type": ("in", list(vouchers))},
+                )
+            ),
+            "ple_rows": int(
+                self.frappe.db.count(
+                    finance_contract.PAYMENT_LEDGER_DOCTYPE,
+                    filters={"voucher_type": ("in", list(vouchers))},
+                )
+            ),
+            "sle_rows": int(
+                self.frappe.db.count(
+                    finance_contract.STOCK_LEDGER_DOCTYPE,
+                    filters={"voucher_type": ("in", list(vouchers))},
+                )
+            ),
+        }
+
+    def native_finance_baseline(self, kind, invoice=None):
+        """Pre-fence GL, Payment Ledger, Stock Ledger and invoice baselines."""
+
+        if kind not in finance_contract.FINANCE_KINDS:
+            raise patient_write.WriteUncertain()
+        try:
+            counts = self._finance_counts()
+            state = self._finance_invoice_state(invoice) if invoice else {}
+            return {
+                **counts,
+                "invoice_outstanding": state.get("outstanding_amount"),
+                "invoice_status": state.get("status"),
+            }
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def create_and_submit_native_sales_invoice(self, prepared):
+        """One invoice unit: insert, then submit the installed document."""
+
+        try:
+            rows = []
+            for line in prepared["items"]:
+                rows.append(
+                    {
+                        "item_code": line["item_code"],
+                        "qty": line["qty"],
+                        "rate": line["rate"],
+                        "amount": line["amount"],
+                        "price_list_rate": line.get("price_list_rate")
+                        or line["rate"],
+                        "uom": line.get("uom"),
+                        "stock_uom": line.get("stock_uom") or line.get("uom"),
+                        "income_account": line["income_account"],
+                        "cost_center": line["cost_center"],
+                    }
+                )
+            document = {
+                "doctype": finance_contract.INVOICE_DOCTYPE,
+                "customer": prepared["customer"],
+                "company": prepared["company"],
+                "currency": prepared["currency"],
+                "conversion_rate": prepared.get("conversion_rate") or 1.0,
+                "selling_price_list": prepared["selling_price_list"],
+                "due_date": prepared["due_date"],
+                "posting_date": prepared["posting_date"],
+                "update_stock": finance_contract.PINNED_UPDATE_STOCK,
+                "debit_to": prepared["debit_to"],
+                "cost_center": prepared["cost_center"],
+                "taxes": [],
+                "items": rows,
+            }
+            deductions = prepared.get("deductions") or ()
+            if deductions:
+                document["deductions"] = [
+                    dict(row) for row in deductions
+                ]
+            invoice = self.frappe.get_doc(document)
+            invoice.insert()
+            invoice.submit()
+            return self._text_value(invoice.name)
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def create_native_payment_entry(self, prepared):
+        """One ``Payment Entry`` Receive with the server-built allocation."""
+
+        try:
+            references = []
+            for row in prepared["references"]:
+                references.append(
+                    {
+                        "reference_doctype": row["reference_doctype"],
+                        "reference_name": row["reference_name"],
+                        "allocated_amount": row["allocated_amount"],
+                        "outstanding_amount": row.get("outstanding_amount"),
+                        "total_amount": row.get("total_amount"),
+                    }
+                )
+            document = {
+                "doctype": finance_contract.PAYMENT_DOCTYPE,
+                "payment_type": "Receive",
+                "party_type": "Customer",
+                "party": prepared["party"],
+                "company": prepared["company"],
+                "paid_from": prepared["paid_from"],
+                "paid_to": prepared["paid_to"],
+                "paid_amount": prepared["paid_amount"],
+                "received_amount": prepared["received_amount"],
+                "source_exchange_rate": prepared.get("source_exchange_rate")
+                or 1.0,
+                "target_exchange_rate": prepared.get("target_exchange_rate")
+                or 1.0,
+                "posting_date": prepared["posting_date"],
+                "reference_no": prepared.get("reference_no") or "",
+                "reference_date": prepared["reference_date"],
+                "mode_of_payment": prepared["mode_of_payment"],
+                "references": references,
+            }
+            payment = self.frappe.get_doc(document)
+            payment.insert()
+            payment.submit()
+            return self._text_value(payment.name)
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def _finance_gl_rows(self, doctype, reference):
+        rows = self.frappe.db.get_all(
+            finance_contract.GL_ENTRY_DOCTYPE,
+            filters={"voucher_type": doctype, "voucher_no": reference},
+            fields=["account", "debit", "credit"],
+            limit=200,
+        ) or ()
+        return [
+            {
+                "account": self._text_value(
+                    getattr(row, "get", lambda key, default=None: default)(
+                        "account"
+                    )
+                ),
+                "debit": getattr(row, "get", lambda key, default=None: default)(
+                    "debit"
+                )
+                or 0.0,
+                "credit": getattr(row, "get", lambda key, default=None: default)(
+                    "credit"
+                )
+                or 0.0,
+            }
+            for row in rows
+        ]
+
+    def _finance_invoice_facts(self, reference, expected, baseline):
+        """Closed-world re-read: posted state, GL classification, no stock row."""
+
+        if not isinstance(baseline, dict) or not isinstance(expected, dict):
+            raise patient_write.WriteUncertain()
+        try:
+            row = self.frappe.db.get_value(
+                finance_contract.INVOICE_DOCTYPE,
+                reference,
+                [
+                    "docstatus",
+                    "status",
+                    "currency",
+                    "grand_total",
+                    "net_total",
+                    "outstanding_amount",
+                ],
+                as_dict=True,
+            )
+            if row is None:
+                raise patient_write.WriteUncertain()
+            get = getattr(row, "get", lambda key, default=None: default)
+            receivable = expected.get("debit_account")
+            incomes = set(expected.get("credit_accounts") or ())
+            gl_rows = self._finance_gl_rows(
+                finance_contract.INVOICE_DOCTYPE, reference
+            )
+            debit_total = 0.0
+            credit_total = 0.0
+            unexpected = 0
+            for gl in gl_rows:
+                account = gl["account"]
+                if account == receivable:
+                    debit_total += float(gl["debit"] or 0.0)
+                    continue
+                if account in incomes:
+                    credit_total += float(gl["credit"] or 0.0)
+                    continue
+                unexpected += 1
+            counts = self._finance_counts()
+            facts = {
+                "doctype": finance_contract.INVOICE_DOCTYPE,
+                "docstatus": get("docstatus"),
+                "status": self._text_value(get("status")),
+                "currency": self._text_value(get("currency")),
+                "grand_total": self._finance_money(get("grand_total")),
+                "net_total": self._finance_money(get("net_total")),
+                "outstanding_amount": self._finance_money(
+                    get("outstanding_amount")
+                ),
+                "gl_rows": counts["gl_rows"]
+                - int(baseline.get("gl_rows") or 0),
+                "debit_total": round(debit_total, 2),
+                "credit_total": round(credit_total, 2),
+                "unexpected_gl_rows": unexpected,
+                "sle_rows": counts["sle_rows"]
+                - int(baseline.get("sle_rows") or 0),
+                "ple_rows": counts["ple_rows"]
+                - int(baseline.get("ple_rows") or 0),
+            }
+            return facts
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def _finance_payment_facts(self, reference, expected, baseline):
+        """Closed-world re-read: payment state, GL classification, invoice delta."""
+
+        if not isinstance(baseline, dict) or not isinstance(expected, dict):
+            raise patient_write.WriteUncertain()
+        try:
+            row = self.frappe.db.get_value(
+                finance_contract.PAYMENT_DOCTYPE,
+                reference,
+                ["docstatus", "payment_type", "paid_amount"],
+                as_dict=True,
+            )
+            if row is None:
+                raise patient_write.WriteUncertain()
+            get = getattr(row, "get", lambda key, default=None: default)
+            debit_account = expected.get("paid_to_account")
+            credit_account = expected.get("paid_from_account")
+            gl_rows = self._finance_gl_rows(
+                finance_contract.PAYMENT_DOCTYPE, reference
+            )
+            unexpected = 0
+            for gl in gl_rows:
+                if gl["account"] in (debit_account, credit_account):
+                    continue
+                unexpected += 1
+            counts = self._finance_counts()
+            invoice_after = self._finance_invoice_state(expected.get("invoice"))
+            before_value = self._finance_money(
+                baseline.get("invoice_outstanding")
+            ) or 0.0
+            after_value = self._finance_money(
+                invoice_after.get("outstanding_amount")
+            ) or 0.0
+            return {
+                "doctype": finance_contract.PAYMENT_DOCTYPE,
+                "docstatus": get("docstatus"),
+                "gl_rows": counts["gl_rows"]
+                - int(baseline.get("gl_rows") or 0),
+                "ple_rows": counts["ple_rows"]
+                - int(baseline.get("ple_rows") or 0),
+                "unexpected_gl_rows": unexpected,
+                "allocated": self._finance_money(get("paid_amount")),
+                "outstanding_delta": round(after_value - before_value, 2),
+                "outstanding_after": round(after_value, 2),
+                "invoice_status": invoice_after.get("status"),
+            }
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def native_finance_invoice_facts(self, reference, expected, baseline):
+        return self._finance_invoice_facts(reference, expected, baseline)
+
+    def native_finance_payment_facts(self, reference, expected, baseline):
+        return self._finance_payment_facts(reference, expected, baseline)
+
+    # -- finance fence, receipts and acknowledgement -----------------------
+
+    def list_committed_finance_receipts(
+        self, limit, kind=None, operation_key=None
+    ):
+        ledger = self._ledger()
+        try:
+            return ledger.committed_finance_receipts(
+                limit=limit, kind=kind, operation_key=operation_key
+            )
+        except write_fence.EnumerationOverflow as exc:
+            raise finance_contract.FinanceBudgetExhausted() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    def acknowledge_finance_write(
+        self, secret, actor, kind, operation_key, ack_token
+    ):
+        if kind not in write_fence.FINANCE_OPERATION_KINDS:
+            return "invalid"
+        ledger = self._ledger()
+        try:
+            record = ledger.lookup(
+                actor=actor, kind=kind, operation_key=operation_key
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+        if (
+            record is None
+            or record.state != write_fence.COMMITTED
+            or not record.receipt
+        ):
+            return "invalid"
+        expected = finance_contract.ack_token(
+            secret, self.site, actor, kind, operation_key, record.receipt
+        )
+        if not hmac.compare_digest(expected, ack_token):
+            return "invalid"
+        try:
+            return ledger.acknowledge_barrier(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                ack_receipt="ack:" + expected,
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    @contextmanager
+    def finance_write_fence(self, actor, kind, operation_key, payload_digest):
+        if kind not in write_fence.FINANCE_OPERATION_KINDS:
             raise patient_write.WriteUncertain()
         ledger = self._ledger()
         try:

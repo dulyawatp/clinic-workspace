@@ -861,7 +861,14 @@ def payment_problems(detail, payload):
             )
         )
     problems.extend(_money_problems(detail))
-
+    if not _text(invoice.get("customer"), MAX_TEXT_LENGTH):
+        problems.append(
+            (
+                HTTP_REFUSED,
+                "party",
+                f"invoice {payload['invoice']} has no customer",
+            )
+        )
     allocated = sum(entry["amount"] for entry in payload["allocations"])
     if abs(allocated - payload["amount"]) > MONEY_TOLERANCE:
         problems.append(
@@ -1004,6 +1011,7 @@ def expected_payment(detail, payload):
         "invoice": payload["invoice"],
         "allocated": payload["amount"],
         "outstanding_delta": -payload["amount"],
+        "outstanding_after": round(outstanding - payload["amount"], 2),
         "status": INVOICE_PAID_STATUS if full else None,
         "unchanged_status": None if full else invoice.get("status"),
     }
@@ -1195,6 +1203,10 @@ def side_effect_problem(facts, expected):
         facts.get("outstanding_delta"), expected["outstanding_delta"]
     ):
         return "the invoice outstanding delta differs"
+    if not _money_equal(
+        facts.get("outstanding_after"), expected["outstanding_after"]
+    ):
+        return "the invoice outstanding after payment differs"
     target = expected.get("status")
     if target is not None:
         if facts.get("invoice_status") != target:

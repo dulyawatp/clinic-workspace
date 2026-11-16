@@ -390,6 +390,39 @@ class FakeGateway:
         self.purchase_fence_claim = FakeClaim()
         self.purchase_fence_error = None
 
+        # -- finance (invoice submit + payment receive) surface ------------
+        self.finance_boundary_problem = None
+        self.finance_install_problem = None
+        self.finance_create_authority = {}
+        self.finance_invoice_detail = None
+        self.finance_payment_detail = None
+        self.finance_detail_calls = []
+        self.finance_detail_sequence = []
+        self.finance_baseline_value = {
+            "gl_rows": 0,
+            "ple_rows": 0,
+            "sle_rows": 0,
+            "invoice_outstanding": None,
+            "invoice_status": None,
+        }
+        self.finance_baseline_calls = []
+        self.finance_invoice_id = "SINV-1"
+        self.finance_payment_id = "PE-1"
+        self.finance_invoice_calls = []
+        self.finance_payment_calls = []
+        self.finance_mutation_error = None
+        self.finance_facts = {}
+        self.finance_facts_calls = []
+        self.finance_receipt_records = []
+        self.finance_receipt_list_calls = []
+        self.finance_receipt_list_error = None
+        self.finance_ack_calls = []
+        self.finance_ack_status = "acked"
+        self.finance_ack_error = None
+        self.finance_fence_calls = []
+        self.finance_fence_claim = FakeClaim()
+        self.finance_fence_error = None
+
     def setting(self, key):
         sequence = self.setting_sequences.get(key)
         if sequence:
@@ -1475,6 +1508,185 @@ class FakeGateway:
         return FakeFence(
             self.purchase_fence_claim, self.purchase_fence_error
         )
+
+    # -- finance (invoice submit + payment receive) surface -----------------
+    def native_finance_boundary_problem(self):
+        return self.finance_boundary_problem
+
+    def native_finance_install_problem(self):
+        return self.finance_install_problem
+
+    def native_finance_can_write(self, doctype):
+        return self.finance_create_authority.get(doctype, True)
+
+    def finance_invoice_detail_default(self):
+        return {
+            "today": "2026-11-16",
+            "company": "SIT Synthetic Company USD",
+            "currency": "USD",
+            "customer_exists": True,
+            "price_list": {"exists": True, "selling": True, "enabled": True},
+            "prices": {"ITEM-1": 10.0},
+            "items": {
+                "ITEM-1": {
+                    "exists": True,
+                    "is_sales_item": True,
+                    "stock_uom": "Unit",
+                }
+            },
+            "receivable_account": "Accounts Receivable - SITCO",
+            "income_accounts": {"ITEM-1": "Sales - SITCO"},
+            "cost_center": "Main - SITCO",
+        }
+
+    def _finance_detail(self, detail, payload):
+        self.finance_detail_calls.append(dict(payload))
+        if self.finance_detail_sequence:
+            return dict(self.finance_detail_sequence.pop(0))
+        return None if detail is None else dict(detail)
+
+    def native_finance_invoice_detail(self, payload, discount_enabled=False):
+        detail = self.finance_invoice_detail
+        if detail is None and not self.finance_detail_sequence:
+            detail = self.finance_invoice_detail_default()
+        detail = self._finance_detail(detail, payload)
+        if detail is None:
+            return None
+        detail["discount_available"] = bool(
+            discount_enabled and detail.get("discount_child_present", True)
+        ) and bool(detail.get("discount_available", True))
+        return detail
+
+    def native_finance_payment_detail(self, payload):
+        return self._finance_detail(self.finance_payment_detail, payload)
+
+    def native_finance_baseline(self, kind, invoice=None):
+        self.finance_baseline_calls.append((kind, invoice))
+        return dict(self.finance_baseline_value)
+
+    def _finance_mutation(self, kind, calls, prepared, name):
+        """Validate the prepared body exactly as the real gateway reads it.
+
+        The real creators read ``prepared["company"]``, ``prepared["currency"]``,
+        the pinned ``update_stock`` and the kind's own route; a missing key there
+        is a KeyError inside the fence. Asserting the same contract here keeps
+        the fake from hiding that class of drift (the task-6 B1 class).
+        """
+        from clinic_ui.core import finance_contract
+
+        problem = finance_contract.prepared_problem(kind, prepared)
+        if problem is not None:
+            raise AssertionError(problem)
+        for field in ("company", "currency"):
+            if not isinstance(prepared.get(field), str) or not prepared[
+                field
+            ].strip():
+                raise AssertionError(f"prepared body has no {field}")
+        if self.finance_mutation_error is not None:
+            raise self.finance_mutation_error
+        calls.append(dict(prepared))
+        return name
+
+    def create_and_submit_native_sales_invoice(self, prepared):
+        return self._finance_mutation(
+            "invoice_submit",
+            self.finance_invoice_calls,
+            prepared,
+            self.finance_invoice_id,
+        )
+
+    def create_native_payment_entry(self, prepared):
+        return self._finance_mutation(
+            "payment_receive",
+            self.finance_payment_calls,
+            prepared,
+            self.finance_payment_id,
+        )
+
+    def _finance_side_effect_facts(self, reference, expected, baseline, doctype):
+        self.finance_facts_calls.append((reference, expected, baseline))
+        if self.finance_facts:
+            return dict(self.finance_facts)
+        if doctype == "Sales Invoice":
+            return {
+                "doctype": doctype,
+                "docstatus": expected["docstatus"],
+                "status": expected["status"],
+                "currency": expected["currency"],
+                "grand_total": expected["grand_total"],
+                "net_total": expected["net_total"],
+                "gl_rows": expected["gl_rows"],
+                "debit_total": expected["debit_total"],
+                "credit_total": expected["credit_total"],
+                "sle_rows": expected["sle_rows"],
+                "ple_rows": expected["ple_rows"],
+                "unexpected_gl_rows": expected["unexpected_gl_rows"],
+                "outstanding_amount": expected["grand_total"],
+            }
+        return {
+            "doctype": doctype,
+            "docstatus": expected["docstatus"],
+            "gl_rows": expected["gl_rows"],
+            "ple_rows": expected["ple_rows"],
+            "unexpected_gl_rows": expected["unexpected_gl_rows"],
+            "allocated": expected["allocated"],
+            "outstanding_delta": expected["outstanding_delta"],
+            "outstanding_after": expected["outstanding_after"],
+            "invoice_status": expected["status"]
+            or expected.get("unchanged_status"),
+        }
+
+    def native_finance_invoice_facts(self, reference, expected, baseline):
+        return self._finance_side_effect_facts(
+            reference, expected, baseline, "Sales Invoice"
+        )
+
+    def native_finance_payment_facts(self, reference, expected, baseline):
+        return self._finance_side_effect_facts(
+            reference, expected, baseline, "Payment Entry"
+        )
+
+    def list_committed_finance_receipts(
+        self, limit, kind=None, operation_key=None
+    ):
+        self.finance_receipt_list_calls.append((limit, kind, operation_key))
+        if self.finance_receipt_list_error is not None:
+            raise self.finance_receipt_list_error
+        from clinic_ui.core import finance_contract
+
+        records = [
+            record
+            for record in self.finance_receipt_records
+            if (kind is None or record.kind == kind)
+            and (operation_key is None or record.operation_key == operation_key)
+        ]
+        if len(records) > limit:
+            raise finance_contract.FinanceBudgetExhausted()
+        return records
+
+    def acknowledge_finance_write(
+        self, secret, actor, kind, operation_key, ack_token
+    ):
+        self.finance_ack_calls.append((actor, kind, operation_key, ack_token))
+        if self.finance_ack_error is not None:
+            raise self.finance_ack_error
+        return self.finance_ack_status
+
+    def finance_write_fence(self, actor, kind, operation_key, payload_digest):
+        self.call_order.append("finance_fence")
+        self.finance_fence_calls.append((actor, kind, operation_key, payload_digest))
+        return FakeFence(self.finance_fence_claim, self.finance_fence_error)
+
+
+class FakeFinanceReceipt:
+    """One committed finance row as the gateway would enumerate it."""
+
+    def __init__(self, kind, actor, operation_key, receipt):
+        self.kind = kind
+        self.actor = actor
+        self.operation_key = operation_key
+        self.receipt = receipt
+
 
 
 class FakePurchaseReceipt:

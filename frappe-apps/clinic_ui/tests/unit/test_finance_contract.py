@@ -791,6 +791,7 @@ class SideEffectTests(unittest.TestCase):
             "unexpected_gl_rows": 0,
             "allocated": expected["allocated"],
             "outstanding_delta": expected["outstanding_delta"],
+            "outstanding_after": expected["outstanding_after"],
             "invoice_status": status,
         }
 
