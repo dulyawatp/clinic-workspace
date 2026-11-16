@@ -4317,9 +4317,6 @@ class Gateway:
                     self.frappe.db.exists("Supplier", payload["supplier"])
                 ),
                 "batch": self._stock_batch(payload.get("batch_id")),
-                "available_qty": self._stock_bin_qty(
-                    payload["item_code"], payload["warehouse"]
-                ),
                 "po_item": order["po_item"],
                 "po_pending_qty": order["po_pending_qty"],
             }
@@ -4365,9 +4362,6 @@ class Gateway:
                 "item": self._stock_item(payload["item_code"]),
                 "warehouse": warehouse,
                 "batch": self._stock_batch(payload.get("batch_id")),
-                "available_qty": self._stock_bin_qty(
-                    payload["item_code"], payload["warehouse"]
-                ),
             }
         except Exception:
             raise patient_write.StoreUnavailable() from None

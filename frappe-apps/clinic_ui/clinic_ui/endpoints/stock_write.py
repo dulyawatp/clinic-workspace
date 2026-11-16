@@ -175,6 +175,7 @@ def _prepare_receive(detail, payload):
         "create_batch": create_batch,
         "posting_date": detail.get("today"),
         "set_posting_time": True,
+        "company": detail.get("company"),
     }
 
 
@@ -190,6 +191,7 @@ def _prepare_transfer(detail, payload):
         "create_batch": False,
         "posting_date": detail.get("today"),
         "set_posting_time": True,
+        "company": detail.get("company"),
     }
 
 
@@ -206,6 +208,7 @@ def _prepare_adjust(detail, payload):
         "expense_account": detail.get("stock_adjustment_account"),
         "posting_date": detail.get("today"),
         "set_posting_time": True,
+        "company": detail.get("company"),
     }
 
 
@@ -304,13 +307,16 @@ def _perform(
     if detail is None:
         return _locked_response(gateway)
 
-    if prepare(detail, payload)["create_batch"]:
+    prepared = prepare(detail, payload)
+    if prepared["create_batch"]:
         if gateway.native_stock_can_create(stock_contract.BATCH_DOCTYPE) is not True:
             gateway.deny()
 
     refused = _refusal(gateway, problems(detail, payload))
     if refused is not None:
         return refused
+    if stock_contract.prepared_problem(kind, prepared) is not None:
+        return _respond_error(gateway, HTTP_REFUSED, VALIDATION_CODE)
 
     expected_effects = expected(detail, payload)
     try:
@@ -355,7 +361,10 @@ def _perform(
                 if current is None or problems(current, payload):
                     raise stock_contract.StockTargetNotEligible()
                 expected_effects = expected(current, payload)
-                reference = mutate(gateway, prepare(current, payload))
+                prepared = prepare(current, payload)
+                if stock_contract.prepared_problem(kind, prepared) is not None:
+                    raise stock_contract.StockTargetNotEligible()
+                reference = mutate(gateway, prepared)
                 facts = read_facts(gateway, reference, expected_effects, baseline)
                 if (
                     stock_contract.side_effect_problem(facts, expected_effects)

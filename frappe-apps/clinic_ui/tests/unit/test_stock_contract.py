@@ -512,6 +512,127 @@ class ExpectedSideEffectTests(unittest.TestCase):
         )
 
 
+class PreparedBodyTests(unittest.TestCase):
+    def prepared_receive(self, **overrides):
+        values = {
+            "item_code": "ITEM-1",
+            "qty": 4.0,
+            "uom": "Unit",
+            "warehouse": "WH-1",
+            "supplier": "SUP-1",
+            "purchase_order": None,
+            "po_item": None,
+            "batch_no": "BATCH-1",
+            "batch_expiry": None,
+            "create_batch": False,
+            "posting_date": "2026-11-16",
+            "set_posting_time": True,
+            "company": "SIT Synthetic Company USD",
+        }
+        values.update(overrides)
+        return values
+
+    def prepared_transfer(self, **overrides):
+        values = {
+            "item_code": "ITEM-1",
+            "qty": 4.0,
+            "uom": "Unit",
+            "source_warehouse": "WH-1",
+            "target_warehouse": "WH-2",
+            "batch_no": "BATCH-1",
+            "create_batch": False,
+            "posting_date": "2026-11-16",
+            "set_posting_time": True,
+            "company": "SIT Synthetic Company USD",
+        }
+        values.update(overrides)
+        return values
+
+    def prepared_adjust(self, **overrides):
+        values = {
+            "item_code": "ITEM-1",
+            "qty": 3.0,
+            "uom": "Unit",
+            "warehouse": "WH-1",
+            "batch_no": "BATCH-1",
+            "create_batch": False,
+            "reason": "Count discrepancy",
+            "expense_account": "Stock Adjustment - SITCO",
+            "posting_date": "2026-11-16",
+            "set_posting_time": True,
+            "company": "SIT Synthetic Company USD",
+        }
+        values.update(overrides)
+        return values
+
+    def test_each_prepared_body_pins_the_server_company_and_posting(self):
+        for kind, prepared in (
+            ("stock_receive", self.prepared_receive()),
+            ("stock_transfer", self.prepared_transfer()),
+            ("stock_adjust", self.prepared_adjust()),
+        ):
+            with self.subTest(kind=kind):
+                self.assertIsNone(
+                    stock_contract.prepared_problem(kind, prepared)
+                )
+
+    def test_a_missing_company_or_unpinned_posting_is_a_problem(self):
+        for drift in (
+            {"company": None},
+            {"company": ""},
+            {"posting_date": None},
+            {"set_posting_time": False},
+            {"uom": ""},
+        ):
+            with self.subTest(drift=drift):
+                self.assertIsNotNone(
+                    stock_contract.prepared_problem(
+                        "stock_receive", self.prepared_receive(**drift)
+                    )
+                )
+
+    def test_each_kind_checks_its_own_route(self):
+        self.assertIsNotNone(
+            stock_contract.prepared_problem(
+                "stock_transfer",
+                self.prepared_transfer(target_warehouse="WH-1"),
+            )
+        )
+        self.assertIsNotNone(
+            stock_contract.prepared_problem(
+                "stock_adjust", self.prepared_adjust(reason="")
+            )
+        )
+        self.assertIsNotNone(
+            stock_contract.prepared_problem(
+                "stock_adjust", self.prepared_adjust(expense_account=None)
+            )
+        )
+        self.assertIsNotNone(
+            stock_contract.prepared_problem(
+                "stock_receive", self.prepared_receive(supplier="")
+            )
+        )
+        self.assertIsNotNone(
+            stock_contract.prepared_problem("stock_receive", None)
+        )
+
+    def test_adjust_accepts_zero_but_receive_and_transfer_do_not(self):
+        self.assertIsNone(
+            stock_contract.prepared_problem(
+                "stock_adjust", self.prepared_adjust(qty=0.0)
+            )
+        )
+        for kind, prepared in (
+            ("stock_receive", self.prepared_receive(qty=0.0)),
+            ("stock_transfer", self.prepared_transfer(qty=0.0)),
+        ):
+            with self.subTest(kind=kind):
+                self.assertIsNotNone(
+                    stock_contract.prepared_problem(kind, prepared)
+                )
+
+
 class ReceiptTests(unittest.TestCase):
     def test_a_receipt_round_trips_with_its_reason(self):
         receipt = stock_contract.encode_receipt(

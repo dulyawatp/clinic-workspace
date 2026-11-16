@@ -805,6 +805,61 @@ def expected_adjust(detail, payload):
     }
 
 
+def prepared_problem(kind, prepared):
+    """Closed-world check of the mutation body a gateway will execute.
+
+    The prepared body is the server's own resolved document payload: it must
+    carry the company resolved from installed state (never client input), the
+    server-owned posting date with ``set_posting_time`` pinned, the stock unit
+    and the kind's own route fields. A missing piece is refused before the
+    fence, so a gateway drift can never turn into a post-dispatch KeyError.
+    """
+
+    if kind not in STOCK_KINDS:
+        return "unknown stock kind"
+    if not isinstance(prepared, dict):
+        return "prepared body unreadable"
+    if not _text(prepared.get("company"), MAX_TEXT_LENGTH):
+        return "prepared body has no company"
+    if not _text(prepared.get("posting_date"), 40):
+        return "prepared body has no posting date"
+    if prepared.get("set_posting_time") is not True:
+        return "prepared body does not pin the posting time"
+    if not _text(prepared.get("item_code"), MAX_TEXT_LENGTH):
+        return "prepared body has no item"
+    if not _text(prepared.get("uom"), MAX_TEXT_LENGTH):
+        return "prepared body has no unit"
+    qty = prepared.get("qty")
+    if kind == ADJUST_KIND:
+        if not _number(qty) or float(qty) < 0:
+            return "prepared quantity is invalid"
+    elif not _number(qty) or float(qty) <= 0:
+        return "prepared quantity is invalid"
+    batch_no = prepared.get("batch_no")
+    if batch_no is not None and not _text(batch_no, MAX_TEXT_LENGTH):
+        return "prepared batch is invalid"
+
+    if kind == RECEIVE_KIND:
+        for field in ("warehouse", "supplier"):
+            if not _text(prepared.get(field), MAX_TEXT_LENGTH):
+                return f"prepared body has no {field}"
+        return None
+    if kind == TRANSFER_KIND:
+        for field in ("source_warehouse", "target_warehouse"):
+            if not _text(prepared.get(field), MAX_TEXT_LENGTH):
+                return f"prepared body has no {field}"
+        if prepared.get("source_warehouse") == prepared.get("target_warehouse"):
+            return "prepared target equals the source warehouse"
+        return None
+    if not _text(prepared.get("warehouse"), MAX_TEXT_LENGTH):
+        return "prepared body has no warehouse"
+    if not _text(prepared.get("expense_account"), MAX_TEXT_LENGTH):
+        return "prepared body has no stock adjustment account"
+    if not _text(prepared.get("reason"), MAX_REASON_LENGTH):
+        return "prepared body has no reason"
+    return None
+
+
 def side_effect_problem(facts, expected):
     """Compare the closed-world re-read against the EXPECTED list.
 

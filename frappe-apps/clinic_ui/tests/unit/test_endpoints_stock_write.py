@@ -446,6 +446,46 @@ class AdjustTests(unittest.TestCase):
         self.assertEqual(payload["movement"]["qty"], 0.0)
 
 
+class PreparedBodyTests(unittest.TestCase):
+    def test_each_mutation_carries_the_server_resolved_company(self):
+        fake = gateway()
+        stock_write.receive(fake, receive_body(), CSRF)
+        self.assertEqual(
+            fake.stock_receipt_calls[0]["company"],
+            "SIT Synthetic Company USD",
+        )
+
+        fake = gateway()
+        stock_write.transfer(fake, transfer_body(), CSRF)
+        self.assertEqual(
+            fake.stock_transfer_calls[0]["company"],
+            "SIT Synthetic Company USD",
+        )
+
+        fake = gateway(role="ADM")
+        stock_write.adjust(fake, adjust_body(), CSRF)
+        self.assertEqual(
+            fake.stock_reconciliation_calls[0]["company"],
+            "SIT Synthetic Company USD",
+        )
+
+    def test_a_detail_without_a_company_is_refused_pre_fence(self):
+        for label, role, operation, body in (
+            ("receive", "PHA", stock_write.receive, receive_body()),
+            ("transfer", "PHA", stock_write.transfer, transfer_body()),
+            ("adjust", "ADM", stock_write.adjust, adjust_body()),
+        ):
+            with self.subTest(label=label):
+                fake = gateway(role=role)
+                fake.stock_receive_detail = detail(company=None)
+                fake.stock_transfer_detail = detail(company=None)
+                fake.stock_adjust_detail = detail(company=None)
+                payload = operation(fake, body, CSRF)
+                self.assertEqual(payload, {"code": "VALIDATION"})
+                self.assertEqual(fake.write_responses[-1][0], 417)
+                self.assertEqual(fake.stock_fence_calls, [])
+
+
 class FenceTests(unittest.TestCase):
     def test_a_concurrent_change_rolls_back_without_committing(self):
         fake = gateway()

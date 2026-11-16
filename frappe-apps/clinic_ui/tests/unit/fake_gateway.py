@@ -1191,7 +1191,24 @@ class FakeGateway:
         self.stock_baseline_calls.append((kind, tuple(warehouses), item_code))
         return dict(self.stock_baseline_value)
 
-    def _stock_mutation(self, calls, prepared, name):
+    def _stock_mutation(self, kind, calls, prepared, name):
+        """Validate the prepared body exactly as the real gateway reads it.
+
+        The real creators read ``prepared["company"]`` (server-resolved), the
+        pinned posting fields and the kind's own route; a missing key there is a
+        KeyError inside the fence. Asserting the same contract here keeps the
+        fake from hiding that class of drift.
+        """
+
+        from clinic_ui.core import stock_contract
+
+        problem = stock_contract.prepared_problem(kind, prepared)
+        if problem is not None:
+            raise AssertionError(problem)
+        if not isinstance(prepared.get("company"), str) or not prepared[
+            "company"
+        ].strip():
+            raise AssertionError("prepared body has no company")
         if self.stock_mutation_error is not None:
             raise self.stock_mutation_error
         calls.append(dict(prepared))
@@ -1199,16 +1216,23 @@ class FakeGateway:
 
     def create_native_stock_receipt(self, prepared):
         return self._stock_mutation(
-            self.stock_receipt_calls, prepared, self.stock_receipt_id
+            "stock_receive",
+            self.stock_receipt_calls,
+            prepared,
+            self.stock_receipt_id,
         )
 
     def create_native_stock_transfer(self, prepared):
         return self._stock_mutation(
-            self.stock_transfer_calls, prepared, self.stock_transfer_id
+            "stock_transfer",
+            self.stock_transfer_calls,
+            prepared,
+            self.stock_transfer_id,
         )
 
     def create_native_stock_reconciliation(self, prepared):
         return self._stock_mutation(
+            "stock_adjust",
             self.stock_reconciliation_calls,
             prepared,
             self.stock_reconciliation_id,
