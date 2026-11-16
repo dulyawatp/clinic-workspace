@@ -195,7 +195,9 @@ function parseMovement(kind: StockWriteKind, value: unknown): StockMovement {
   )
     throw new NativeStockWriteError("uncertain");
   if (kind === "stock_transfer") {
-    if (!isText(value.target_warehouse) || !isText(value.batch))
+    if (!isText(value.target_warehouse))
+      throw new NativeStockWriteError("uncertain");
+    if (value.batch !== null && !isText(value.batch))
       throw new NativeStockWriteError("uncertain");
     return {
       kind,
@@ -203,7 +205,7 @@ function parseMovement(kind: StockWriteKind, value: unknown): StockMovement {
       warehouse: value.warehouse,
       target_warehouse: value.target_warehouse,
       qty: value.qty,
-      batch: value.batch,
+      batch: (value.batch as string | null) ?? null,
     };
   }
   if (kind === "stock_adjust") {
