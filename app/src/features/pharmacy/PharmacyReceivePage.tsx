@@ -25,6 +25,7 @@ import {
   useOpsFormat,
 } from "../operations/ops-ui";
 import { ReceiveStockForm } from "./stock-write";
+import { PurchaseReceiptForm } from "./purchase-write";
 
 /**
  * PHA-05 purchase-order receipt. Progress comes from the submitted-receipt
@@ -250,6 +251,8 @@ export function PharmacyReceivePage() {
         </Card>
 
         <ReceiveStockForm />
+
+        <PurchaseReceiptForm />
 
         <Card
           title={copy("รับสินค้าตามใบสั่งซื้อ", "Purchase-order receipt")}

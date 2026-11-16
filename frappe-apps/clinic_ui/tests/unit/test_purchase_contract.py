@@ -421,7 +421,6 @@ class ExpectedSideEffectTests(unittest.TestCase):
             receipt_detail(po_pending_qty=2.0), receipt_payload(qty=2.0)
         )
         self.assertEqual(expected["po_status"], "To Bill")
-
     def test_the_side_effect_check_is_closed_world(self):
         expected = purchase_contract.expected_receipt(
             receipt_detail(), receipt_payload()
@@ -551,6 +550,28 @@ class PreparedBodyTests(unittest.TestCase):
                     purchase_contract.RECEIPT_KIND, broken
                 )
             )
+
+
+class CloseWhileReceiptingTests(unittest.TestCase):
+    """Closing a PO is designed (CSV:117) but unwired this wave."""
+
+    def test_a_receipt_in_progress_blocks_a_close_pre_fence(self):
+        problem = purchase_contract.receipt_in_progress_problem(
+            {"receipt_in_progress": True}
+        )
+        self.assertEqual(problem[0], purchase_contract.HTTP_REFUSED)
+        self.assertIn(
+            purchase_contract.RECEIPT_IN_PROGRESS_MESSAGE, problem[2]
+        )
+        self.assertIsNone(
+            purchase_contract.receipt_in_progress_problem(
+                {"receipt_in_progress": False}
+            )
+        )
+
+    def test_there_is_no_close_kind_in_this_wave(self):
+        self.assertNotIn("purchase_order_close", purchase_contract.PURCHASE_KINDS)
+        self.assertNotIn("purchase_order_close", write_budgets.ALL_KINDS)
 
 
 class ReceiptCodecTests(unittest.TestCase):

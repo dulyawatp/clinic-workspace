@@ -30,6 +30,10 @@ import {
   SourceNote,
   useOpsFormat,
 } from "../operations/ops-ui";
+import {
+  PurchaseOrderDraftForm,
+  PurchaseOrderSubmitForm,
+} from "./purchase-write";
 
 const STATUSES: ReadonlyArray<{
   id: PoStatusFilter;
@@ -319,6 +323,13 @@ export function PharmacyPurchasingPage() {
             "Progress uses distinct submitted receipt sources. PO requested date is not supplier ETA. No PO revision history, so no invented historical trend.",
           )}
         </OpsNote>
+
+        {tab === "orders" ? (
+          <>
+            <PurchaseOrderDraftForm />
+            <PurchaseOrderSubmitForm />
+          </>
+        ) : null}
       </div>
 
       {detail && detailProgress ? (
