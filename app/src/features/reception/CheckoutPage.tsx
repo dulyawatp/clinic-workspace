@@ -8,6 +8,7 @@ import { PageHeader } from "../../ui/PageHeader";
 import { StatePanel } from "../../ui/StatePanel";
 import { useCapabilities } from "../shell/CapabilityProvider";
 import { BillingHandoff, type CheckoutVisit } from "./BillingHandoff";
+import { CheckoutSamples } from "./CheckoutSamples";
 
 const STATES = [
   "completed",
@@ -142,6 +143,7 @@ function CheckoutView() {
               </button>
             </nav>
           )}
+          <CheckoutSamples />
         </section>
       </div>
     </>

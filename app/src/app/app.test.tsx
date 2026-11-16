@@ -29,7 +29,7 @@ afterEach(() => vi.unstubAllGlobals());
 it("renders the authenticated shell placeholder route", async () => {
   window.history.pushState({}, "", ROUTES.home);
   render(<App />);
-  expect(await screen.findByTestId("shell-placeholder")).toBeVisible();
+  expect(await screen.findByTestId("role-home")).toBeVisible();
 });
 it("uses ROUTES constants rather than hardcoded paths", () => {
   expect(ROUTES.login).toBe("/clinic/login");

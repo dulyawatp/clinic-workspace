@@ -1,0 +1,129 @@
+.role-home {
+  padding-bottom: var(--pc-sp-6);
+}
+
+.role-home__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: var(--pc-sp-4);
+  min-width: 0;
+}
+
+.role-home__grid > * {
+  min-width: 0;
+}
+
+.role-home__facts {
+  display: grid;
+  gap: var(--pc-sp-3);
+  margin: 0;
+}
+
+.role-home__facts div {
+  display: grid;
+  gap: 2px;
+}
+
+.role-home__facts dt {
+  color: var(--pc-ink-3);
+  font-size: var(--pc-fs-micro);
+  font-weight: 600;
+}
+
+.role-home__facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.role-home__shortcuts,
+.role-home__workitems {
+  display: grid;
+  gap: var(--pc-sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.role-home__shortcut {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--pc-sp-3);
+  min-height: var(--pc-tap);
+  padding: 0 var(--pc-sp-3);
+  border: 1px solid var(--pc-border);
+  border-radius: var(--pc-radius-s);
+  color: var(--pc-fg);
+  text-decoration: none;
+}
+
+.role-home__shortcut:hover {
+  border-color: var(--pc-primary);
+}
+
+.role-home__shortcut:focus-visible,
+.role-home__workitem-link:focus-visible,
+.role-home__dismiss:focus-visible {
+  outline: 3px solid var(--pc-primary);
+  outline-offset: 2px;
+}
+
+.role-home__workitem {
+  display: flex;
+  align-items: stretch;
+  gap: var(--pc-sp-2);
+  border: 1px solid var(--pc-border);
+  border-radius: var(--pc-radius-s);
+  background: var(--pc-surface);
+}
+
+.role-home__workitem[data-read="true"] {
+  background: var(--pc-sage);
+}
+
+.role-home__workitem-link {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--pc-sp-2);
+  min-width: 0;
+  min-height: var(--pc-tap);
+  padding: 0 var(--pc-sp-3);
+  color: var(--pc-fg);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.role-home__workitem-link strong {
+  margin-inline-start: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.role-home__unread-dot {
+  color: var(--pc-primary);
+  font-size: 0.7rem;
+}
+
+.role-home__dismiss {
+  flex: 0 0 var(--pc-tap);
+  min-width: var(--pc-tap);
+  min-height: var(--pc-tap);
+  border: 0;
+  border-inline-start: 1px solid var(--pc-border);
+  background: transparent;
+  color: var(--pc-ink-2);
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.role-home__empty {
+  margin: 0;
+  color: var(--pc-ink-2);
+}
+
+@media (max-width: 767px) {
+  .role-home__grid {
+    grid-template-columns: 1fr;
+  }
+}

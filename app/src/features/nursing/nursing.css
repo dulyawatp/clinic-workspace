@@ -1,0 +1,24 @@
+/* Nursing surfaces (NUR-01/02) — shared Preclinic primitives plus the tab row.
+   The tile/KPI/field primitives live in `design/components/surfaces.css`. */
+.nurse-section-title {
+  margin: 0 0 var(--pc-sp-1);
+}
+
+.nurse-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--pc-sp-2);
+}
+
+.nurse-tabs .pc-button {
+  flex: 1 1 auto;
+}
+
+/* The active task tab is a state, not the screen's primary action: tint the
+   secondary button instead of promoting it to the Royal indigo primary. */
+.nurse-tabs .pc-button[aria-pressed="true"] {
+  border-color: var(--pc-primary);
+  background: var(--pc-primary-wash);
+  color: var(--pc-primary);
+  font-weight: 700;
+}

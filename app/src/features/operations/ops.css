@@ -1,0 +1,287 @@
+/* ============================================================
+   Operations surfaces (PHA, CAS, MGR, ADM) — task 6
+   Port of the prototype's operations-only layer (`operations-v3.css`) onto
+   the Preclinic tokens. Everything below is layout for the shared ops
+   primitives; components (buttons, cards, tables, badges) keep their task-1
+   styles.
+   ============================================================ */
+
+.ops-source {
+  margin: 0;
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-micro);
+  line-height: 1.55;
+}
+
+.ops-note {
+  padding: var(--pc-sp-3) var(--pc-sp-4);
+  border: var(--pc-hair);
+  border-left: 3px solid var(--pc-accent);
+  border-radius: var(--pc-radius-s);
+  background: var(--pc-sage);
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-small);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.ops-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--pc-sp-4);
+  min-width: 0;
+}
+
+.ops-control {
+  display: grid;
+  gap: var(--pc-sp-2);
+  flex: 1 1 12rem;
+  min-width: min(100%, 11rem);
+}
+
+.ops-control__label {
+  color: var(--pc-fg);
+  font-size: var(--pc-fs-small);
+  font-weight: 600;
+}
+
+.ops-control select,
+.ops-control input {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--pc-tap);
+  padding: 10px 12px;
+  border: 1px solid var(--pc-field-border);
+  border-radius: var(--pc-radius-s);
+  background: var(--pc-surface);
+  color: var(--pc-fg);
+  font: inherit;
+  font-size: 1rem;
+}
+
+.ops-control select:focus-visible,
+.ops-control input:focus-visible {
+  outline: none;
+  border-color: var(--pc-accent);
+  box-shadow: var(--pc-ring-cyan);
+}
+
+.ops-control select:disabled,
+.ops-control input:disabled {
+  background: var(--pc-sage-deep);
+  color: var(--pc-ink-2);
+  cursor: not-allowed;
+}
+
+/* Exclusive bucket strip: counts that do not overlap each other. */
+.ops-buckets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--pc-sp-3);
+  padding: var(--pc-sp-4);
+  border-radius: var(--pc-radius-m);
+  background: var(--pc-sage);
+}
+
+.ops-buckets span {
+  flex: 1 1 8rem;
+  min-width: 0;
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-small);
+  line-height: 1.4;
+}
+
+.ops-buckets strong {
+  display: block;
+  color: var(--pc-fg);
+  font-size: var(--pc-fs-h2);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ops-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--pc-sp-2);
+  min-width: 0;
+}
+
+.ops-tab[aria-pressed="true"] {
+  background: var(--pc-primary-wash);
+  border-color: color-mix(in oklch, var(--pc-primary) 35%, var(--pc-border));
+  color: var(--pc-primary);
+  font-weight: 600;
+}
+
+.ops-chart {
+  display: grid;
+  gap: var(--pc-sp-3);
+  margin: 0;
+  min-width: 0;
+}
+
+.ops-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 14rem;
+  overflow: visible;
+}
+
+.ops-chart__grid {
+  stroke: var(--pc-border);
+  stroke-width: 1;
+}
+
+.ops-chart__series polyline {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.ops-chart__series circle {
+  stroke: none;
+}
+
+.ops-chart__series--ink polyline,
+.ops-chart__series--ink circle {
+  stroke: var(--pc-fg);
+  fill: var(--pc-fg);
+}
+
+.ops-chart__series--cyan polyline,
+.ops-chart__series--cyan circle {
+  stroke: var(--pc-accent);
+  fill: var(--pc-accent);
+}
+
+.ops-chart__series--muted polyline,
+.ops-chart__series--muted circle {
+  stroke: var(--pc-muted);
+  fill: var(--pc-muted);
+}
+
+.ops-chart__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--pc-sp-2) var(--pc-sp-4);
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-micro);
+}
+
+.ops-chart__legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--pc-sp-2);
+}
+
+.ops-chart__swatch {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+}
+
+.ops-chart__swatch--ink {
+  background: var(--pc-fg);
+}
+
+.ops-chart__swatch--cyan {
+  background: var(--pc-accent);
+}
+
+.ops-chart__swatch--muted {
+  background: var(--pc-muted);
+}
+
+/* Field grids on the receive / movement / payment forms. */
+.ops-form {
+  display: grid;
+  gap: var(--pc-sp-4);
+  min-width: 0;
+}
+
+.ops-form__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  gap: var(--pc-sp-4);
+}
+
+.ops-form__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--pc-sp-3);
+}
+
+.ops-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--pc-sp-2);
+  min-width: 0;
+}
+
+.ops-progress progress {
+  width: 6rem;
+  max-width: 100%;
+  accent-color: var(--pc-primary);
+}
+
+.ops-mono {
+  font-family: var(--pc-font-mono);
+  font-size: var(--pc-fs-micro);
+  overflow-wrap: anywhere;
+}
+
+.ops-rowstack {
+  display: grid;
+  gap: var(--pc-sp-2);
+}
+
+/* Toolbar row above a flush table: filters, export buttons. */
+.ops-card-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--pc-sp-3);
+  padding: var(--pc-sp-4) var(--pc-sp-5);
+  border-bottom: var(--pc-hair);
+  min-width: 0;
+}
+
+.ops-card-tools > * {
+  min-width: 0;
+}
+
+/* Sub-heading for a table nested inside a drawer or card body. */
+.ops-drawer-title {
+  margin: var(--pc-sp-4) 0 var(--pc-sp-2);
+}
+
+/* Session-only demo rows recorded during this visit (never persisted). */
+.ops-session-list {
+  display: grid;
+  gap: 4px;
+  margin: var(--pc-sp-2) 0 0;
+  padding-left: 1.1rem;
+  font-size: var(--pc-fs-small);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .ops-control {
+    flex-basis: 100%;
+  }
+
+  .ops-filters {
+    gap: var(--pc-sp-3);
+  }
+
+  .ops-form__actions .pc-button {
+    width: 100%;
+  }
+}

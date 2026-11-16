@@ -79,10 +79,10 @@ it("shows localized empty state without count, dismissal or persistence", async 
     </>,
     { role: "REC", workItems: "empty" },
   );
-  expect(await screen.findByText("ไม่มีการแจ้งเตือน")).toBeVisible();
+  expect(await screen.findByText("ไม่มีงานค้างสำหรับบทบาทนี้")).toBeVisible();
   expect(screen.queryByText("0")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "EN" }));
-  expect(screen.getByText("No notifications")).toBeVisible();
+  expect(screen.getByText("No pending work for this role")).toBeVisible();
   expect(screen.queryByRole("button", { name: /dismiss/i })).toBeNull();
 });
 

@@ -3,9 +3,7 @@ import { MARLEY_BASE_URL } from "../playwright.marley.config";
 import {
   apiGet,
   catalog,
-  formatNumber,
   guardWrites,
-  MARLEY_ORIGIN,
   readSession,
   sidebarPaths,
   signIn,
@@ -145,6 +143,11 @@ async function expectSavedPhoto(page: Page): Promise<void> {
     { timeout: 60_000 },
   );
   await page.goto(PAGE.livePhoto(REFERENCE));
+  // The legacy detail address forwards to the designed PAT-04 workspace.
+  await page.waitForURL(
+    (url) => url.pathname === PAGE.livePhotoWorkspace(REFERENCE),
+    { timeout: 40_000 },
+  );
   const response = await contentResponse;
 
   expect(response.status(), "saved photo bytes must be served").toBe(200);
@@ -166,16 +169,25 @@ async function expectSavedPhoto(page: Page): Promise<void> {
   }));
   expect(natural.width, "browser decoded the saved image").toBeGreaterThan(0);
   expect(natural.height, "browser decoded the saved image").toBeGreaterThan(0);
+
+  // The workspace belongs to PAT-04: its back link is the designed gallery.
+  await expect(page.locator(".photos-heading a")).toHaveAttribute(
+    "href",
+    PAGE.livePhotos(REFERENCE),
+  );
 }
 
-async function expectLivePatientsList(page: Page): Promise<void> {
-  await page.goto(PAGE.livePhotos);
-  const links = page.locator("ul.photos-live-list a");
-  await expect(links).toHaveCount(1);
-  const href = await links.first().getAttribute("href");
-  expect(new URL(href ?? "/", MARLEY_ORIGIN).pathname).toBe(
-    PAGE.livePhoto(REFERENCE),
-  );
+/**
+ * The legacy lab-photo index no longer lists patients: it is a role-guarded
+ * redirect, so a clinician lands on the designed home. The picker it used to
+ * render has no routed address any more.
+ */
+async function expectLabIndexRedirect(page: Page): Promise<void> {
+  await page.goto(PAGE.livePhotosIndex);
+  await page.waitForURL((url) => url.pathname === PAGE.home, {
+    timeout: 40_000,
+  });
+  await expect(page.getByTestId("role-home")).toBeVisible();
 }
 
 async function expectDirectoryRow(page: Page): Promise<void> {
@@ -204,19 +216,28 @@ async function expectPharmacyItem(page: Page): Promise<void> {
   expect(unit.length).toBeGreaterThan(0);
 }
 
-async function expectFinanceTotals(page: Page): Promise<void> {
-  await page.goto(PAGE.finance);
-  const values = page.locator("dl.finance-metrics dd");
-  await expect(values).toHaveCount(3);
-  await expect(values.nth(0)).toHaveText(String(runtime.live.invoiceCount));
-  await expect(values.nth(1)).toContainText(
-    formatNumber(runtime.live.invoiced),
+/**
+ * The React-era `/clinic/finance` aggregate was folded into the designed
+ * surfaces, so the old deep link must resolve to the role's finance owner:
+ * CAS-01 for billing roles, MGR-01 for the owner/manager, and the designed
+ * home for every other role.
+ */
+async function expectFinanceDestination(
+  page: Page,
+  code: string,
+): Promise<void> {
+  const management = code === "MGR";
+  const target = management ? PAGE.management : PAGE.cashier;
+  const surface = management ? "MGR-01" : "CAS-01";
+  const testId = management ? "management-page" : "cashier-page";
+  await page.goto(PAGE.legacyFinance);
+  await page.waitForURL((url) => url.pathname === target, {
+    timeout: 40_000,
+  });
+  await expect(page.getByTestId(testId)).toHaveAttribute(
+    "data-surface",
+    surface,
   );
-  await expect(values.nth(1)).toContainText(runtime.live.currency);
-  await expect(values.nth(2)).toContainText(
-    formatNumber(runtime.live.outstanding),
-  );
-  await expect(values.nth(2)).toContainText(runtime.live.currency);
 }
 
 async function expectAuditSurface(page: Page): Promise<void> {
@@ -225,9 +246,7 @@ async function expectAuditSurface(page: Page): Promise<void> {
   await expect(page.locator(".system-intro")).toContainText(
     catalog("system.demoNote"),
   );
-  await expect(
-    page.locator(".patients-row, .pharmacy-table, .finance-metrics"),
-  ).toHaveCount(0);
+  await expect(page.locator(".patients-row, .pharmacy-table")).toHaveCount(0);
 }
 
 for (const item of CASES) {
@@ -289,7 +308,7 @@ for (const item of CASES) {
 
     test(`MAR-DATA-${code} ${item.dataCase}`, async () => {
       if (code === "DOC") {
-        await expectLivePatientsList(page);
+        await expectLabIndexRedirect(page);
         await expectSavedPhoto(page);
 
         const save = page.locator("section.photos-save");
@@ -300,7 +319,7 @@ for (const item of CASES) {
         ).toBeDisabled();
         await expect(save).toContainText(catalog("photoSave.unavailable"));
       } else if (code === "NUR") {
-        await expectLivePatientsList(page);
+        await expectLabIndexRedirect(page);
         await expectSavedPhoto(page);
         // The save region is not rendered for a read-only bedside role.
         await expect(page.locator("section.photos-save")).toHaveCount(0);
@@ -309,7 +328,7 @@ for (const item of CASES) {
       } else if (code === "PHA") {
         await expectPharmacyItem(page);
       } else if (code === "CAS" || code === "MGR") {
-        await expectFinanceTotals(page);
+        await expectFinanceDestination(page, code);
         if (code === "MGR") await expectAuditSurface(page);
       } else {
         await expectAuditSurface(page);

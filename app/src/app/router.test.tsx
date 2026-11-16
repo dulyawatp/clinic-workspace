@@ -46,7 +46,7 @@ describe("app data router", () => {
       initialEntries: [ROUTES.home],
       role: "REC",
     });
-    expect(await screen.findByTestId("shell-placeholder")).toBeVisible();
+    expect(await screen.findByTestId("role-home")).toBeVisible();
   });
 
   it("renders the login route without the protected shell", async () => {
@@ -55,7 +55,7 @@ describe("app data router", () => {
       authed: false,
     });
     expect(await screen.findByLabelText("ชื่อผู้ใช้")).toBeVisible();
-    expect(screen.queryByTestId("shell-placeholder")).toBeNull();
+    expect(screen.queryByTestId("role-home")).toBeNull();
   });
 
   it("redirects an anonymous protected route to login and keeps a safe target", async () => {
@@ -197,7 +197,7 @@ describe("browser router lifecycle", () => {
         <App />
       </StrictMode>,
     );
-    expect(await screen.findByTestId("shell-placeholder")).toBeVisible();
+    expect(await screen.findByTestId("role-home")).toBeVisible();
 
     const popstateAdds = add.mock.calls.filter(([type]) => type === "popstate");
     expect(popstateAdds).toHaveLength(1);

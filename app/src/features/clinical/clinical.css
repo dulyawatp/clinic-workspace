@@ -296,3 +296,92 @@
     font-size: 11px;
   }
 }
+
+/* ---- Task-5 clinical surfaces (DOC-01/03/04, authored DOC-02) ---------- */
+.doctor-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  gap: var(--pc-sp-6);
+  min-width: 0;
+}
+
+.doctor-next-name {
+  margin: 0;
+  font-size: var(--pc-fs-h3);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.visit-readout {
+  padding: var(--pc-sp-4);
+  border: var(--pc-hair);
+  border-radius: var(--pc-radius-m);
+  background: var(--pc-sage);
+  font-size: var(--pc-fs-small);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.visit-save-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--pc-sp-3);
+  flex-wrap: wrap;
+  padding: var(--pc-sp-4);
+  border: var(--pc-hair);
+  border-radius: var(--pc-radius-l);
+  background: var(--pc-surface);
+  box-shadow: var(--pc-shadow-2);
+}
+
+.pc-lab-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pc-lab-list > li:first-child {
+  border-top: var(--pc-hair);
+}
+
+.pc-lab-files {
+  margin: 0;
+  padding-inline-start: var(--pc-sp-4);
+}
+
+.lab-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--pc-sp-3);
+  flex-wrap: wrap;
+  padding: var(--pc-sp-4) var(--pc-sp-5);
+  border-bottom: var(--pc-hair);
+}
+
+.lab-toolbar select {
+  min-height: var(--pc-tap);
+  min-width: 12rem;
+  padding: 0 12px;
+  border: 1px solid var(--pc-field-border);
+  border-radius: var(--pc-radius-s);
+  background: var(--pc-surface);
+  color: var(--pc-fg);
+  font: inherit;
+}
+
+.lab-toolbar select:focus-visible {
+  outline: none;
+  border-color: var(--pc-accent);
+  box-shadow: var(--pc-ring-cyan);
+}
+
+@media (max-width: 767px) {
+  .visit-save-footer {
+    position: static;
+  }
+}

@@ -157,7 +157,7 @@ describe("SignInPage", () => {
     ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "EN" }));
     await fillAndSubmit();
-    expect(await screen.findByTestId("shell-placeholder")).toBeVisible();
+    expect(await screen.findByTestId("role-home")).toBeVisible();
     expect(window.location.pathname).toBe(ROUTES.home);
     expect(document.documentElement.lang).toBe("en");
     expect(screen.queryByLabelText("Password")).toBeNull();

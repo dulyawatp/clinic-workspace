@@ -39,8 +39,8 @@ async function fetchProxyDirectoryBody(signal: AbortSignal): Promise<unknown> {
   return body;
 }
 
-/** Shared row rules: `{items:[...]}` from either transport is validated here. */
-function parseLivePatients(body: unknown): LivePatient[] {
+/** Native rows expose only alias and display name; proxy keeps its legacy shape. */
+function parseLivePatients(body: unknown, native: boolean): LivePatient[] {
   if (
     !body ||
     typeof body !== "object" ||
@@ -55,17 +55,17 @@ function parseLivePatients(body: unknown): LivePatient[] {
       !item ||
       typeof item !== "object" ||
       !("workspace_patient_id" in item) ||
-      !("native_patient_id" in item) ||
       !("display_name" in item) ||
       typeof item.workspace_patient_id !== "string" ||
       !item.workspace_patient_id.trim() ||
-      typeof item.native_patient_id !== "string" ||
-      !item.native_patient_id.trim() ||
+      (native
+        ? Object.keys(item).length !== 2
+        : !("native_patient_id" in item) || typeof item.native_patient_id !== "string" || !item.native_patient_id.trim()) ||
       typeof item.display_name !== "string" ||
       !item.display_name.trim() ||
       [
         item.workspace_patient_id,
-        item.native_patient_id,
+        ...(!native && "native_patient_id" in item && typeof item.native_patient_id === "string" ? [item.native_patient_id] : []),
         item.display_name,
       ].some(
         (value) =>
@@ -87,10 +87,11 @@ function parseLivePatients(body: unknown): LivePatient[] {
 }
 
 async function fetchLivePatients(signal: AbortSignal): Promise<LivePatient[]> {
-  const body = nativeTransportEnabled()
+  const native = nativeTransportEnabled();
+  const body = native
     ? await fetchNativeDirectoryBody(signal)
     : await fetchProxyDirectoryBody(signal);
-  return parseLivePatients(body);
+  return parseLivePatients(body, native);
 }
 
 export function useLivePatients() {

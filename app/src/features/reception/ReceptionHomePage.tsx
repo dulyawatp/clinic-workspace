@@ -13,6 +13,7 @@ import { LiveAppointments } from "../appointments/LiveAppointments";
 import { useCapabilities } from "../shell/CapabilityProvider";
 import { KpiCard } from "./KpiCard";
 import { PatientRegistration } from "./PatientRegistration";
+import { AppointmentBooking } from "./AppointmentBooking";
 import { isReceptionScope, type ReceptionScope, SCOPE_BY_KPI } from "./scopes";
 import { TodayAppointments } from "./TodayAppointments";
 import { type KpiRange, useReceptionKpis } from "./useReceptionKpis";
@@ -214,6 +215,9 @@ function ReceptionMode() {
   const { caps } = useCapabilities();
   return session?.mode === "live" ? (
     <>
+      <div className="shell-page-body">
+        <AppointmentBooking />
+      </div>
       <LiveAppointments />
       {session.user.roles.includes("REC") &&
         getCapability(caps, "write.patient.create") === "enabled" && (

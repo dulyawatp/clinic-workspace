@@ -58,10 +58,31 @@
 .appointment-card h4 {
   margin: 0 0 12px;
 }
-.appointment-patient-name,
+.appointment-patient-name {
+  display: inline-block;
+  margin-right: 12px;
+}
 .appointment-patient-id {
   display: inline-block;
   margin-right: 12px;
+  min-width: 0;
+  max-width: 100%;
+}
+.appointment-patient-name,
+.appointment-live-patient {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.appointment-live-reference {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 8px;
+}
+.appointment-patient-id-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .appointment-notice {
   background: #fff7e6;
@@ -267,4 +288,103 @@
   .appointment-practitioners {
     grid-template-columns: 1fr;
   }
+}
+
+.appointment-write-card {
+  margin-bottom: 20px;
+}
+
+.appointment-write-card h2 {
+  margin-bottom: 8px;
+}
+
+.appointment-write-intro,
+.appointment-write-note,
+.appointment-write-muted {
+  color: #53666a;
+}
+
+.appointment-write-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #e7e8eb;
+}
+
+.appointment-write-form .appointment-form {
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+}
+
+.appointment-write-form select {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #d7dce2;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.appointment-write-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.appointment-write-success {
+  border-left: 3px solid #2d8668;
+  background: #eef7f3;
+  padding: 10px 12px;
+}
+
+.appointment-write-alert {
+  border-left: 3px solid #a04d4d;
+  background: #fff1f1;
+  padding: 10px 12px;
+}
+
+.appointment-write-alert p {
+  margin: 0 0 8px;
+}
+
+.appointment-write-inline {
+  display: grid;
+  gap: 8px;
+  min-width: 12rem;
+}
+
+.appointment-write-inline p {
+  margin: 0;
+}
+
+.appointment-detail-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 12px 20px;
+  margin: 20px 0;
+}
+
+.appointment-detail-list div {
+  display: grid;
+  gap: 4px;
+}
+
+.appointment-detail-list dt {
+  color: #53666a;
+  font-size: 0.85rem;
+}
+
+.appointment-detail-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.live-appointment-link {
+  color: #175b5b;
+  text-underline-offset: 3px;
+}
+
+.live-appointment-link:focus-visible {
+  outline: 3px solid #175b5b;
+  outline-offset: 2px;
 }

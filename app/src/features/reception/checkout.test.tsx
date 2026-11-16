@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 import { server } from "../../test/msw/server";
 import {
   renderWithFixtures,
@@ -63,9 +63,36 @@ it("shows an invoice as noninteractive reference without verified destination", 
   expect(screen.queryByRole("link", { name: /INV-FIX-0001/ })).toBeNull();
   expect(screen.getByText(/ยังไม่ยืนยัน|not verified/i)).toBeVisible();
 });
-it("keeps follow-up disabled without posting even when capability is enabled", async () => {
-  const spy = vi.spyOn(globalThis, "fetch");
+it("opens the existing reception booking flow from a ready handoff", async () => {
   renderWithFixtures(<CheckoutPage />, {
+    visit: "invoiced",
+    caps: { "write.appointment.book": "enabled" },
+  });
+  const link = await screen.findByRole("link", {
+    name: /นัดติดตาม|follow-up/i,
+  });
+  const href = link.getAttribute("href");
+  expect(href).not.toBeNull();
+  const url = new URL(String(href), "https://clinic.test");
+  expect(url.pathname).toBe("/clinic/reception");
+  expect(url.searchParams.get("book")).toBe("1");
+  expect(url.searchParams.get("patient")).toBe("fixture-dir-05");
+  expect(url.searchParams.get("source")).toBe("checkout");
+  expect(url.searchParams.get("visit")).toBe("fixture-visit-05");
+});
+
+it("disables follow-up while booking is not enabled", async () => {
+  renderWithFixtures(<CheckoutPage />, { visit: "invoiced" });
+  const link = await screen.findByRole("link", {
+    name: /นัดติดตาม|follow-up/i,
+  });
+  expect(link).toHaveAttribute("aria-disabled", "true");
+  expect(link).not.toHaveAttribute("href");
+});
+
+it("does not offer checkout follow-up booking to a cashier", async () => {
+  renderWithFixtures(<CheckoutPage />, {
+    role: "CAS",
     visit: "invoiced",
     caps: { "write.appointment.book": "enabled" },
   });
@@ -73,12 +100,29 @@ it("keeps follow-up disabled without posting even when capability is enabled", a
     name: /นัดติดตาม|follow-up/i,
   });
   expect(button).toBeDisabled();
-  await userEvent.click(button);
   expect(
-    spy.mock.calls.every(([, init]) => !init?.method || init.method === "GET"),
-  ).toBe(true);
-  spy.mockRestore();
+    screen.getByText("ฝ่ายต้อนรับเป็นผู้สร้างนัดติดตาม"),
+  ).toBeVisible();
 });
+
+it("renders authored missing-invoice and incomplete-visit sample states", async () => {
+  renderWithFixtures(<CheckoutPage />, { visit: "invoiced" });
+  expect(
+    await screen.findByText("ตัวอย่างข้อมูลเช็คเอาท์ที่เขียนไว้"),
+  ).toBeVisible();
+  expect(screen.getByText("SAMPLE-VIS-CHECKOUT-01")).toBeVisible();
+  expect(screen.getByText("SAMPLE-VIS-INCOMPLETE-01")).toBeVisible();
+  expect(
+    screen.getByText("การตรวจเสร็จแล้วแต่ยังไม่มีใบแจ้งหนี้"),
+  ).toBeVisible();
+  expect(
+    screen.getByText("การตรวจยังไม่เสร็จตอนเช็คเอาท์"),
+  ).toBeVisible();
+  for (const gap of ["การประเมิน", "แผนการรักษา", "หัตถการ"]) {
+    expect(screen.getByText(gap)).toBeVisible();
+  }
+});
+
 
 it("paginates more than 20 checkout rows and resets to the first page after filtering", async () => {
   const rows = Array.from({ length: 25 }, (_, i) => ({

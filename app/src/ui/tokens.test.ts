@@ -30,7 +30,13 @@ describe("design tokens", () => {
   });
 
   it("includes a Thai-capable font fallback", () => {
-    expect(css).toMatch(/Noto Sans Thai|IBM Plex Sans Thai|Sukhumvit Set/);
+    // The stack lives with the design tokens; the alias layer only points at it.
+    const design = readFileSync(
+      new URL("../design/tokens.css", import.meta.url),
+      "utf8",
+    );
+    expect(css).toMatch(/--font-sans:\s*var\(--pc-font-sans\)/);
+    expect(design).toMatch(/Noto Sans Thai|IBM Plex Sans Thai|Sukhumvit Set/);
   });
 
   it("is imported after base styles by the single stylesheet entry", () => {

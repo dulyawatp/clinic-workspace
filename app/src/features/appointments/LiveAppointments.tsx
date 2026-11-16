@@ -1,13 +1,16 @@
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 import { useSession } from "../../app/SessionProvider";
+import { ROUTES } from "../../app/routes";
 import { getCapability } from "../../domain/capability";
 import { toI18nKey } from "../../domain/errors";
 import { PageHeader } from "../../ui/PageHeader";
 import { StatePanel } from "../../ui/StatePanel";
 import { useCapabilities } from "../shell/CapabilityProvider";
+import { LiveCheckIn } from "./LiveCheckIn";
 import { useLiveAppointments } from "./live-appointments";
 
-function LiveRows() {
+function LiveRows({ checkinEnabled }: { checkinEnabled: boolean }) {
   const { t } = useTranslation();
   const { refresh } = useSession();
   const query = useLiveAppointments();
@@ -53,6 +56,13 @@ function LiveRows() {
                 {t(`liveAppointments.${field}`)}
               </th>
             ))}
+            {checkinEnabled && (
+              <th scope="col">
+                <span className="shell-sr-only">
+                  {t("appointmentWrite.actions")}
+                </span>
+              </th>
+            )}
           </tr>
         </thead>
         <tbody>
@@ -68,11 +78,21 @@ function LiveRows() {
                 {item.workspace_patient_id}
               </td>
               <td data-label={t("liveAppointments.reference")}>
-                {item.appointment_id}
+                <Link
+                  className="live-appointment-link"
+                  to={ROUTES.appointment(item.appointment_id)}
+                >
+                  {item.appointment_id}
+                </Link>
               </td>
               <td data-label={t("liveAppointments.status")}>
                 <span className="live-appointment-status">{item.status}</span>
               </td>
+              {checkinEnabled && (
+                <td data-label={t("appointmentWrite.actions")}>
+                  <LiveCheckIn appointmentId={item.appointment_id} />
+                </td>
+              )}
             </tr>
           ))}
         </tbody>
@@ -86,6 +106,8 @@ export function LiveAppointments() {
   const { session } = useSession();
   const { caps } = useCapabilities();
   const capability = getCapability(caps, "read.appointment");
+  const checkinEnabled =
+    getCapability(caps, "write.appointment.checkin") === "enabled";
   if (
     !session?.user.roles.some((role) => role === "REC" || role === "DOC") ||
     capability === "denied" ||
@@ -122,7 +144,7 @@ export function LiveAppointments() {
             </div>
           </div>
           <p className="appointment-notice">{t("liveAppointments.readOnly")}</p>
-          <LiveRows />
+          <LiveRows checkinEnabled={checkinEnabled} />
         </section>
       </div>
     </>

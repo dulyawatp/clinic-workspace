@@ -6,7 +6,6 @@ import { App } from "../../app/App";
 import { ROUTES } from "../../app/routes";
 import type { RoleCode } from "../../domain/capability";
 import { CalendarPage } from "../../features/appointments/CalendarPage";
-import { FinancePage } from "../../features/finance/FinancePage";
 import { PharmacyPage } from "../../features/pharmacy/PharmacyPage";
 import { LivePhotoWorkspace } from "../../features/photos/LivePhotoWorkspace";
 import { QueuePage } from "../../features/reception/QueuePage";
@@ -46,7 +45,6 @@ const directLinks: Array<{
 }> = [
   { name: "appointments", role: "DOC", ui: () => <CalendarPage /> },
   { name: "lab photos", role: "DOC", ui: () => <LivePhotoWorkspace /> },
-  { name: "finance", role: "MGR", ui: () => <FinancePage /> },
   { name: "pharmacy stock", role: "PHA", ui: () => <PharmacyPage /> },
   { name: "reception queue", role: "REC", ui: () => <QueuePage /> },
 ];

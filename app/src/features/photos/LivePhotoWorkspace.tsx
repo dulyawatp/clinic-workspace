@@ -105,7 +105,7 @@ export function LivePhotoWorkspace() {
                 </div>
                 <Link
                   className="ui-button ui-button--secondary"
-                  to={ROUTES.livePhotos}
+                  to={ROUTES.photos(selected.workspace_patient_id)}
                 >
                   {t("livePhotos.back")}
                 </Link>

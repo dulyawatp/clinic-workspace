@@ -1,0 +1,147 @@
+/* ============================================================
+   Preclinic Medical Design System — design tokens
+   Source of truth: the design project's DESIGN.md brand spec, plus the
+   measured values in its `assets/css/tokens.css`.
+
+   Namespaced `--pc-*` on purpose: feature stylesheets keep their existing
+   variable names, and `src/ui/tokens.css` is the single alias layer that maps
+   those legacy names onto these tokens, so nothing changes visually.
+   ============================================================ */
+
+:root {
+  color-scheme: light;
+
+  /* --- Core surfaces and text ------------------------------- */
+  --pc-bg: #f5f6f8; /* clinical canvas */
+  --pc-surface: #ffffff; /* pristine white */
+  --pc-fg: #0a1b39; /* clinical ink, 15.8:1 on white */
+  --pc-muted: #6c7688; /* metadata slate, 4.58:1 on white */
+  --pc-border: #e7e8eb; /* hairline gray */
+  --pc-accent: #00d3c7; /* medical cyan; pair with ink, never white */
+
+  /* --- Primary action (Royal indigo) ------------------------ */
+  --pc-primary: #2e37a4;
+  /* Hover tiebreaker: DESIGN.md's component spec (#4d58b0) wins over the
+     prototype tokens.css alias (#3C449C); active state comes from DESIGN.md. */
+  --pc-primary-hover: #4d58b0;
+  --pc-primary-active: #1d217d;
+  --pc-primary-wash: #ecedf7;
+
+  /* --- Cyan accent controls --------------------------------- */
+  --pc-secondary-hover: #17c2b9;
+  --pc-secondary-wash: #e8fbfa;
+
+  /* --- Supporting neutral panels ---------------------------- */
+  --pc-sage: #f8fafb; /* subtle panel / table header */
+  --pc-sage-deep: #f0f1f5;
+  --pc-ink-2: color-mix(in oklch, var(--pc-muted) 94%, var(--pc-fg));
+  --pc-ink-3: #6f7887; /* accessible tertiary metadata */
+  --pc-field: #f8fafb;
+  --pc-field-border: #ced1d7;
+
+  /* --- Functional status (brand hex + accessible text tone) --
+     The brand hexes are the colour of the indicator; the `--pc-*-text` tones
+     are the readable label colour on the matching wash. Design source's raw
+     #fdaf22-on-#fefbf5 badge pairing is ~1.9:1, below the 4.5:1 safeguard in
+     DESIGN.md, so label text uses the accessible tone instead. */
+  --pc-status-success: #27ae60;
+  --pc-status-warning: #fdaf22;
+  --pc-status-danger: #ef1e1e;
+  --pc-status-info: #2f80ed;
+  --pc-ok: oklch(0.53 0.145 152);
+  --pc-ok-wash: #f4fbf7;
+  --pc-warn: oklch(0.53 0.135 75);
+  --pc-warn-wash: #fefbf5;
+  --pc-danger: oklch(0.52 0.19 28);
+  --pc-danger-wash: #fef4f4;
+  --pc-info: oklch(0.51 0.16 257);
+  --pc-info-wash: #f4f9fe;
+  --pc-demo: var(--pc-primary);
+  --pc-demo-wash: var(--pc-primary-wash);
+
+  /* --- Typography ------------------------------------------- */
+  --pc-font-sans:
+    "Inter", "IBM Plex Sans Thai", "Sukhumvit Set", Thonburi, "Noto Sans Thai",
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --pc-font-mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+
+  --pc-fs-display: 1.875rem; /* 30px */
+  --pc-fs-h1: 1.4375rem; /* 23px */
+  --pc-fs-h2: 1.125rem; /* 18px */
+  --pc-fs-h3: 1rem; /* 16px */
+  --pc-fs-body: 0.875rem; /* 14px */
+  --pc-fs-small: 0.8125rem; /* 13px */
+  --pc-fs-micro: 0.75rem; /* 12px */
+  --pc-fs-table: 0.84375rem; /* 13.5px */
+
+  --pc-lh-tight: 1.25;
+  --pc-lh-body: 1.55;
+  --pc-tracking-tight: -0.015em;
+  --pc-tracking-wide: 0.05em;
+
+  /* --- Spacing scale (4px base) ----------------------------- */
+  --pc-sp-1: 0.25rem;
+  --pc-sp-2: 0.5rem;
+  --pc-sp-3: 0.75rem;
+  --pc-sp-4: 1rem;
+  --pc-sp-5: 1.25rem;
+  --pc-sp-6: 1.5rem;
+  --pc-sp-8: 2rem;
+  --pc-sp-10: 2.5rem;
+  --pc-sp-12: 3rem;
+  --pc-sp-16: 4rem;
+
+  /* --- Structure -------------------------------------------- */
+  --pc-rail-w: 276px;
+  --pc-topbar-h: 3.5rem;
+  --pc-content-max: 88rem;
+  --pc-gutter: var(--pc-sp-6);
+  --pc-radius-s: 5px;
+  --pc-radius-m: 8px;
+  --pc-radius-l: 10px;
+  --pc-radius-pill: 999px;
+  --pc-tap: 44px;
+  --pc-hair: 1px solid var(--pc-border);
+  --pc-hair-strong: 1px solid var(--pc-field-border);
+
+  /* --- Elevation -------------------------------------------- */
+  --pc-shadow-1:
+    0 1px 3px rgba(10, 27, 57, 0.04), 0 1px 2px rgba(10, 27, 57, 0.02);
+  --pc-shadow-2:
+    0 4px 12px rgba(10, 27, 57, 0.08), 0 2px 4px rgba(10, 27, 57, 0.03);
+  --pc-shadow-3:
+    0 12px 28px -6px rgba(10, 27, 57, 0.12), 0 4px 8px -2px rgba(10, 27, 57, 0.04);
+  --pc-shadow-card: 0 0 35px rgba(104, 134, 177, 0.15);
+
+  /* --- Focus rings and motion -------------------------------- */
+  --pc-ring: 0 0 0 3px rgba(46, 55, 164, 0.25);
+  --pc-ring-cyan: 0 0 0 3px rgba(0, 211, 199, 0.35);
+  --pc-ring-danger: 0 0 0 3px rgba(239, 30, 30, 0.26);
+  --pc-ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --pc-dur-hover: 150ms;
+  --pc-dur-2: 180ms;
+  --pc-dur-3: 320ms;
+}
+
+@media (max-width: 1279px) {
+  :root {
+    --pc-gutter: var(--pc-sp-5);
+    --pc-fs-display: 1.625rem;
+  }
+}
+
+@media (max-width: 767px) {
+  :root {
+    --pc-gutter: var(--pc-sp-4);
+    --pc-fs-display: 1.375rem;
+    --pc-fs-h1: 1.25rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --pc-dur-hover: 0ms;
+    --pc-dur-2: 0ms;
+    --pc-dur-3: 0ms;
+  }
+}

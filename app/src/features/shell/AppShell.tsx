@@ -97,7 +97,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       </main>
     );
 
-  const items = navFor(session.user.roles, caps, session.mode);
+  const items = navFor(session.user.roles, caps);
   return (
     <div className={`clinic-shell clinic-shell--${mode}`}>
       <a className="shell-skip" href="#main">

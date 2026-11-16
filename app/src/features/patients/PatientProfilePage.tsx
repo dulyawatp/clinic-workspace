@@ -23,15 +23,21 @@ import {
   type TimelineKind,
 } from "../../domain/patient";
 import { mapQueueStatus } from "../../domain/queue";
-import { formatDateTime, formatMoney } from "../../i18n/format";
+import { formatDate, formatDateTime, formatMoney } from "../../i18n/format";
 import { useLocale } from "../../i18n/LocaleProvider";
+import { nativeTransportEnabled } from "../../transport/native/flag";
 import type { ReadParams } from "../../transport/read/client";
 import { useReadQuery } from "../../transport/read/query";
 import { PageHeader } from "../../ui/PageHeader";
 import { StatePanel } from "../../ui/StatePanel";
 import { StatusChip } from "../../ui/StatusChip";
 import { useCapabilities } from "../shell/CapabilityProvider";
+import { ConsentEvidence } from "./ConsentEvidence";
+import { useLivePatient } from "./live-patient";
 import { PatientHeader } from "./PatientHeader";
+import { RedactionNotice } from "./RedactionNotice";
+import { SummaryCard } from "./SummaryCard";
+import { PatientWriteForm } from "./PatientWriteForm";
 import { Timeline } from "./Timeline";
 import { VitalsSummary } from "./VitalsSummary";
 
@@ -440,10 +446,24 @@ function ProfileView({
     tabRefs.current[next]?.focus();
   }
 
+  const canOpenPhotos = roles.some(
+    (role) => role === "REC" || role === "DOC" || role === "NUR",
+  );
+
   return (
     <>
       <PatientHeader patient={patient} billingOnly={billingOnly} />
-      {!billingOnly && <VitalsPanel patientId={patient.id} />}
+      {!billingOnly && (
+        <div className="patients-summary-grid">
+          <SummaryCard patient={patient} canOpenPhotos={canOpenPhotos} />
+          <VitalsPanel patientId={patient.id} />
+          <ConsentEvidence
+            patientId={patient.id}
+            canOpenPhotos={canOpenPhotos}
+          />
+        </div>
+      )}
+      {!billingOnly && <RedactionNotice roles={roles} />}
       <section className="patients-card" aria-label={t("profile.history")}>
         <div
           className="patients-tabs"
@@ -490,10 +510,176 @@ function ProfileView({
   );
 }
 
+/**
+ * Native detail read for one allowlisted patient. It renders the same header
+ * blocks and facts list as the existing profile, but only the fields the native
+ * view returns: no history tabs, vitals or actions are requested, because those
+ * reads are not part of this slice and their proxy transport must not be used
+ * as a fallback.
+ */
+function NativePatientProfile({
+  workspacePatientId,
+}: {
+  workspacePatientId: string;
+}) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <PageHeader title={t("surface.PAT-03")} />
+      <NativePatientProfileContent workspacePatientId={workspacePatientId} />
+    </>
+  );
+}
+
+function NativePatientProfileContent({
+  workspacePatientId,
+}: {
+  workspacePatientId: string;
+}) {
+  const { t } = useTranslation();
+  const { locale } = useLocale();
+  const { refresh, session } = useSession();
+  const { caps } = useCapabilities();
+  const capability = getCapability(caps, "read.patient");
+  const query = useLivePatient(workspacePatientId);
+  const unavailable = t("common.unavailable");
+
+  // Presentation only: the native method re-authorizes every request. A role
+  // outside the patient surfaces renders the denial instead of an endless
+  // loading state, and no request is made.
+  if (
+    !session?.user.roles.some(
+      (role) => role === "DOC" || role === "REC" || role === "NUR",
+    ) ||
+    capability === "denied" ||
+    capability === "blocked_unverified"
+  )
+    return (
+      <div className="shell-page-body">
+        <StatePanel
+          kind="permission-denied"
+          title={t("state.denied.title")}
+          detail={t("state.denied.body", { resource: t("surface.PAT-03") })}
+        />
+      </div>
+    );
+  if (capability === "error_upstream")
+    return (
+      <div className="shell-page-body">
+        <StatePanel kind="error" title={t("errors.UPSTREAM_UNAVAILABLE")} />
+      </div>
+    );
+
+  if (query.isError) {
+    if (query.error.code === "FORBIDDEN")
+      return (
+        <div className="shell-page-body">
+          <StatePanel
+            kind="permission-denied"
+            title={t("state.denied.title")}
+            detail={t("state.denied.body", { resource: t("surface.PAT-03") })}
+          />
+        </div>
+      );
+    if (query.error.code === "AUTH_EXPIRED")
+      return (
+        <div className="shell-page-body">
+          <StatePanel
+            kind="error"
+            title={t(toI18nKey(query.error))}
+            onRetry={() => {
+              void refresh();
+            }}
+            retryLabel={t("action.retry")}
+          />
+        </div>
+      );
+    return (
+      <div className="shell-page-body">
+        {query.error.retryable ? (
+          <StatePanel
+            kind="error"
+            title={t(toI18nKey(query.error))}
+            onRetry={() => {
+              void query.refetch();
+            }}
+            retryLabel={t("action.retry")}
+          />
+        ) : (
+          <StatePanel kind="error" title={t(toI18nKey(query.error))} />
+        )}
+      </div>
+    );
+  }
+  if (query.isPending || query.isFetching || !query.isFetchedAfterMount)
+    return (
+      <div className="shell-page-body">
+        <StatePanel kind="loading" title={t("common.loading")} />
+      </div>
+    );
+
+  const detail = query.data;
+  const sexLabels = new Map([
+    ["male", t("patient.sexMale")],
+    ["female", t("patient.sexFemale")],
+    ["other", t("patient.sexOther")],
+    ["unknown", t("patient.sexUnknown")],
+  ]);
+  const statusLabels = new Map([
+    ["active", t("status.active")],
+    ["inactive", t("status.inactive")],
+  ]);
+  return (
+    <>
+      <div className="shell-page-body">
+        <header className="patients-profile-header">
+          <div className="patients-profile-identity">
+            <h2 className="patients-profile-name">{detail.display_name}</h2>
+            <p className="patients-profile-id">
+              <span>{t("patients.workspaceReference")}</span>{" "}
+              <span className="patients-id" data-testid="patient-id">
+                {detail.workspace_patient_id}
+              </span>
+            </p>
+            <dl className="patients-profile-facts">
+              <div>
+                <dt>{t("profile.dob")}</dt>
+                <dd>
+                  {detail.dob ? formatDate(detail.dob, locale) : unavailable}
+                </dd>
+              </div>
+              <div>
+                <dt>{t("field.sex")}</dt>
+                <dd>
+                  {detail.sex === null
+                    ? unavailable
+                    : sexLabels.get(detail.sex.trim().toLowerCase()) ?? detail.sex}
+                </dd>
+              </div>
+              <div>
+                <dt>{t("rec.status")}</dt>
+                <dd>
+                  {detail.status === null
+                    ? unavailable
+                    : statusLabels.get(detail.status.trim().toLowerCase()) ?? detail.status}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        </header>
+        <RedactionNotice roles={session?.user.roles ?? []} />
+        {getCapability(caps, "write.patient.update") === "enabled" && detail.editable === true && <PatientWriteForm patient={detail} />}
+        {getCapability(caps, "write.patient.update") === "enabled" && detail.editable === false && <p role="status">{t("patientWrite.notEditable")}</p>}
+      </div>
+    </>
+  );
+}
+
 /** Resolves the addressed record. No `:id` means no profile to show. */
 function AddressedProfile() {
   const { t } = useTranslation();
   const params = useParams();
+  const { session } = useSession();
   const patientId = params.id;
 
   if (patientId === undefined)
@@ -505,6 +691,11 @@ function AddressedProfile() {
         </div>
       </>
     );
+
+  // A live native session reads the record through the native method only. The
+  // fixture and legacy proxy profiles stay exactly as they were.
+  if (nativeTransportEnabled() && session?.mode === "live")
+    return <NativePatientProfile workspacePatientId={patientId} />;
 
   return <ProfileBody patientId={patientId} />;
 }

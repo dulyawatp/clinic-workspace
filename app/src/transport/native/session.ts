@@ -75,15 +75,29 @@ function identityOf(session: SessionDTO): string {
 }
 
 /**
- * The native build only implements reads, so every capability is downgraded to
- * `read_only` even when the server offers more. Keys are preserved for the UI;
- * unknown keys are dropped.
+ * Only the reviewed native write capabilities can be enabled by bootstrap:
+ * patient create/update and appointment book/reschedule/checkin. Every other
+ * known capability stays read-only, so cancellation can never be enabled by a
+ * malformed or substituted session payload. Unknown keys are dropped and
+ * malformed values never enable a write.
  */
-function readOnlyCapabilities(value: unknown): CapabilityMap {
+const NATIVE_ENABLEABLE = new Set<string>([
+  "write.patient.create",
+  "write.patient.update",
+  "write.appointment.book",
+  "write.appointment.reschedule",
+  "write.appointment.checkin",
+]);
+
+function nativeCapabilities(value: unknown): CapabilityMap {
   const capabilities: CapabilityMap = {};
   if (!isRecord(value)) return capabilities;
   for (const name of Object.keys(value)) {
-    if (isCapability(name)) capabilities[name] = "read_only";
+    if (isCapability(name))
+      capabilities[name] =
+        NATIVE_ENABLEABLE.has(name) && value[name] === "enabled"
+          ? "enabled"
+          : "read_only";
   }
   return capabilities;
 }
@@ -109,7 +123,7 @@ function parseBootstrap(body: unknown): {
       mode: "live",
       sessionEpoch: message.sessionEpoch,
       user: message.user,
-      capabilities: readOnlyCapabilities(message.capabilities),
+      capabilities: nativeCapabilities(message.capabilities),
     },
     csrfToken: message.csrfToken,
   };
@@ -191,6 +205,53 @@ export async function nativeLogin(
   const session = await fetchNativeSession();
   if (session === null) throw unavailable();
   return session;
+}
+
+/**
+ * Classification-only bootstrap read.
+ *
+ * This never commits `csrfToken`, `acceptedIdentity` or `bootstrapGeneration`,
+ * so it cannot supersede an in-flight identity refresh, logout token lookup or
+ * provider state. The caller-supplied signal is the original read signal, so a
+ * cancelled query also cancels this probe. Only a boolean-like state leaves
+ * this function; no session, token or record data is returned.
+ */
+async function probeNativeSession(
+  signal: AbortSignal,
+): Promise<"authenticated" | "anonymous"> {
+  const response = await frappeRequest(BOOTSTRAP_METHOD, {
+    method: "GET",
+    signal,
+  });
+  if (response.status === 401) return "anonymous";
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw mapHttpError(response.status, body);
+  // Validate exactly like a real bootstrap, then discard the result. A
+  // malformed or non-live body is an upstream failure, never a silent denial.
+  parseBootstrap(body);
+  return "authenticated";
+}
+
+/**
+ * Reconciles a native read 403 that may have been produced by Frappe's
+ * whitelist before the endpoint body ran.
+ *
+ * A guest/expired session receives 403 from a non-guest whitelisted method, so
+ * a raw 403 cannot be treated as a permanent denial. The classification-only
+ * bootstrap probe dispatches guests explicitly (401) and returns an
+ * authenticated state only after a valid session check. A returned
+ * authenticated state means the 403 was a real authorization denial. A probe
+ * failure is reported as an upstream error so an uncertain session is never
+ * misclassified as forbidden. No proxy request is made and no credential or
+ * generation state is touched.
+ */
+export async function classifyNativeForbidden(
+  signal: AbortSignal,
+): Promise<AppError> {
+  const state = await probeNativeSession(signal);
+  if (state === "anonymous")
+    return { code: "AUTH_EXPIRED", retryable: false };
+  return { code: "FORBIDDEN", retryable: false };
 }
 
 /** Frappe reports a rejected session CSRF token in the error envelope. */

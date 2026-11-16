@@ -2,7 +2,17 @@ import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { ROUTES } from "../../app/routes";
+import { Badge, DataTable, SampleBanner } from "../../design/components";
 import type { Locale } from "../../i18n";
+import { useLocale } from "../../i18n/LocaleProvider";
+import { useOpsCopy } from "../operations/ops-copy";
+import {
+  CHECK_STATUS_COPY,
+  GATE_EVIDENCE,
+  V3_GATES,
+  checkStatusTone,
+  systemChecks,
+} from "../operations/system-gates";
 import { PageHeader } from "../../ui/PageHeader";
 import { StatePanel } from "../../ui/StatePanel";
 import { StatusChip } from "../../ui/StatusChip";
@@ -15,6 +25,8 @@ import {
 
 export function SystemStatesPage() {
   const { t } = useTranslation();
+  const copy = useOpsCopy();
+  const { locale } = useLocale();
   // Deliberate sample default, not derived from UI locale or stored preference.
   const [outputLocale, setOutputLocale] = useState<Locale>("th");
   const [template, setTemplate] = useState<PrintTemplate>("receipt");
@@ -151,6 +163,77 @@ export function SystemStatesPage() {
           </div>
           <PrintPreview template={template} locale={outputLocale} />
         </section>
+
+        <SampleBanner
+          label={t("app.demoTag")}
+          title={copy(
+            "ข้อมูลตัวอย่างในเครื่อง · ยังไม่ยืนยันสัญญาเซิร์ฟเวอร์",
+            "Browser-local sample records · server contracts unverified",
+          )}
+        >
+          <p className="pc-note">
+            {copy(
+              "ไม่มีการเชื่อมต่อเซิร์ฟเวอร์จริง",
+              "No live backend connection",
+            )}
+          </p>
+        </SampleBanner>
+
+        <section aria-labelledby={`${id}-checks`}>
+          <h2 className="pc-card__title" id={`${id}-checks`}>
+            {copy("ตรวจความพร้อม", "Verification status")}
+          </h2>
+          <DataTable
+            caption={copy("ตรวจความพร้อม", "Verification status")}
+            columns={[
+              { key: "gate", label: copy("หัวข้อตรวจ", "Verification gate") },
+              { key: "status", label: copy("สถานะ", "Status") },
+              {
+                key: "required",
+                label: copy("สิ่งที่ยังต้องทำ", "Required evidence"),
+              },
+            ]}
+            rows={systemChecks().map((check) => [
+              check.name[locale],
+              <Badge key="status" tone={checkStatusTone(check.status)}>
+                {copy(...CHECK_STATUS_COPY[check.status])}
+              </Badge>,
+              check.note[locale],
+            ])}
+            empty={copy("ไม่พบรายการตามตัวกรอง", "No records match these filters")}
+          />
+        </section>
+
+        <section aria-labelledby={`${id}-gates`}>
+          <h2 className="pc-card__title" id={`${id}-gates`}>
+            {copy("ประตูตรวจสัญญา", "Contract gate")}
+          </h2>
+          <DataTable
+            caption={copy("ประตูตรวจสัญญา", "Contract gate")}
+            columns={[
+              { key: "gate", label: copy("ประตูตรวจสัญญา", "Contract gate") },
+              { key: "status", label: copy("สถานะ", "Status") },
+              {
+                key: "required",
+                label: copy("หลักฐานที่ต้องมี", "Evidence required"),
+              },
+            ]}
+            rows={V3_GATES.map((gate) => [
+              `${gate.id} · ${copy(gate.th, gate.en)}`,
+              <Badge key="status" tone="warning">
+                {copy("ยังไม่ยืนยัน", "Unverified")}
+              </Badge>,
+              copy(...GATE_EVIDENCE),
+            ])}
+            empty={copy("ไม่พบรายการตามตัวกรอง", "No records match these filters")}
+          />
+        </section>
+        <p className="pc-note">
+          {copy(
+            "เวอร์ชัน แบ็กอัป การกู้คืน การเข้ารหัส และสิทธิ์เซิร์ฟเวอร์ยังไม่ได้ตรวจ ไม่มีการแสดงผ่านหรือออนไลน์โดยไม่มีหลักฐาน",
+            "Versions, backups, restores, encryption and server permissions not inspected. No healthy/live claims without evidence.",
+          )}
+        </p>
       </div>
     </>
   );

@@ -1,19 +1,22 @@
+/* Legacy alias layer for the Preclinic design tokens.
+   Feature stylesheets keep these names; every value now comes from
+   `src/design/tokens.css` so one design change moves the whole app.
+   `--target-min` stays a literal because a `var()` alias would hide the 44px
+   affordance from the accessibility checks that read this file. */
 :root {
-  --canvas: #f5f6f8;
-  --surface: #ffffff;
-  --ink: #0a1b39;
-  --muted: #6c7688;
-  --border: #e7e8eb;
-  --primary: #2e37a4;
-  --accent: #00d3c7;
-  --success: #27ae60;
-  --warning: #fdaf22;
-  --danger: #ef1e1e;
-  --info: #2f80ed;
-  --neutral: #6c7688;
-  --radius-card: 10px;
-  --target-min: 44px;
-  --font-sans:
-    "Inter", "IBM Plex Sans Thai", "Sukhumvit Set", Thonburi, "Noto Sans Thai",
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --canvas: var(--pc-bg);
+  --surface: var(--pc-surface);
+  --ink: var(--pc-fg);
+  --muted: var(--pc-muted);
+  --border: var(--pc-border);
+  --primary: var(--pc-primary);
+  --accent: var(--pc-accent);
+  --success: var(--pc-status-success);
+  --warning: var(--pc-status-warning);
+  --danger: var(--pc-status-danger);
+  --info: var(--pc-status-info);
+  --neutral: var(--pc-muted);
+  --radius-card: var(--pc-radius-l);
+  --target-min: 44px; /* = var(--pc-tap) */
+  --font-sans: var(--pc-font-sans);
 }

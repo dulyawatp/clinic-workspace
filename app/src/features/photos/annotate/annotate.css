@@ -1,0 +1,154 @@
+/* PAT-05 annotation workspace: client-side vector layers over an original. */
+.annotation-frame,
+.annotation-textfield {
+  display: grid;
+  gap: 6px;
+  margin: 16px 0 0;
+  min-width: 0;
+}
+
+.annotation-frame label,
+.annotation-textfield label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.annotation-frame select,
+.annotation-textfield input {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--target-min);
+  padding: 10px 12px;
+  border: 1px solid var(--pc-field-border);
+  border-radius: var(--pc-radius-s);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 1rem;
+}
+
+.annotation-frame select:focus-visible,
+.annotation-textfield input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--pc-ring-cyan);
+}
+
+.annotation-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  min-width: 0;
+}
+
+.annotation-toolbar .pc-button {
+  min-width: 44px;
+}
+
+.annotation-stage {
+  position: relative;
+  height: 440px;
+  margin-top: 16px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--pc-radius-l);
+  background: var(--pc-sage);
+  touch-action: none;
+}
+
+.annotation-stage__inner {
+  position: absolute;
+  inset: 0;
+  transition: transform var(--pc-dur-2) var(--pc-ease);
+}
+
+.annotation-stage img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.annotation-stage svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.annotation-stage svg:focus-visible {
+  outline: 3px solid var(--primary);
+  outline-offset: -3px;
+}
+
+.annotation-shape.is-selected {
+  stroke-dasharray: 4 3;
+  stroke-width: 1.4;
+}
+
+.annotation-save {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.annotation-status {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.annotation-layers {
+  margin-top: 20px;
+  min-width: 0;
+}
+
+.annotation-layers h3 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+}
+
+.annotation-layers ul {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.annotation-layer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--pc-radius-m);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
+.annotation-layers ul .annotation-layer {
+  margin: 0;
+}
+
+@media (max-width: 767px) {
+  .annotation-stage {
+    height: 330px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .annotation-stage__inner {
+    transition: none;
+  }
+}

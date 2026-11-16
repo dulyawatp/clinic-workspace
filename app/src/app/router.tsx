@@ -2,50 +2,19 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   createBrowserRouter,
+  Navigate,
   Outlet,
   type RouteObject,
   RouterProvider,
 } from "react-router-dom";
-import { AppointmentPage } from "../features/appointments/AppointmentPage";
-import { CalendarPage } from "../features/appointments/CalendarPage";
 import { SignInPage } from "../features/auth/SignInPage";
-import { VisitWorkspacePage } from "../features/clinical/VisitWorkspacePage";
-import { FinancePage } from "../features/finance/FinancePage";
-import { PatientDirectoryPage } from "../features/patients/PatientDirectoryPage";
-import { PatientProfilePage } from "../features/patients/PatientProfilePage";
-import { PharmacyPage } from "../features/pharmacy/PharmacyPage";
-import { LivePhotoWorkspace } from "../features/photos/LivePhotoWorkspace";
-import {
-  PhotoComparePage,
-  PhotoGalleryPage,
-} from "../features/photos/PhotoPages";
-import { ProfilePage } from "../features/profile/ProfilePage";
-import { CheckoutPage } from "../features/reception/CheckoutPage";
-import { QueuePage } from "../features/reception/QueuePage";
-import { ReceptionHomePage } from "../features/reception/ReceptionHomePage";
-import { SearchPage } from "../features/search/SearchPage";
 import { AppShell } from "../features/shell/AppShell";
-import { SystemStatesPage } from "../features/system/SystemStatesPage";
-import { PageHeader } from "../ui/PageHeader";
 import { StatePanel } from "../ui/StatePanel";
 import { RequireSession } from "./guards";
+import { FinanceRedirect, LivePhotoRedirect } from "./legacy-redirects";
+import { RoleGuard } from "./role-guard";
 import { ROUTES } from "./routes";
-
-function HomePlaceholder() {
-  const { t } = useTranslation();
-  return (
-    <div data-testid="shell-placeholder">
-      <PageHeader title={t("nav.today")} />
-      <div className="shell-page-body">
-        <StatePanel
-          kind="empty"
-          title={t("shell.homePending")}
-          detail={t("shell.homePendingBody")}
-        />
-      </div>
-    </div>
-  );
-}
+import { SURFACE_ROUTES } from "./surface-routes";
 
 /**
  * Route-level failure fallback. Deliberately never reads `useRouteError()`:
@@ -66,6 +35,9 @@ export function RouteErrorFallback() {
  * `createMemoryRouter` over the real routes without mounting the browser
  * router. The pathless root owns the shared sanitized `errorElement`, so both
  * the login route and the protected shell routes are covered.
+ *
+ * Every protected surface comes from `SURFACE_ROUTES` and is wrapped in
+ * `RoleGuard`; the legacy React-era addresses stay as redirects only.
  */
 export const appRoutes: RouteObject[] = [
   {
@@ -82,24 +54,23 @@ export const appRoutes: RouteObject[] = [
           </RequireSession>
         ),
         children: [
-          { path: ROUTES.home, element: <HomePlaceholder /> },
-          { path: ROUTES.patients, element: <PatientDirectoryPage /> },
-          { path: ROUTES.pharmacy, element: <PharmacyPage /> },
-          { path: ROUTES.finance, element: <FinancePage /> },
-          { path: `${ROUTES.patients}/:id`, element: <PatientProfilePage /> },
-          { path: ROUTES.photoPattern, element: <PhotoGalleryPage /> },
-          { path: ROUTES.photoComparePattern, element: <PhotoComparePage /> },
-          { path: ROUTES.livePhotos, element: <LivePhotoWorkspace /> },
-          { path: ROUTES.livePhotoPattern, element: <LivePhotoWorkspace /> },
-          { path: ROUTES.reception, element: <ReceptionHomePage /> },
-          { path: ROUTES.queue, element: <QueuePage /> },
-          { path: ROUTES.checkout, element: <CheckoutPage /> },
-          { path: ROUTES.appointments, element: <CalendarPage /> },
-          { path: ROUTES.visitPattern, element: <VisitWorkspacePage /> },
-          { path: `${ROUTES.appointments}/:id`, element: <AppointmentPage /> },
-          { path: ROUTES.profile, element: <ProfilePage /> },
-          { path: ROUTES.search, element: <SearchPage /> },
-          { path: ROUTES.system, element: <SystemStatesPage /> },
+          ...SURFACE_ROUTES.map(({ surface, path, element }) => ({
+            path,
+            element: <RoleGuard surface={surface}>{element}</RoleGuard>,
+          })),
+          { path: ROUTES.legacyFinance, element: <FinanceRedirect /> },
+          {
+            // Legacy patient picker: gated as the PAT-04 clinician entry and
+            // forwarded to the role home. The workspace itself stays reachable
+            // from PAT-04/05, which carry the patient context it needs.
+            path: ROUTES.livePhotos,
+            element: (
+              <RoleGuard surface="PAT-04" roles={["DOC", "NUR"]}>
+                <Navigate to={ROUTES.home} replace />
+              </RoleGuard>
+            ),
+          },
+          { path: ROUTES.livePhotoPattern, element: <LivePhotoRedirect /> },
         ],
       },
     ],

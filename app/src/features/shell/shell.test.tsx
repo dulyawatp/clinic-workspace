@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../../app/App";
 import { ROUTES } from "../../app/routes";
 import { SessionProvider, useSession } from "../../app/SessionProvider";
+import { SURFACES } from "../../design/surfaces";
 import type { CapabilityMap, RoleCode } from "../../domain/capability";
 import { initI18n, type Locale } from "../../i18n";
 import { LocaleProvider } from "../../i18n/LocaleProvider";
@@ -140,34 +141,151 @@ function renderShell({
 describe("shell navigation contract", () => {
   it("resolves only canonical route keys", () => {
     expect(NAV_MANIFEST.map((item) => item.id)).toEqual([
-      "finance",
-      "pharmacy",
-      "live-photos",
       "home",
       "search",
-      "patients",
-      "reception",
-      "queue",
-      "checkout",
-      "appointments",
       "profile",
       "system",
+      "patients",
+      "patient-new",
+      "patient",
+      "photos",
+      "photo-compare",
+      "reception",
+      "queue",
+      "appointments",
+      "appointment",
+      "checkout",
+      "doctor",
       "visit",
+      "procedure",
+      "lab",
+      "nurse",
+      "nurse-tasks",
+      "pharmacy",
+      "pharmacy-items",
+      "pharmacy-batches",
+      "pharmacy-receive",
+      "pharmacy-balances",
+      "pharmacy-movements",
+      "pharmacy-purchasing",
+      "cashier",
+      "invoices",
+      "payments",
+      "management",
+      "management-reports",
+      "admin",
+      "admin-users",
+      "admin-clinical",
+      "admin-settings",
+      "admin-system",
     ]);
     for (const item of NAV_MANIFEST) {
       expect(Object.values(ROUTES)).toContain(ROUTES[item.routeKey]);
-      expect(["02", "03", "04"]).toContain(item.owner);
+      expect(["02", "03", "04", "05"]).toContain(item.owner);
     }
+    // Reception reads its designed front-desk order, not the manifest order.
     expect(navFor(["REC"], {}).map((item) => item.id)).toEqual([
       "home",
-      "search",
-      "patients",
       "reception",
       "queue",
-      "checkout",
       "appointments",
+      "patients",
+      "checkout",
+      "search",
       "profile",
     ]);
+  });
+
+  it("advertises or addresses every designed surface except the login", () => {
+    const covered = new Set(
+      NAV_MANIFEST.flatMap((item) => (item.surface ? [item.surface] : [])),
+    );
+    for (const surface of SURFACES) {
+      if (surface.preAuth) continue;
+      expect(covered, surface.id).toContain(surface.id);
+    }
+  });
+
+  it("covers every designed destination for each role", () => {    expect(navFor(["DOC"], {}).map((item) => item.id)).toEqual([
+      "home",
+      "doctor",
+      "appointments",
+      "patients",
+      "search",
+      "profile",
+    ]);
+    expect(navFor(["NUR"], {}).map((item) => item.id)).toEqual([
+      "home",
+      "nurse",
+      "nurse-tasks",
+      "queue",
+      "patients",
+      "search",
+      "profile",
+    ]);
+    expect(navFor(["PHA"], {}).map((item) => item.id)).toEqual([
+      "home",
+      "pharmacy",
+      "pharmacy-items",
+      "pharmacy-batches",
+      "pharmacy-receive",
+      "pharmacy-balances",
+      "pharmacy-movements",
+      "pharmacy-purchasing",
+      "search",
+      "profile",
+    ]);
+    expect(navFor(["CAS"], {}).map((item) => item.id)).toEqual([
+      "home",
+      "cashier",
+      "invoices",
+      "payments",
+      "checkout",
+      "search",
+      "profile",
+    ]);
+    expect(navFor(["MGR"], {}).map((item) => item.id)).toEqual([
+      "home",
+      "management",
+      "management-reports",
+      "invoices",
+      "payments",
+      "pharmacy-batches",
+      "pharmacy-balances",
+      "system",
+      "search",
+      "profile",
+    ]);
+    expect(navFor(["ADM"], {}).map((item) => item.id)).toEqual([
+      "home",
+      "admin",
+      "admin-users",
+      "admin-clinical",
+      "admin-settings",
+      "admin-system",
+      "system",
+      "patients",
+      "search",
+      "profile",
+    ]);
+  });
+
+  it("never advertises React-era destinations that have no design surface", () => {
+    for (const role of ["REC", "DOC", "NUR", "PHA", "CAS", "MGR", "ADM"] as const)
+      expect(navFor([role], {}).map((item) => item.id)).not.toContain("finance");
+    expect(NAV_MANIFEST.map((item) => item.id)).not.toContain("live-photos");
+    // Addressed record destinations stay out of global navigation.
+    for (const id of [
+      "patient-new",
+      "patient",
+      "photos",
+      "photo-compare",
+      "appointment",
+      "visit",
+      "procedure",
+      "lab",
+    ])
+      expect(NAV_MANIFEST.find((item) => item.id === id)?.roles).toEqual([]);
   });
 
   it.each(["ADM", "MGR"] as const)(
@@ -229,36 +347,21 @@ describe("shell navigation contract", () => {
     ).not.toThrow();
   });
 
-  it("shows live lab navigation to live doctors even when photo writes are disabled", () => {
-    expect(
-      navFor(["DOC"], { "write.photo.upload": "read_only" }, "live").map(
-        (item) => item.id,
-      ),
-    ).toContain("live-photos");
-    expect(
-      navFor(["DOC"], { "write.photo.upload": "enabled" }, "fixture").map(
-        (item) => item.id,
-      ),
-    ).not.toContain("live-photos");
-    expect(
-      navFor(["DOC"], { "write.photo.upload": "enabled" }).map(
-        (item) => item.id,
-      ),
-    ).not.toContain("live-photos");
-    expect(navFor(["NUR"], {}, "live").map((item) => item.id)).toContain(
-      "live-photos",
-    );
-    expect(navFor(["NUR"], {}, "fixture").map((item) => item.id)).not.toContain(
-      "live-photos",
-    );
-    expect(navFor(["REC"], {}, "live").map((item) => item.id)).not.toContain(
-      "live-photos",
-    );
+  it("shows pharmacy to pharmacy roles and never to clinical roles", () => {
+    expect(NAV_MANIFEST.find((item) => item.id === "pharmacy")?.roles).toEqual([
+      "PHA",
+    ]);
+    for (const role of ["PHA"] as const)
+      expect(navFor([role], {}).map((item) => item.id)).toContain("pharmacy");
+    for (const role of ["DOC", "NUR", "REC", "CAS", "MGR", "ADM"] as const)
+      expect(navFor([role], {}).map((item) => item.id)).not.toContain(
+        "pharmacy",
+      );
   });
 
   it("places additional visible destinations under More after six primary items", () => {
     const items = Array.from({ length: 8 }, (_, index) => ({
-      ...NAV_MANIFEST.find((item) => item.id === "live-photos")!,
+      ...NAV_MANIFEST.find((item) => item.id === "system")!,
       id: `extra-${index}`,
     })) as typeof NAV_MANIFEST;
     render(
@@ -280,15 +383,16 @@ describe("shell navigation contract", () => {
 });
 
 describe("authenticated responsive shell", () => {
-  it("offers lab navigation in a live doctor session without write permission", async () => {
-    renderShell({
-      role: "DOC",
-      mode: "live",
-      caps: { "write.photo.upload": "read_only" },
-    });
+  it("shows a doctor the clinical destinations in designed order", async () => {
+    renderShell({ role: "DOC" });
+    const nav = await screen.findByRole("navigation");
+    expect(within(nav).getByRole("link", { name: "My day" })).toHaveAttribute(
+      "href",
+      ROUTES.doctor,
+    );
     expect(
-      await screen.findByRole("link", { name: "Synthetic lab photos" }),
-    ).toHaveAttribute("href", ROUTES.livePhotos);
+      within(nav).getByRole("link", { name: "Appointments" }),
+    ).toHaveAttribute("href", ROUTES.appointments);
   });
   it("shows reception destinations, first-focus skip link and current page", async () => {
     renderShell();
@@ -484,14 +588,14 @@ describe("authenticated responsive shell", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "Notifications" }),
     );
-    expect(await screen.findByText("No notifications")).toBeVisible();
+    expect(await screen.findByText("No pending work for this role")).toBeVisible();
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Notifications" }), {
       key: "Escape",
     });
-    expect(screen.queryByText("No notifications")).toBeNull();
+    expect(screen.queryByText("No pending work for this role")).toBeNull();
   });
 
-  it("mounts home placeholder within authenticated main via real router", async () => {
+  it("mounts the role home within authenticated main via real router", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) =>
@@ -499,9 +603,9 @@ describe("authenticated responsive shell", () => {
       ),
     );
     render(<App />);
-    expect(await screen.findByTestId("shell-placeholder")).toBeVisible();
+    expect(await screen.findByTestId("role-home")).toBeVisible();
     expect(screen.getByRole("main")).toContainElement(
-      screen.getByTestId("shell-placeholder"),
+      screen.getByTestId("role-home"),
     );
   });
 

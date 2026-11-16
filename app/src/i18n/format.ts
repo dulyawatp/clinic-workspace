@@ -39,6 +39,18 @@ export function formatDateTime(iso: string, _locale: Locale): string {
   return `${day}/${month}/${year} ${hour}:${minute}`;
 }
 
+const BANGKOK_TIME = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Bangkok",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+/** Bangkok `HH:MM` for an instant, for schedule and day-list rows. */
+export function formatTime(iso: string, _locale: Locale): string {
+  return BANGKOK_TIME.format(new Date(iso));
+}
+
 export function formatMoney(amount: number, locale: Locale): string {
   const formatted = MONEY.format(amount);
   return locale === "th" ? `฿${formatted}` : `THB ${formatted}`;

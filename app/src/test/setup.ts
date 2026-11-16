@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll } from "vitest";
+import { LOCALE_KEY } from "../i18n/locale-storage";
 import { resetFixtureHandlers, server } from "./msw/server";
 import { guardUnhandledFrame } from "./network";
 
@@ -58,6 +59,10 @@ afterEach(() => {
   resetFixtureHandlers();
   cleanup();
   installViewport(DEFAULT_VIEWPORT);
+  // A persisted language choice is a browser preference: each test starts as a
+  // fresh browser so the default locale is the one the test asked for. Tests
+  // that assert persistence set and read the key inside their own body.
+  if (typeof localStorage !== "undefined") localStorage.removeItem(LOCALE_KEY);
 });
 
 afterAll(() => {

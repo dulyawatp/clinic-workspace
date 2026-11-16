@@ -6,7 +6,7 @@ import { formatMoney } from "../../i18n/format";
 import { useLocale } from "../../i18n/LocaleProvider";
 import { Button } from "../../ui/Button";
 import { StatusChip } from "../../ui/StatusChip";
-import { WriteGate } from "../../ui/WriteGate";
+import { RoutedControl, WriteGate } from "../../ui/WriteGate";
 
 export interface CheckoutVisit {
   id: string;
@@ -28,6 +28,17 @@ const HANDOFFS = new Set([
   "partial",
   "blocked",
 ]);
+
+/** Checkout follow-up opens the existing reception booking flow. */
+export function checkoutBookingHref(visit: CheckoutVisit): string {
+  const params = new URLSearchParams({
+    book: "1",
+    patient: visit.patientId,
+    source: "checkout",
+    visit: visit.visitId,
+  });
+  return `${ROUTES.reception}?${params.toString()}`;
+}
 
 export function BillingHandoff({ visit }: { visit: CheckoutVisit }) {
   const { t } = useTranslation();
@@ -96,18 +107,27 @@ export function BillingHandoff({ visit }: { visit: CheckoutVisit }) {
         ) : (
           <div>
             <span>{t("checkout.cashierReference")}</span>
-            <WriteGate
-              capability="write.appointment.book"
-              reason={t("checkout.writeUnavailable")}
-            >
+            {session?.user.roles.includes("REC") ? (
+              <WriteGate
+                capability="write.appointment.book"
+                reason={t("checkout.followUpUnavailable")}
+              >
+                <RoutedControl
+                  className="pc-button pc-button--secondary"
+                  to={checkoutBookingHref(visit)}
+                >
+                  {t("checkout.followUp")}
+                </RoutedControl>
+              </WriteGate>
+            ) : (
               <Button
                 variant="secondary"
                 disabled
-                disabledReason={t("checkout.writeUnavailable")}
+                disabledReason={t("checkout.followUpReceptionOnly")}
               >
                 {t("checkout.followUp")}
               </Button>
-            </WriteGate>
+            )}
           </div>
         )}
       </td>

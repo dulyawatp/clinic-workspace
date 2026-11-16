@@ -11,8 +11,13 @@ import { useReadQuery } from "../../transport/read/query";
 import { PageHeader } from "../../ui/PageHeader";
 import { StatePanel } from "../../ui/StatePanel";
 import { useCapabilities } from "../shell/CapabilityProvider";
+import { AnnotationWorkspace } from "./annotate/AnnotationWorkspace";
+import { sampleFramesFor } from "./annotate/sample-frames";
+import { ConsentCapture } from "./ConsentCapture";
 import { compatible, type Photo, readPatientPhotos } from "./model";
+import { PhotoIntake } from "./PhotoIntake";
 import { PhotoSave } from "./PhotoSave";
+import { type PhotoTag, TagEditor } from "./TagEditor";
 import "./photos.css";
 
 type Identity = { patientId: string; patientName: string; fictional: boolean };
@@ -42,7 +47,15 @@ function PhotoWorkspace({
   compare: boolean;
 }) {
   const { t } = useTranslation();
-  const { authGeneration } = useSession();
+  const { session, authGeneration } = useSession();
+  /**
+   * The synthetic lab-photo workspace is a live-mode clinician tool and needs a
+   * patient context, which this page carries: that is why it is reached from
+   * PAT-04/05 instead of a global navigation entry.
+   */
+  const liveLabPhotos =
+    session?.mode === "live" &&
+    session.user.roles.some((role) => role === "DOC" || role === "NUR");
   const photos = useQuery<Photo[], AppError>({
     queryKey: ["patient-photos", patientId, authGeneration],
     queryFn: ({ signal }) => readPatientPhotos(patientId, signal),
@@ -101,6 +114,14 @@ function PhotoWorkspace({
         >
           {t(compare ? "photos.back" : "photos.compare")}
         </Link>
+        {liveLabPhotos && (
+          <Link
+            className="ui-button ui-button--secondary"
+            to={ROUTES.livePhotosPatient(patientId)}
+          >
+            {t("livePhotos.title")}
+          </Link>
+        )}
       </div>
       <div className="photos-caveat">
         <strong>{t("photos.demoTitle")}</strong>
@@ -113,7 +134,7 @@ function PhotoWorkspace({
       ) : compare ? (
         <CompareWorkspace photos={photos.data} />
       ) : (
-        <Gallery photos={photos.data} />
+        <Gallery photos={photos.data} patientId={patientId} />
       )}
     </div>
   );
@@ -146,24 +167,34 @@ function PhotoImage({
   );
 }
 
-function PhotoMeta({ photo }: { photo: Photo }) {
+function PhotoMeta({ photo, tag }: { photo: Photo; tag?: PhotoTag }) {
   const { t, i18n } = useTranslation();
+  const effective: PhotoTag = tag ?? {
+    category: photo.category,
+    bodyArea: photo.bodyArea,
+    viewpoint: photo.viewpoint ?? "",
+  };
   const date = new Intl.DateTimeFormat(
     i18n.language === "th" ? "th-TH" : "en-GB",
     { dateStyle: "medium", timeStyle: "short" },
   ).format(new Date(photo.takenAt));
+  const area = ["face", "scalp", "body"].includes(effective.bodyArea)
+    ? t(`photos.area.${effective.bodyArea}`)
+    : effective.bodyArea;
+  const view = ["front", "left", "right"].includes(effective.viewpoint)
+    ? t(`photos.view.${effective.viewpoint}`)
+    : photo.viewpoint === "synthetic-frame-v1"
+      ? t("photos.syntheticView")
+      : t("photos.unknownView");
   return (
     <>
-      <strong>{t(`photos.category.${photo.category}`)}</strong>
+      <strong>{t(`photos.category.${effective.category}`)}</strong>
       <span>{photo.id}</span>
       <span>
-        {t("photos.area")}: {photo.bodyArea}
+        {t("photos.area")}: {area}
       </span>
       <span>
-        {t("photos.view")}:{" "}
-        {photo.viewpoint === "synthetic-frame-v1"
-          ? t("photos.syntheticView")
-          : t("photos.unknownView")}
+        {t("photos.view")}: {view}
       </span>
       <time dateTime={photo.takenAt}>{date}</time>
     </>
@@ -191,14 +222,30 @@ function Consent({ photos }: { photos: Photo[] }) {
   );
 }
 
-function Gallery({ photos }: { photos: Photo[] }) {
+function Gallery({
+  photos,
+  patientId,
+}: {
+  photos: Photo[];
+  patientId: string;
+}) {
   const { t } = useTranslation();
+  const [tags, setTags] = useState<Record<string, PhotoTag>>({});
+  const [consentOpen, setConsentOpen] = useState(false);
+  const [tagSaved, setTagSaved] = useState(false);
   return (
     <>
-      <section className="photos-card">
-        <h3>{t("photos.intake")}</h3>
-        <p>{t("photos.intakeUnavailable")}</p>
-      </section>
+      <PhotoIntake photos={photos} onRecordConsent={() => setConsentOpen(true)} />
+      <ConsentCapture
+        patientId={patientId}
+        open={consentOpen}
+        onClose={() => setConsentOpen(false)}
+      />
+      {tagSaved && (
+        <p className="photos-consent-state" role="status">
+          {t("photos.tagLocal")}
+        </p>
+      )}
       <section className="photos-card">
         <div className="photos-section-head">
           <div>
@@ -208,21 +255,36 @@ function Gallery({ photos }: { photos: Photo[] }) {
           <span>{photos.length}</span>
         </div>
         <div className="photos-grid">
-          {photos.map((photo) => (
-            <figure className="photos-tile" key={photo.id}>
-              <div className="photos-image">
-                <PhotoImage photo={photo} />
-              </div>
-              <figcaption>
-                <PhotoMeta photo={photo} />
-                <span
-                  className={`photos-badge photos-badge--${photo.consentStatus}`}
-                >
-                  {t(`photos.consent.${photo.consentStatus}`)}
-                </span>
-              </figcaption>
-            </figure>
-          ))}
+          {photos.map((photo) => {
+            const tag = tags[photo.id] ?? {
+              category: photo.category,
+              bodyArea: photo.bodyArea,
+              viewpoint: photo.viewpoint ?? "",
+            };
+            return (
+              <figure className="photos-tile" key={photo.id}>
+                <div className="photos-image">
+                  <PhotoImage photo={photo} />
+                </div>
+                <figcaption>
+                  <PhotoMeta photo={photo} tag={tag} />
+                  <span
+                    className={`photos-badge photos-badge--${photo.consentStatus}`}
+                  >
+                    {t(`photos.consent.${photo.consentStatus}`)}
+                  </span>
+                  <TagEditor
+                    photo={photo}
+                    tag={tag}
+                    onSave={(next) => {
+                      setTags((current) => ({ ...current, [photo.id]: next }));
+                      setTagSaved(true);
+                    }}
+                  />
+                </figcaption>
+              </figure>
+            );
+          })}
         </div>
       </section>
     </>
@@ -273,11 +335,20 @@ function CompareWorkspace({ photos }: { photos: Photo[] }) {
         </label>
       </div>
       {left && right && compatible(left, right) ? (
-        <Comparison
-          key={`${left.id}:${right.id}`}
-          before={left}
-          after={right}
-        />
+        <>
+          <Comparison
+            key={`${left.id}:${right.id}`}
+            before={left}
+            after={right}
+          />
+          {sampleFramesFor(left.patientId).length === 0 && (
+            <AnnotationWorkspace
+              key={`annotate:${left.id}:${right.id}`}
+              patientId={left.patientId}
+              photos={[left, right]}
+            />
+          )}
+        </>
       ) : (
         <StatePanel
           kind="empty"
@@ -350,11 +421,19 @@ function Comparison({ before, after }: { before: Photo; after: Photo }) {
 
 function PhotoPage({ compare }: { compare: boolean }) {
   const { t } = useTranslation();
+  const { id } = useParams();
   return (
     <>
       <PageHeader title={t(compare ? "photos.compare" : "photos.gallery")} />
       <div className="shell-page-body">
         <PhotoGate compare={compare} />
+        {/* PAT-05 annotation is fully client-side over the authored sample
+            frames, so it renders even when the proxy photo read is empty. */}
+        {compare &&
+          id !== undefined &&
+          sampleFramesFor(id).length > 0 && (
+            <AnnotationWorkspace patientId={id} />
+          )}
       </div>
     </>
   );

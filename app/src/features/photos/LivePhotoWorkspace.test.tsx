@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { Route, Routes } from "react-router-dom";
 import { expect, it, vi } from "vitest";
+import { ROUTES } from "../../app/routes";
 import type { CapabilityMap } from "../../domain/capability";
 import { server } from "../../test/msw/server";
 import { renderWithFixtures } from "../../test/render";
@@ -323,4 +324,26 @@ it("shows a read error instead of unverified photos", async () => {
   );
   expect(await screen.findByText(/ไม่สามารถโหลดหรือตรวจสอบภาพ/)).toBeVisible();
   expect(screen.queryByRole("img")).toBeNull();
+});
+
+it("returns to the PAT-04 patient photo surface", async () => {
+  renderPage("/clinic/lab/photos/workspace-1", {
+    "write.photo.upload": "enabled",
+  });
+  server.use(
+    http.get("*/api/live/synthetic-patients", () =>
+      HttpResponse.json({
+        items: [
+          {
+            workspace_patient_id: "workspace-1",
+            native_patient_id: "native-1",
+            display_name: "Lab patient",
+          },
+        ],
+      }),
+    ),
+  );
+  expect(
+    await screen.findByRole("link", { name: "กลับไปหน้าภาพถ่ายผู้ป่วย" }),
+  ).toHaveAttribute("href", ROUTES.photos("workspace-1"));
 });

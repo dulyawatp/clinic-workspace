@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { expect, it, vi } from "vitest";
 import { useSession } from "../../app/SessionProvider";
+import { ROUTES } from "../../app/routes";
 import { useLocale } from "../../i18n/LocaleProvider";
 import { createHandlers } from "../../test/msw/handlers";
 import { server } from "../../test/msw/server";
@@ -75,17 +76,19 @@ it.each(["DOC", "REC", "NUR"] as const)(
     const table = await screen.findByRole("table");
     expect(within(table).getByText("Live Example")).toBeVisible();
     expect(within(table).getByText("workspace-1")).toBeVisible();
-    expect(within(table).getByText("Live Example")).toHaveAttribute(
-      "data-label",
-      "ผู้ป่วย",
-    );
+    expect(
+      within(table).getByText("Live Example").closest("td"),
+    ).toHaveAttribute("data-label", "ผู้ป่วย");
     expect(within(table).getByText("workspace-1")).toHaveAttribute(
       "data-label",
       "รหัสอ้างอิงพื้นที่ทำงาน",
     );
     expect(screen.queryByText("native-1")).toBeNull();
     expect(screen.queryByText("สมชาย ใจดี")).toBeNull();
-    expect(within(table).queryByRole("link")).toBeNull();
+    const open = within(table).getByRole("link", {
+      name: /เปิดระเบียน|open record/i,
+    });
+    expect(open).toHaveAttribute("href", ROUTES.patient("workspace-1"));
     expect(
       screen.queryByRole("button", { name: /ลงทะเบียน|register/i }),
     ).toBeNull();

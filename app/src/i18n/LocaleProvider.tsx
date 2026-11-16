@@ -10,6 +10,7 @@ import {
 } from "react";
 import { I18nextProvider } from "react-i18next";
 import { initI18n, type Locale } from "./index";
+import { storeLocale } from "./locale-storage";
 
 export type LocaleContextValue = {
   locale: Locale;
@@ -31,11 +32,16 @@ export function LocaleProvider({
   const setLocale = useCallback(
     (next: Locale) => {
       setLocaleState(next);
+      // Only an explicit choice is persisted: rendering in a language is never
+      // treated as a preference, so nothing is written for a first-time visitor.
+      storeLocale(next);
       void i18n.changeLanguage(next);
     },
     [i18n],
   );
 
+  // `<html lang>` follows the rendered language for screen readers, search and
+  // correct Thai/English font shaping.
   useEffect(() => {
     document.documentElement.lang = locale;
   }, [locale]);

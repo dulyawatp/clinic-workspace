@@ -21,6 +21,32 @@ import {
  */
 const credential = primaryCredential();
 
+/** Mirrors `ROUTES.livePhotos`: a role-guarded redirect, not a page. */
+const LEGACY_LAB_INDEX = "/clinic/lab/photos";
+/** Mirrors `ROUTES.livePhotosPatient`: the designed PAT-04 workspace. */
+const LIVE_PHOTO_WORKSPACE = (reference: string) =>
+  `/clinic/patients/${encodeURIComponent(reference)}/live-photos`;
+/** The allow-listed synthetic mapping a clinician may read. */
+const LIVE_PATIENTS = "/api/live/synthetic-patients";
+
+/**
+ * The one workspace reference the browse scenario needs, read from the
+ * allow-listed synthetic mapping. Every other field is ignored, and no value
+ * from the body is logged, attached or asserted in a message.
+ */
+function firstWorkspacePatient(body: unknown): string {
+  if (!body || typeof body !== "object" || !("items" in body)) return "";
+  const items = (body as { items?: unknown }).items;
+  if (!Array.isArray(items)) return "";
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const id = (item as { workspace_patient_id?: unknown })
+      .workspace_patient_id;
+    if (typeof id === "string" && id.trim() !== "") return id;
+  }
+  return "";
+}
+
 interface GalleryState {
   tiles: number;
   images: number;
@@ -159,24 +185,30 @@ test("physician browses live lab photos read-only in Thai and English", async ({
   await signIn(page, live);
   await waitForShell(page);
 
-  // Live lab entry: the patient list only renders for an authenticated live-mode
-  // clinician, so reaching this branch proves live mode rather than fixtures.
-  await page.goto("/clinic/lab/photos");
-  await expect(page.getByRole("heading", { name: TH.labTitle })).toBeVisible();
-  await expect(page.getByRole("heading", { name: TH.choose })).toBeVisible();
+  // The legacy lab-photo index no longer lists patients: it is a role-guarded
+  // redirect, so an authenticated clinician lands on the designed home.
+  await page.goto(LEGACY_LAB_INDEX);
+  await page.waitForURL((url) => url.pathname === "/clinic", {
+    timeout: 40_000,
+  });
+  await expect(page.getByTestId("role-home")).toBeVisible();
 
-  const links = page.locator(".photos-live-list a");
-  const patients = await links.count();
+  // Reaching the workspace needs a patient: take the allow-listed synthetic
+  // workspace reference from the mapping the clinician may read, then use the
+  // legacy detail address, which forwards to the designed PAT-04 route.
+  const mapping = await page.request.get(LIVE_PATIENTS);
+  expect(mapping.status()).toBe(200);
+  const reference = firstWorkspacePatient(await mapping.json());
   expect(
-    patients,
+    reference.length,
     "the deployed synthetic patient mapping must list at least one patient",
   ).toBeGreaterThan(0);
-  await expect(links.first()).toHaveAttribute(
-    "href",
-    /^\/clinic\/lab\/photos\/[^/]+$/,
+  await page.goto(`${LEGACY_LAB_INDEX}/${encodeURIComponent(reference)}`);
+  await page.waitForURL(
+    (url) => url.pathname === LIVE_PHOTO_WORKSPACE(reference),
+    { timeout: 40_000 },
   );
-  await links.first().click();
-  await expect(page).toHaveURL(/\/clinic\/lab\/photos\/[^/]+$/);
+  await expect(page.getByRole("heading", { name: TH.labTitle })).toBeVisible();
 
   // Thai is the deployed default locale.
   await expectReadOnlyGallery(page, TH, statuses, "th");

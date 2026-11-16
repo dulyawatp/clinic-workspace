@@ -211,11 +211,11 @@ it("initial cookie check failure stays protected and recovers without login", as
   render(<App />);
   await screen.findByRole("alert");
   expect(window.location.pathname).toBe(ROUTES.home);
-  expect(screen.queryByTestId("shell-placeholder")).toBeNull();
+  expect(screen.queryByTestId("role-home")).toBeNull();
   expect(screen.queryByLabelText("รหัสผ่าน")).toBeNull();
   expect(sessionStorage.getItem(RETURN_TO_KEY)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "ตรวจสอบเซสชันอีกครั้ง" }));
-  expect(await screen.findByTestId("shell-placeholder")).toBeVisible();
+  expect(await screen.findByTestId("role-home")).toBeVisible();
   expect(
     requests.mock.calls
       .filter(([url]) => url === "/api/session")

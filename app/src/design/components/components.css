@@ -1,0 +1,553 @@
+/* ============================================================
+   Preclinic shared components
+   Ported from the design project's `clinic.css` / `components.css` component
+   specs, with `pc-` namespaced classes so existing feature stylesheets cannot
+   collide. Values come from `design/tokens.css`.
+   ============================================================ */
+
+/* --- page frame ------------------------------------------- */
+.pc-page {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Overview header band: white surface, hairline divider, 20px 24px. */
+.pc-greeting {
+  padding: var(--pc-sp-5) var(--pc-sp-6);
+  background: var(--pc-surface);
+  border-bottom: 1px solid var(--pc-border);
+  color: var(--pc-fg);
+}
+
+.pc-greeting__inner {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--pc-sp-5);
+  flex-wrap: wrap;
+  max-width: var(--pc-content-max);
+  margin: 0 auto;
+  min-width: 0;
+}
+
+.pc-greeting__content {
+  flex: 1 1 15rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pc-greeting__eyebrow {
+  margin-bottom: var(--pc-sp-2);
+  color: var(--pc-ink-3);
+  font-size: var(--pc-fs-micro);
+  font-weight: 700;
+  letter-spacing: var(--pc-tracking-wide);
+  text-transform: uppercase;
+}
+
+.pc-greeting__title {
+  margin: 0;
+  color: var(--pc-fg);
+  font-size: var(--pc-fs-h1);
+  font-weight: 600;
+  line-height: var(--pc-lh-tight);
+  letter-spacing: var(--pc-tracking-tight);
+  overflow-wrap: anywhere;
+}
+
+.pc-greeting__sub {
+  max-width: 56ch;
+  margin: var(--pc-sp-2) 0 0;
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-small);
+}
+
+.pc-greeting__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--pc-sp-2);
+  flex-wrap: wrap;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.pc-crumb {
+  display: flex;
+  align-items: center;
+  gap: var(--pc-sp-2);
+  margin-bottom: var(--pc-sp-3);
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-micro);
+  flex-wrap: wrap;
+}
+
+.pc-crumb a {
+  color: var(--pc-ink-2);
+}
+
+.pc-crumb a:hover {
+  color: var(--pc-primary);
+}
+
+.pc-page__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pc-sp-6);
+  width: 100%;
+  max-width: var(--pc-content-max);
+  margin: 0 auto;
+  padding: var(--pc-sp-6) var(--pc-gutter) 0;
+  min-width: 0;
+}
+
+/* --- buttons ---------------------------------------------- */
+.pc-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--pc-sp-2);
+  min-width: var(--pc-tap);
+  min-height: var(--pc-tap);
+  max-width: 100%;
+  padding: 0 var(--pc-sp-4);
+  border: 1px solid transparent;
+  border-radius: var(--pc-radius-s);
+  background: var(--pc-surface);
+  color: var(--pc-fg);
+  font-family: var(--pc-font-sans);
+  font-size: var(--pc-fs-body);
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: center;
+  text-decoration: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition:
+    background-color var(--pc-dur-hover) var(--pc-ease),
+    border-color var(--pc-dur-hover) var(--pc-ease),
+    color var(--pc-dur-hover) var(--pc-ease);
+}
+
+.pc-button--primary {
+  background: var(--pc-primary);
+  border-color: var(--pc-primary);
+  color: var(--pc-surface);
+  box-shadow: 0 1px 2px rgba(10, 27, 57, 0.05);
+}
+
+.pc-button--primary:hover:not(:disabled, [aria-disabled="true"]) {
+  background: var(--pc-primary-hover);
+  border-color: var(--pc-primary-hover);
+  color: var(--pc-surface);
+}
+
+.pc-button--primary:active:not(:disabled, [aria-disabled="true"]) {
+  background: var(--pc-primary-active);
+  border-color: var(--pc-primary-active);
+}
+
+/* Medical cyan always carries clinical ink: white on cyan is 1.7:1. */
+.pc-button--cyan {
+  background: var(--pc-accent);
+  border-color: var(--pc-accent);
+  color: var(--pc-fg);
+}
+
+.pc-button--cyan:hover:not(:disabled, [aria-disabled="true"]) {
+  background: var(--pc-secondary-hover);
+  border-color: var(--pc-secondary-hover);
+  color: var(--pc-fg);
+}
+
+.pc-button--secondary {
+  background: var(--pc-surface);
+  border-color: var(--pc-border);
+  color: var(--pc-fg);
+}
+
+.pc-button--secondary:hover:not(:disabled, [aria-disabled="true"]) {
+  border-color: var(--pc-field-border);
+  background: var(--pc-sage);
+}
+
+.pc-button--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--pc-fg);
+}
+
+.pc-button--ghost:hover:not(:disabled, [aria-disabled="true"]) {
+  background: var(--pc-sage);
+}
+
+.pc-button--danger {
+  background: var(--pc-surface);
+  border-color: var(--pc-danger);
+  color: var(--pc-danger);
+}
+
+.pc-button--danger:hover:not(:disabled, [aria-disabled="true"]) {
+  background: var(--pc-danger-wash);
+}
+
+.pc-button--sm {
+  padding: 0 var(--pc-sp-3);
+  font-size: var(--pc-fs-small);
+}
+
+.pc-button--block {
+  width: 100%;
+}
+
+.pc-button:focus-visible {
+  outline: none;
+  box-shadow: var(--pc-ring);
+}
+
+.pc-button--cyan:focus-visible {
+  box-shadow: var(--pc-ring-cyan);
+}
+
+.pc-button--danger:focus-visible {
+  box-shadow: var(--pc-ring-danger);
+}
+
+.pc-button:disabled,
+.pc-button[aria-disabled="true"] {
+  background: var(--pc-sage-deep);
+  border-color: var(--pc-border);
+  color: var(--pc-muted);
+  cursor: not-allowed;
+}
+
+/* --- status badges: text is mandatory, colour is secondary -- */
+.pc-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--pc-sp-2);
+  padding: 3px 10px;
+  border: 1px solid var(--pc-border);
+  border-radius: var(--pc-radius-pill);
+  background: var(--pc-surface);
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-micro);
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.pc-badge--success {
+  color: var(--pc-ok);
+  background: var(--pc-ok-wash);
+  border-color: color-mix(in oklch, var(--pc-status-success) 25%, var(--pc-border));
+}
+
+.pc-badge--warning {
+  color: var(--pc-warn);
+  background: var(--pc-warn-wash);
+  border-color: color-mix(in oklch, var(--pc-status-warning) 30%, var(--pc-border));
+}
+
+.pc-badge--danger {
+  color: var(--pc-danger);
+  background: var(--pc-danger-wash);
+  border-color: color-mix(in oklch, var(--pc-status-danger) 25%, var(--pc-border));
+}
+
+.pc-badge--info {
+  color: var(--pc-info);
+  background: var(--pc-info-wash);
+  border-color: color-mix(in oklch, var(--pc-status-info) 25%, var(--pc-border));
+}
+
+.pc-badge--demo {
+  color: var(--pc-demo);
+  background: var(--pc-demo-wash);
+  border-color: color-mix(in oklch, var(--pc-primary) 22%, var(--pc-border));
+}
+
+/* --- cards ------------------------------------------------ */
+.pc-card {
+  min-width: 0;
+  background: var(--pc-surface);
+  border: var(--pc-hair);
+  border-radius: var(--pc-radius-l);
+  box-shadow: var(--pc-shadow-card);
+}
+
+.pc-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--pc-sp-4);
+  flex-wrap: wrap;
+  padding: var(--pc-sp-4) var(--pc-sp-5);
+  border-bottom: var(--pc-hair);
+}
+
+.pc-card__heading {
+  min-width: 0;
+}
+
+.pc-card__title {
+  margin: 0;
+  color: var(--pc-fg);
+  font-size: var(--pc-fs-h3);
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.pc-card__hint {
+  margin: 2px 0 0;
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-micro);
+}
+
+.pc-card__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--pc-sp-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.pc-card__body {
+  padding: var(--pc-sp-5);
+  min-width: 0;
+}
+
+.pc-card__body--flush {
+  padding: 0;
+}
+
+.pc-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--pc-sp-3);
+  flex-wrap: wrap;
+  padding: var(--pc-sp-3) var(--pc-sp-5);
+  border-top: var(--pc-hair);
+  background: var(--pc-sage);
+  border-radius: 0 0 var(--pc-radius-l) var(--pc-radius-l);
+}
+
+/* --- tables: hairline rows inside a horizontal scroll wrapper -- */
+.pc-tablewrap {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: 0 0 var(--pc-radius-l) var(--pc-radius-l);
+}
+
+.pc-data {
+  width: 100%;
+  min-width: 40rem;
+  border-collapse: collapse;
+  font-size: var(--pc-fs-table);
+  color: var(--pc-fg);
+}
+
+.pc-data caption {
+  padding: var(--pc-sp-3) var(--pc-sp-4);
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-micro);
+  text-align: start;
+}
+
+.pc-data th {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--pc-border);
+  background: var(--pc-sage);
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-small);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: start;
+  white-space: nowrap;
+}
+
+.pc-data td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--pc-border);
+  font-size: var(--pc-fs-table);
+  vertical-align: middle;
+}
+
+.pc-data tbody tr:hover {
+  background: var(--pc-primary-wash);
+}
+
+.pc-data tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.pc-data .pc-num {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pc-table-empty {
+  padding: var(--pc-sp-6) var(--pc-sp-4);
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-small);
+  text-align: start;
+}
+
+/* --- banners ---------------------------------------------- */
+.pc-banner {
+  display: flex;
+  gap: var(--pc-sp-3);
+  padding: var(--pc-sp-4);
+  border: 1px solid var(--pc-border);
+  border-radius: var(--pc-radius-m);
+  background: var(--pc-sage);
+  color: var(--pc-fg);
+  font-size: var(--pc-fs-small);
+  line-height: 1.55;
+}
+
+.pc-banner__body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pc-banner__title {
+  margin-bottom: 2px;
+  font-weight: 650;
+}
+
+.pc-banner--demo {
+  background: var(--pc-demo-wash);
+  border-color: color-mix(in oklch, var(--pc-primary) 22%, var(--pc-border));
+}
+
+.pc-banner--warn {
+  background: var(--pc-warn-wash);
+  border-color: color-mix(in oklch, var(--pc-status-warning) 30%, var(--pc-border));
+}
+
+.pc-banner--danger {
+  background: var(--pc-danger-wash);
+  border-color: color-mix(in oklch, var(--pc-status-danger) 30%, var(--pc-border));
+}
+
+/* --- empty / unavailable ---------------------------------- */
+.pc-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--pc-sp-3);
+  padding: var(--pc-sp-10) var(--pc-sp-5);
+  text-align: center;
+  color: var(--pc-ink-2);
+}
+
+.pc-empty__title {
+  margin: 0;
+  color: var(--pc-fg);
+  font-size: var(--pc-fs-h3);
+  font-weight: 600;
+}
+
+.pc-empty p {
+  max-width: 44ch;
+  margin: 0;
+  font-size: var(--pc-fs-small);
+}
+
+/* --- structural skeletons (no invented numbers or labels) -- */
+.pc-skeleton-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pc-sp-3);
+}
+
+.pc-skeleton {
+  height: 2.75rem;
+  border-radius: var(--pc-radius-s);
+  background: var(--pc-sage-deep);
+}
+
+.pc-skeleton--short {
+  width: 40%;
+}
+
+/* --- drawer ----------------------------------------------- */
+.pc-drawer {
+  width: min(28rem, 92vw);
+  max-height: 100dvh;
+  margin: 0 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-left: var(--pc-hair);
+  background: var(--pc-surface);
+  color: var(--pc-fg);
+}
+
+.pc-drawer::backdrop {
+  background: rgba(10, 27, 57, 0.38);
+}
+
+.pc-drawer__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--pc-sp-4);
+  padding: var(--pc-sp-4) var(--pc-sp-5);
+  border-bottom: var(--pc-hair);
+}
+
+.pc-drawer__title {
+  margin: 0;
+  font-size: var(--pc-fs-h2);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.pc-drawer__body {
+  padding: var(--pc-sp-5);
+  overflow-y: auto;
+}
+
+.pc-drawer__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--pc-sp-2);
+  flex-wrap: wrap;
+  padding: var(--pc-sp-4) var(--pc-sp-5);
+  border-top: var(--pc-hair);
+  background: var(--pc-sage);
+}
+
+/* --- focus ring safeguard for shared controls --------------- */
+.pc-button:focus-visible,
+.pc-drawer button:focus-visible,
+.pc-drawer a:focus-visible {
+  outline: none;
+  box-shadow: var(--pc-ring);
+}
+
+@media (max-width: 767px) {
+  .pc-greeting {
+    padding: var(--pc-sp-4) var(--pc-gutter);
+  }
+
+  .pc-page__body {
+    padding: var(--pc-sp-5) var(--pc-gutter) 0;
+  }
+
+  .pc-data {
+    min-width: 34rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pc-button {
+    transition: none;
+  }
+}

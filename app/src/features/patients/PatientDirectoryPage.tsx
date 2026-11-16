@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Link, useNavigate } from "react-router-dom";
 import { RequireSession } from "../../app/guards";
+import { ROUTES } from "../../app/routes";
 import { useSession } from "../../app/SessionProvider";
 import { getCapability } from "../../domain/capability";
 import { toI18nKey } from "../../domain/errors";
@@ -12,6 +14,8 @@ import { useCapabilities } from "../shell/CapabilityProvider";
 import { useEncounterDraft } from "./EncounterDraft";
 import { useLivePatients } from "./live-directory";
 import { PatientRow } from "./PatientRow";
+import { PatientWriteForm } from "./PatientWriteForm";
+import { nativeTransportEnabled } from "../../transport/native/flag";
 import { PATIENTS_PAGE_SIZE, usePatients } from "./usePatients";
 
 function DirectoryRows({
@@ -216,7 +220,18 @@ function LiveDirectoryRows({
                     data-label={t("search.patientName")}
                     className="patients-name"
                   >
-                    {patient.display_name}
+                    <div>
+                      <span className="patients-name-text">
+                        {patient.display_name}
+                      </span>
+                      <Link
+                        className="patients-open"
+                        to={ROUTES.patient(patient.workspace_patient_id)}
+                        aria-label={`${t("action.openRecord")} · ${patient.display_name} · ${patient.workspace_patient_id}`}
+                      >
+                        {t("action.openRecord")}
+                      </Link>
+                    </div>
                   </td>
                   <td
                     headers="directory-reference"
@@ -278,6 +293,7 @@ function DirectoryContent() {
   const { t } = useTranslation();
   const { caps } = useCapabilities();
   const { session } = useSession();
+  const navigate = useNavigate();
   const live = session?.mode === "live";
   const [text, setText] = useState("");
   const [settledText, setSettledText] = useState<string | null>("");
@@ -380,13 +396,16 @@ function DirectoryContent() {
                 capability="write.patient.create"
                 reason={t("patients.registerBlocked")}
               >
-                <Button>{t("action.register")}</Button>
+                <Button onClick={() => navigate(ROUTES.patientNew)}>
+                  {t("action.register")}
+                </Button>
               </WriteGate>
             )}
           </form>
           <p id={hintId} className="patients-hint">
             {t(live ? "patients.liveSearchHint" : "patients.searchHint")}
           </p>
+          {live && nativeTransportEnabled() && getCapability(caps, "write.patient.create") === "enabled" && <PatientWriteForm />}
           {canDraft && draft.panel}
           {settledText !== null && !composing ? (
             live ? (

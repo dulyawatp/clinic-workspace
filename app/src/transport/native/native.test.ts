@@ -5,6 +5,7 @@ import { server } from "../../test/msw/server";
 import { fetchNativeDirectoryBody } from "./directory";
 import { nativeTransportEnabled } from "./flag";
 import {
+  classifyNativeForbidden,
   clearNativeCsrfToken,
   fetchNativeSession,
   nativeCsrfToken,
@@ -69,10 +70,9 @@ describe("native session bootstrap", () => {
       mode: "live",
       sessionEpoch: "native-epoch-1",
       user: { id: "native|u1", displayName: "Native User", roles: ["DOC"] },
-      // Read-only surface: native write endpoints do not exist yet.
       capabilities: {
         "read.patient": "read_only",
-        "write.patient.create": "read_only",
+        "write.patient.create": "enabled",
         "write.encounter.draft": "read_only",
       },
     });
@@ -84,6 +84,65 @@ describe("native session bootstrap", () => {
         cache: "no-store",
       }),
     );
+  });
+
+  it("enables only explicitly allowed patient writes and fails closed for other values", async () => {
+    serveBootstrap(liveMessage({ capabilities: {
+      "write.patient.create": "enabled",
+      "write.patient.update": "enabled",
+      "write.encounter.draft": "enabled",
+      "write.unknown": "enabled",
+      "read.patient": "enabled",
+    } }));
+    expect((await fetchNativeSession())?.capabilities).toEqual({
+      "write.patient.create": "enabled",
+      "write.patient.update": "enabled",
+      "write.encounter.draft": "read_only",
+      "read.patient": "read_only",
+    });
+    for (const value of [null, true, {}, "ENABLED", "read_only", "denied", ""]) {
+      serveBootstrap(liveMessage({ capabilities: { "write.patient.create": value, "write.patient.update": value } }));
+      expect((await fetchNativeSession())?.capabilities).toEqual({
+        "write.patient.create": "read_only",
+        "write.patient.update": "read_only",
+      });
+    }
+  });
+
+  it("enables appointment book, reschedule and check-in but never cancellation", async () => {
+    serveBootstrap(
+      liveMessage({
+        capabilities: {
+          "write.appointment.book": "enabled",
+          "write.appointment.reschedule": "enabled",
+          "write.appointment.checkin": "enabled",
+          "write.appointment.cancel": "enabled",
+        },
+      }),
+    );
+    expect((await fetchNativeSession())?.capabilities).toEqual({
+      "write.appointment.book": "enabled",
+      "write.appointment.reschedule": "enabled",
+      "write.appointment.checkin": "enabled",
+      "write.appointment.cancel": "read_only",
+    });
+
+    for (const value of [null, true, {}, "ENABLED", "enabled ", "denied"]) {
+      serveBootstrap(
+        liveMessage({
+          capabilities: {
+            "write.appointment.book": value,
+            "write.appointment.reschedule": value,
+            "write.appointment.checkin": value,
+          },
+        }),
+      );
+      expect((await fetchNativeSession())?.capabilities).toEqual({
+        "write.appointment.book": "read_only",
+        "write.appointment.reschedule": "read_only",
+        "write.appointment.checkin": "read_only",
+      });
+    }
   });
 
   it("keeps the CSRF token in memory only", async () => {
@@ -366,6 +425,126 @@ describe("bootstrap credential invalidation", () => {
   });
 });
 
+describe("native forbidden classification", () => {
+  it("classifies without replacing the accepted token", async () => {
+    serveBootstrap(liveMessage());
+    await fetchNativeSession();
+    expect(nativeCsrfToken()).toBe(TOKEN);
+
+    server.use(
+      http.get(BOOTSTRAP, () =>
+        HttpResponse.json({
+          message: liveMessage({
+            sessionEpoch: "probe-epoch",
+            csrfToken: "probe-token",
+          }),
+        }),
+      ),
+    );
+
+    await expect(
+      classifyNativeForbidden(new AbortController().signal),
+    ).resolves.toEqual({ code: "FORBIDDEN", retryable: false });
+
+    expect(nativeCsrfToken()).toBe(TOKEN);
+  });
+
+  it("leaves credential invalidation to the provider when no session remains", async () => {
+    serveBootstrap(liveMessage());
+    await fetchNativeSession();
+    expect(nativeCsrfToken()).toBe(TOKEN);
+
+    server.use(
+      http.get(BOOTSTRAP, () =>
+        HttpResponse.json({ exc_type: "AuthenticationError" }, { status: 401 }),
+      ),
+    );
+
+    await expect(
+      classifyNativeForbidden(new AbortController().signal),
+    ).resolves.toEqual({ code: "AUTH_EXPIRED", retryable: false });
+
+    // The provider owns the token lifecycle; classification is read-only.
+    expect(nativeCsrfToken()).toBe(TOKEN);
+  });
+
+  it("does not supersede a deferred identity refresh", async () => {
+    const pending: Array<(response: Response) => void> = [];
+    let calls = 0;
+    server.use(
+      http.get(BOOTSTRAP, () => {
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<Response>((resolve) => {
+            pending.push(resolve);
+          });
+        }
+        return HttpResponse.json({
+          message: liveMessage({
+            sessionEpoch: "probe-epoch",
+            csrfToken: "probe-token",
+          }),
+        });
+      }),
+    );
+
+    const refresh = fetchNativeSession();
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    await expect(
+      classifyNativeForbidden(new AbortController().signal),
+    ).resolves.toEqual({ code: "FORBIDDEN", retryable: false });
+    expect(nativeCsrfToken()).toBeNull();
+
+    pending[0]?.(
+      HttpResponse.json({
+        message: liveMessage({
+          sessionEpoch: "refresh-epoch",
+          csrfToken: "refresh-token",
+        }),
+      }),
+    );
+    await expect(refresh).resolves.toMatchObject({
+      sessionEpoch: "refresh-epoch",
+    });
+    expect(nativeCsrfToken()).toBe("refresh-token");
+  });
+
+  it("does not invalidate a deferred logout token lookup", async () => {
+    const pending: Array<(response: Response) => void> = [];
+    const posted: Array<string | null> = [];
+    let calls = 0;
+    server.use(
+      http.get(BOOTSTRAP, () => {
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<Response>((resolve) => {
+            pending.push(resolve);
+          });
+        }
+        return HttpResponse.json({
+          message: liveMessage({ csrfToken: "probe-token" }),
+        });
+      }),
+      http.post(LOGOUT, ({ request }) => {
+        posted.push(request.headers.get(CSRF_HEADER));
+        return HttpResponse.json({ message: "Logged Out" });
+      }),
+    );
+
+    const logout = nativeLogout();
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    await expect(
+      classifyNativeForbidden(new AbortController().signal),
+    ).resolves.toEqual({ code: "FORBIDDEN", retryable: false });
+
+    pending[0]?.(HttpResponse.json({ message: liveMessage() }));
+    await expect(logout).resolves.toBeUndefined();
+    expect(posted).toEqual([TOKEN]);
+  });
+});
+
 describe("native login", () => {
   it("posts JSON credentials to the Frappe login method and returns the bootstrapped session", async () => {
     const received: Request[] = [];
@@ -625,7 +804,6 @@ describe("native directory", () => {
     const items = [
       {
         workspace_patient_id: "workspace-1",
-        native_patient_id: "native-1",
         display_name: "Native Example",
       },
     ];
@@ -641,7 +819,6 @@ describe("native directory", () => {
   it.each([
     [401, "AUTH_EXPIRED", false],
     [404, "UNSUPPORTED", false],
-    [403, "FORBIDDEN", false],
   ] as const)(
     "maps HTTP %s to %s without retry",
     async (status, code, retryable) => {
@@ -655,6 +832,35 @@ describe("native directory", () => {
       ).rejects.toEqual({ code, retryable });
     },
   );
+
+  it("maps a 403 from a guest/expired session to AUTH_EXPIRED", async () => {
+    server.use(
+      http.get(DIRECTORY, () =>
+        HttpResponse.json({ exc_type: "PermissionError" }, { status: 403 }),
+      ),
+      http.get(BOOTSTRAP, () =>
+        HttpResponse.json(
+          { exc_type: "AuthenticationError" },
+          { status: 401 },
+        ),
+      ),
+    );
+    await expect(
+      fetchNativeDirectoryBody(new AbortController().signal),
+    ).rejects.toEqual({ code: "AUTH_EXPIRED", retryable: false });
+  });
+
+  it("keeps a 403 as FORBIDDEN when bootstrap returns an authenticated session", async () => {
+    serveBootstrap(liveMessage());
+    server.use(
+      http.get(DIRECTORY, () =>
+        HttpResponse.json({ exc_type: "PermissionError" }, { status: 403 }),
+      ),
+    );
+    await expect(
+      fetchNativeDirectoryBody(new AbortController().signal),
+    ).rejects.toEqual({ code: "FORBIDDEN", retryable: false });
+  });
 
   it.each([[{}], [{ message: "no items" }]])(
     "rejects a body %j without a Frappe message envelope",

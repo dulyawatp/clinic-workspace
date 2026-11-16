@@ -226,3 +226,167 @@
     padding: 16px;
   }
 }
+
+/* ------------------------------------------------ PAT-04 intake and tags */
+.photos-intake {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.photos-intake-step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--pc-radius-m);
+  min-width: 0;
+}
+
+.photos-intake-step strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.photos-intake-step p {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.photos-intake-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.photos-consent-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  font-size: 0.8125rem;
+}
+
+.photos-consent-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin: 16px 0;
+}
+
+.photos-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.photos-field label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.photos-field input,
+.photos-field select {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--target-min);
+  padding: 10px 12px;
+  border: 1px solid var(--pc-field-border);
+  border-radius: var(--pc-radius-s);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 1rem;
+}
+
+.photos-field input:focus-visible,
+.photos-field select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--pc-ring-cyan);
+}
+
+.photos-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: var(--target-min);
+  padding: 8px 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.photos-check input {
+  width: 1.25rem;
+  height: 1.25rem;
+  margin: 0.1rem 0 0;
+  accent-color: var(--accent);
+  flex: none;
+}
+
+.photos-tag-editor {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--pc-radius-m);
+  background: var(--pc-sage);
+}
+
+.photos-tag-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 600px) {
+  .photos-consent-form {
+    grid-template-columns: 1fr;
+  }
+
+  .photos-intake-step {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+.photos-consent-record {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--pc-radius-l);
+  background: var(--pc-sage);
+  min-width: 0;
+}
+
+.photos-consent-record h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.photos-consent-record p {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.photos-consent-record-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}

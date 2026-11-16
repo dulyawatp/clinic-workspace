@@ -1,12 +1,28 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 import { z } from "zod";
 import { useSession } from "../../app/SessionProvider";
 import { type AppError, toI18nKey } from "../../domain/errors";
 import { mapHttpError } from "../../transport/error-map";
 import { assertLegacyRoute } from "../../transport/native/legacy";
+import { ROUTES } from "../../app/routes";
+import { SampleBanner } from "../../design/components";
+import { opsData } from "../../fixtures/data-ops";
+import { useLocale } from "../../i18n/LocaleProvider";
 import { PageHeader } from "../../ui/PageHeader";
 import { StatePanel } from "../../ui/StatePanel";
+import { SurfaceIcon } from "../clinical/SurfaceIcon";
+import { useOpsCopy } from "../operations/ops-copy";
+import { itemName, purchaseOrdersFor, warehouseName } from "../operations/ops-model";
+import {
+  FilterBar,
+  FilterField,
+  OpsNote,
+  SourceNote,
+  useOpsFormat,
+} from "../operations/ops-ui";
 import "./pharmacy.css";
 
 const text = z
@@ -71,6 +87,10 @@ async function fetchStock(signal: AbortSignal) {
 
 export function PharmacyPage() {
   const { t } = useTranslation();
+  const copy = useOpsCopy();
+  const { locale } = useLocale();
+  const { dateTime } = useOpsFormat();
+  const [warehouse, setWarehouse] = useState("all");
   const { status, session, authGeneration, refresh } = useSession();
   const allowed =
     status === "authenticated" &&
@@ -82,6 +102,17 @@ export function PharmacyPage() {
     queryFn: ({ signal }) => fetchStock(signal),
     retry: false,
   });
+
+  const stock = opsData.stockRows(warehouse === "all" ? undefined : warehouse);
+  const expiring = opsData.expiryRows(
+    warehouse === "all" ? undefined : warehouse,
+    "30",
+  );
+  const openOrders = purchaseOrdersFor(warehouse, "open", "");
+  const recentMovements = opsData.movements
+    .filter((movement) => warehouse === "all" || movement.warehouse === warehouse)
+    .slice(-8)
+    .reverse();
 
   return (
     <>
@@ -162,6 +193,180 @@ export function PharmacyPage() {
             )}
           </section>
         )}
+
+        {allowed ? (
+          <>
+            <SampleBanner
+              label={t("app.demoTag")}
+              title={copy(
+                "ข้อมูลตัวอย่างในเครื่อง · ยังไม่ยืนยันสัญญาเซิร์ฟเวอร์",
+                "Browser-local sample records · server contracts unverified",
+              )}
+            />
+            <SourceNote />
+            <FilterBar>
+              <FilterField label={copy("คลัง", "Warehouse")}>
+                <select
+                  value={warehouse}
+                  onChange={(event) => setWarehouse(event.target.value)}
+                >
+                  <option value="all">{copy("ทั้งหมด", "All")}</option>
+                  {opsData.warehouses.map((row) => (
+                    <option key={row.id} value={row.id}>
+                      {row.name[locale]}
+                    </option>
+                  ))}
+                </select>
+              </FilterField>
+            </FilterBar>
+
+            <section className="pc-kpis" aria-label={t("pharmacy.title")}>
+              {[
+                {
+                  key: "stocked",
+                  label: copy(
+                    "รายการสินค้าและคลัง",
+                    "Stocked item locations",
+                  ),
+                  value: stock.filter((row) => row.onHand > 0).length,
+                  href: `${ROUTES.pharmacyBalances}?state=stocked`,
+                },
+                {
+                  key: "low",
+                  label: copy("ใกล้หมด", "Low stock"),
+                  value: stock.filter((row) => row.low).length,
+                  href: `${ROUTES.pharmacyBalances}?state=low`,
+                },
+                {
+                  key: "out",
+                  label: copy("หมดคลังที่ใช้ได้", "Out of usable stock"),
+                  value: stock.filter((row) => row.out).length,
+                  href: `${ROUTES.pharmacyBalances}?state=out`,
+                },
+                {
+                  key: "expiry",
+                  label: copy(
+                    "หมดอายุภายใน 30 วัน",
+                    "Expiring within 30 days",
+                  ),
+                  value: expiring.length,
+                  href: `${ROUTES.pharmacyBatches}?window=30`,
+                },
+                {
+                  key: "po",
+                  label: copy("ใบสั่งซื้อที่ยังเปิด", "Open purchase orders"),
+                  value: openOrders.length,
+                  href: `${ROUTES.pharmacyPurchasing}?state=open`,
+                },
+              ].map((card) => (
+                <Link
+                  className="pc-kpi"
+                  data-stock-kpi={card.key}
+                  to={card.href}
+                  key={card.key}
+                >
+                  <span className="pc-kpi__label">{card.label}</span>
+                  <strong className="pc-kpi__value">{card.value}</strong>
+                  <span className="pc-kpi__foot">
+                    {warehouse === "all"
+                      ? copy("ทั้งหมด", "All")
+                      : warehouseName(warehouse, locale)}{" "}
+                    · {copy("ภาพรวมปัจจุบัน", "Current snapshot")}
+                  </span>
+                </Link>
+              ))}
+            </section>
+
+            <section className="pc-tilegrid" aria-label={t("pharmacy.title")}>
+              {[
+                {
+                  icon: "chart",
+                  label: copy("ยอดคงเหลือ", "Stock balance"),
+                  to: ROUTES.pharmacyBalances,
+                },
+                {
+                  icon: "layers",
+                  label: copy("ล็อตและวันหมดอายุ", "Batch & expiry"),
+                  to: ROUTES.pharmacyBatches,
+                },
+                {
+                  icon: "download",
+                  label: copy("รับเข้าคลัง", "Receive stock"),
+                  to: ROUTES.pharmacyReceive,
+                },
+                {
+                  icon: "transfer",
+                  label: copy("โอนย้าย", "Transfer"),
+                  to: ROUTES.pharmacyMovements,
+                },
+                {
+                  icon: "truck",
+                  label: copy("จัดซื้อ", "Purchasing"),
+                  to: ROUTES.pharmacyPurchasing,
+                },
+                {
+                  icon: "clipboard",
+                  label: copy("บันทึกใช้จริง", "Actual usage"),
+                  to: `${ROUTES.pharmacyMovements}?tab=usage`,
+                },
+              ].map((tile) => (
+                <Link className="pc-tile" to={tile.to} key={tile.to}>
+                  <span className="pc-tile__icon">
+                    <SurfaceIcon name={tile.icon} />
+                  </span>
+                  <span className="pc-tile__label">{tile.label}</span>
+                  <span className="pc-tile__meta">
+                    {copy("ข้อมูลตัวอย่าง", "Demo data")}
+                  </span>
+                </Link>
+              ))}
+            </section>
+
+            <section
+              className="pharmacy-card"
+              aria-labelledby="pharmacy-movements-heading"
+            >
+              <div className="pharmacy-intro">
+                <h2 id="pharmacy-movements-heading">
+                  {copy("การเคลื่อนไหวล่าสุด", "Recent stock movements")}
+                </h2>
+              </div>
+              {recentMovements.length === 0 ? (
+                <p className="pc-note">
+                  {copy(
+                    "ไม่พบรายการตามตัวกรอง",
+                    "No records match these filters",
+                  )}
+                </p>
+              ) : (
+                recentMovements.map((movement) => (
+                  <div className="pc-listrow" key={movement.id}>
+                    <div className="pc-listrow__grow">
+                      {itemName(movement.itemId, locale)}
+                      <p className="pc-listrow__meta">
+                        {dateTime(movement.at)} ·{" "}
+                        <span className="ops-mono">
+                          {movement.ref} · {movement.batchId}
+                        </span>
+                      </p>
+                    </div>
+                    <span>
+                      {movement.qty > 0 ? "+" : ""}
+                      {movement.qty}
+                    </span>
+                  </div>
+                ))
+              )}
+            </section>
+
+            <OpsNote>
+              {copy(
+                "จำนวนสินค้าเป็นรายการสินค้า–คลัง ใบสั่งซื้อไม่ระบุคลังจะอยู่ในทุกคลังเท่านั้น",
+                "Stock counts use item–location records. POs without warehouse provenance appear only in All warehouses.",
+              )}
+            </OpsNote>
+          </>
+        ) : null}
       </div>
     </>
   );

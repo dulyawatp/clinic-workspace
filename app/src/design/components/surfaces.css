@@ -1,0 +1,369 @@
+/* ============================================================
+   Task-5 surface primitives
+   KPI links, task tiles, definition lists and form fields from the
+   prototype's `components.css` / `clinic.css`. They live here because the
+   clinical and nursing surfaces both need the same Preclinic treatment, and
+   tasks 6–7 reuse them for operations surfaces.
+   ============================================================ */
+
+/* --- actionable KPI links -------------------------------- */
+.pc-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11.5rem, 1fr));
+  gap: var(--pc-sp-3);
+  min-width: 0;
+}
+
+.pc-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pc-sp-1);
+  min-width: 0;
+  min-height: var(--pc-tap);
+  padding: var(--pc-sp-4);
+  border: var(--pc-hair);
+  border-radius: var(--pc-radius-l);
+  background: var(--pc-surface);
+  color: var(--pc-fg);
+  text-decoration: none;
+  box-shadow: var(--pc-shadow-card);
+  transition:
+    border-color var(--pc-dur-hover) var(--pc-ease),
+    box-shadow var(--pc-dur-hover) var(--pc-ease),
+    transform var(--pc-dur-hover) var(--pc-ease);
+}
+
+.pc-kpi:hover {
+  border-color: var(--pc-field-border);
+  box-shadow: var(--pc-shadow-2);
+  transform: translateY(-2px);
+}
+
+.pc-kpi:focus-visible {
+  outline: none;
+  box-shadow: var(--pc-ring);
+}
+
+.pc-kpi__label {
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-micro);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.pc-kpi__value {
+  color: var(--pc-fg);
+  font-size: 1.625rem;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.pc-kpi__foot {
+  color: var(--pc-ink-3);
+  font-size: var(--pc-fs-micro);
+  line-height: 1.45;
+}
+
+/* --- task tiles ------------------------------------------- */
+.pc-tilegrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr));
+  gap: var(--pc-sp-4);
+  min-width: 0;
+}
+
+.pc-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--pc-sp-3);
+  min-width: 0;
+  min-height: 8.5rem;
+  padding: var(--pc-sp-5);
+  border: var(--pc-hair);
+  border-radius: var(--pc-radius-l);
+  background: var(--pc-surface);
+  color: var(--pc-fg);
+  text-decoration: none;
+  box-shadow: var(--pc-shadow-card);
+  overflow: hidden;
+  transition:
+    border-color var(--pc-dur-hover) var(--pc-ease),
+    box-shadow var(--pc-dur-hover) var(--pc-ease),
+    transform var(--pc-dur-hover) var(--pc-ease);
+}
+
+.pc-tile:hover {
+  border-color: var(--pc-field-border);
+  box-shadow: var(--pc-shadow-2);
+  transform: translateY(-2px);
+}
+
+.pc-tile:focus-visible {
+  outline: none;
+  box-shadow: var(--pc-ring);
+}
+
+.pc-tile__icon {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 1px solid color-mix(in oklch, var(--pc-accent) 24%, var(--pc-border));
+  border-radius: var(--pc-radius-m);
+  background: var(--pc-secondary-wash);
+  color: var(--pc-primary);
+}
+
+.pc-tile__icon svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.pc-tile__label {
+  font-size: var(--pc-fs-h3);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.pc-tile__meta {
+  margin-top: auto;
+  color: var(--pc-ink-3);
+  font-size: var(--pc-fs-micro);
+  line-height: 1.5;
+}
+
+/* --- list rows and definition lists ----------------------- */
+.pc-listrow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--pc-sp-4);
+  flex-wrap: wrap;
+  padding: var(--pc-sp-3) 0;
+  border-top: var(--pc-hair);
+}
+
+.pc-listrow:first-child {
+  border-top: 0;
+}
+
+.pc-listrow__grow {
+  flex: 1 1 16rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pc-listrow__meta {
+  color: var(--pc-ink-3);
+  font-size: var(--pc-fs-micro);
+  margin: var(--pc-sp-1) 0 0;
+}
+
+.pc-dl {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+
+.pc-dl > div {
+  padding: var(--pc-sp-3) 0;
+  border-top: var(--pc-hair);
+}
+
+.pc-dl > div:first-child {
+  border-top: 0;
+}
+
+.pc-dl dt {
+  color: var(--pc-ink-3);
+  font-size: var(--pc-fs-micro);
+  font-weight: 600;
+}
+
+.pc-dl dd {
+  margin: var(--pc-sp-1) 0 0;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+/* 18-field lab result panel: label column, then the authored value. */
+.pc-lab-fields {
+  display: grid;
+  grid-template-columns: minmax(9rem, 13rem) minmax(0, 1fr);
+  gap: 0 var(--pc-sp-4);
+  margin: 0;
+}
+
+.pc-lab-fields dt,
+.pc-lab-fields dd {
+  padding: var(--pc-sp-3) 0;
+  border-top: var(--pc-hair);
+}
+
+.pc-lab-fields dt {
+  color: var(--pc-ink-3);
+  font-size: var(--pc-fs-micro);
+  font-weight: 600;
+}
+
+.pc-lab-fields dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+/* --- form controls ---------------------------------------- */
+.pc-field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  gap: var(--pc-sp-4);
+}
+
+.pc-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pc-sp-1);
+  min-width: 0;
+}
+
+.pc-field__label {
+  color: var(--pc-fg);
+  font-size: var(--pc-fs-small);
+  font-weight: 600;
+}
+
+.pc-field__hint,
+.pc-note {
+  margin: 0;
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-micro);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.pc-field input,
+.pc-field select,
+.pc-field textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--pc-tap);
+  padding: 10px 12px;
+  border: 1px solid var(--pc-field-border);
+  border-radius: var(--pc-radius-s);
+  background: var(--pc-surface);
+  color: var(--pc-fg);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1.4;
+}
+
+.pc-field textarea {
+  min-height: 5rem;
+  resize: vertical;
+}
+
+.pc-field input:focus-visible,
+.pc-field select:focus-visible,
+.pc-field textarea:focus-visible {
+  outline: none;
+  border-color: var(--pc-accent);
+  box-shadow: var(--pc-ring-cyan);
+}
+
+.pc-field input:disabled,
+.pc-field select:disabled,
+.pc-field textarea:disabled {
+  background: var(--pc-sage-deep);
+  color: var(--pc-ink-2);
+  cursor: not-allowed;
+}
+
+.pc-field [aria-invalid="true"] {
+  border-color: var(--pc-danger);
+}
+
+.pc-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--pc-sp-3);
+  min-height: var(--pc-tap);
+  padding: var(--pc-sp-2) 0;
+  font-size: var(--pc-fs-body);
+  line-height: 1.5;
+}
+
+.pc-check input {
+  width: 1.125rem;
+  height: 1.125rem;
+  margin-top: 0.2rem;
+  accent-color: var(--pc-primary);
+}
+
+.pc-check input:focus-visible {
+  outline: none;
+  box-shadow: var(--pc-ring);
+}
+
+.pc-error {
+  margin: 0;
+  color: var(--pc-danger);
+  font-size: var(--pc-fs-small);
+  line-height: 1.5;
+}
+
+.pc-status-line {
+  margin: 0;
+  color: var(--pc-ink-2);
+  font-size: var(--pc-fs-small);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.pc-row {
+  display: flex;
+  align-items: center;
+  gap: var(--pc-sp-3);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.pc-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pc-sp-4);
+  min-width: 0;
+}
+
+@media (max-width: 767px) {
+  .pc-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .pc-lab-fields {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .pc-lab-fields dt {
+    padding-bottom: 0;
+    border-top: var(--pc-hair);
+  }
+
+  .pc-lab-fields dd {
+    padding-top: var(--pc-sp-1);
+    border-top: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pc-kpi,
+  .pc-tile {
+    transition: none;
+    transform: none;
+  }
+}

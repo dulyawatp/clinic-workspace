@@ -19,9 +19,7 @@ export function NotificationsPanel({
   const { t, i18n } = useTranslation();
   const query = useWorkItems();
   const destinations = new Set(
-    navFor(session?.user.roles ?? [], caps, session?.mode).map(
-      (item) => item.routeKey,
-    ),
+    navFor(session?.user.roles ?? [], caps).map((item) => item.routeKey),
   );
   const visible = query.isError
     ? []

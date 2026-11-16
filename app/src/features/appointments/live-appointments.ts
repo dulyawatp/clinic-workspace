@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useSession } from "../../app/SessionProvider";
 import type { AppError } from "../../domain/errors";
 import { mapHttpError } from "../../transport/error-map";
+import { fetchNativeAppointmentsBody } from "../../transport/native/appointment";
+import { nativeTransportEnabled } from "../../transport/native/flag";
 import { assertLegacyRoute } from "../../transport/native/legacy";
 
 export interface LiveAppointment {
@@ -11,6 +13,14 @@ export interface LiveAppointment {
   appointment_time: string;
   status: string;
 }
+
+const APPOINTMENT_KEYS = [
+  "workspace_patient_id",
+  "appointment_id",
+  "appointment_date",
+  "appointment_time",
+  "status",
+] as const;
 
 const unavailable = (): AppError => ({
   code: "UPSTREAM_UNAVAILABLE",
@@ -41,9 +51,9 @@ function validDate(value: unknown): value is string {
   );
 }
 
-async function fetchAppointments(
+async function fetchProxyAppointmentsBody(
   signal: AbortSignal,
-): Promise<LiveAppointment[]> {
+): Promise<unknown> {
   assertLegacyRoute();
   let response: Response;
   try {
@@ -63,6 +73,15 @@ async function fetchAppointments(
   if (response.status === 404)
     throw { code: "UNSUPPORTED", retryable: false } satisfies AppError;
   if (!response.ok) throw mapHttpError(response.status, body);
+  return body;
+}
+
+/**
+ * Accepts exactly the five existing live-contract fields. A native row that
+ * carries any extra field (such as a native patient id) is refused, so the
+ * transport can never widen what the server was reviewed to publish.
+ */
+function parseLiveAppointments(body: unknown): LiveAppointment[] {
   if (
     !body ||
     typeof body !== "object" ||
@@ -77,6 +96,8 @@ async function fetchAppointments(
       throw unavailable();
     const row = item as Record<string, unknown>;
     if (
+      Object.keys(row).length !== APPOINTMENT_KEYS.length ||
+      !APPOINTMENT_KEYS.every((key) => Object.hasOwn(row, key)) ||
       !safeId(row.workspace_patient_id) ||
       !safeId(row.appointment_id) ||
       !validDate(row.appointment_date) ||
@@ -98,6 +119,15 @@ async function fetchAppointments(
   });
 }
 
+async function fetchLiveAppointments(
+  signal: AbortSignal,
+): Promise<LiveAppointment[]> {
+  const body = nativeTransportEnabled()
+    ? await fetchNativeAppointmentsBody(signal)
+    : await fetchProxyAppointmentsBody(signal);
+  return parseLiveAppointments(body);
+}
+
 export function useLiveAppointments() {
   const { status, session, authGeneration } = useSession();
   return useQuery<LiveAppointment[], AppError>({
@@ -106,7 +136,7 @@ export function useLiveAppointments() {
       status === "authenticated" &&
       session?.mode === "live" &&
       session.user.roles.some((role) => role === "REC" || role === "DOC"),
-    queryFn: ({ signal }) => fetchAppointments(signal),
+    queryFn: ({ signal }) => fetchLiveAppointments(signal),
     retry: false,
   });
 }

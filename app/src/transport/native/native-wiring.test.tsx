@@ -168,7 +168,6 @@ describe("app wiring", () => {
             items: [
               {
                 workspace_patient_id: "workspace-1",
-                native_patient_id: "native-1",
                 display_name: "Native Directory Patient",
               },
             ],
@@ -201,6 +200,20 @@ describe("app wiring", () => {
     expect(await screen.findByRole("alert")).toBeVisible();
     expect(screen.queryByText("Leaked")).toBeNull();
     expect(screen.queryByRole("table")).toBeNull();
+  });
+
+  it.each([
+    { workspace_patient_id: "workspace-1", display_name: "Leaked", native_patient_id: "native-1" },
+    { workspace_patient_id: "workspace-1", display_name: "Leaked", phone: "private" },
+  ])("rejects extra fields in native directory rows", async (row) => {
+    vi.stubEnv("VITE_CLINIC_NATIVE", "1");
+    server.use(
+      http.get(BOOTSTRAP, () => HttpResponse.json({ message: liveMessage() })),
+      http.get(DIRECTORY, () => HttpResponse.json({ message: { items: [row] } })),
+    );
+    renderWithFixtures(<PatientDirectoryPage />, { role: "DOC" });
+    expect(await screen.findByRole("alert")).toBeVisible();
+    expect(screen.queryByText("Leaked")).toBeNull();
   });
 
   it("keeps the proxy directory when the flag is off", async () => {

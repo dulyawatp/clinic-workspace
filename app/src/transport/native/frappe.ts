@@ -7,6 +7,16 @@ function upstreamUnavailable(): AppError {
   return { code: "UPSTREAM_UNAVAILABLE", retryable: true };
 }
 
+/** A cancelled caller signal is not an upstream failure. */
+function isAbort(cause: unknown): boolean {
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    "name" in cause &&
+    (cause as { name?: unknown }).name === "AbortError"
+  );
+}
+
 /**
  * Single same-origin call to a Frappe `/api/method/*` endpoint.
  *
@@ -25,7 +35,8 @@ export async function frappeRequest(
       cache: "no-store",
       headers: { accept: "application/json", ...init.headers },
     });
-  } catch {
+  } catch (cause) {
+    if (isAbort(cause)) throw cause;
     throw upstreamUnavailable();
   }
 }

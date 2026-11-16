@@ -148,14 +148,14 @@ it("superseded logout session confirmation never navigates over newer authentica
   );
 });
 
-it("shows verified session identity, company and transient locale without role switch", async () => {
+it("shows verified session identity, company and device-scoped locale without role switch", async () => {
   renderWithFixtures(<ProfilePage />, {
     role: "REC",
     profileCompany: "Fixture clinic",
   });
   expect(await screen.findByText("Fixture clinic")).toBeVisible();
   expect(screen.getByTestId("profile-name")).not.toBeEmptyDOMElement();
-  expect(screen.getByText(/การเปลี่ยนภาษาใช้กับพื้นที่ทำงาน/)).toBeVisible();
+  expect(screen.getByText(/การเปลี่ยนภาษามีผลกับเบราว์เซอร์นี้/)).toBeVisible();
   const storage = vi.spyOn(Storage.prototype, "setItem");
   try {
     fireEvent.click(screen.getByRole("button", { name: "EN" }));
@@ -163,7 +163,9 @@ it("shows verified session identity, company and transient locale without role s
       screen.getByRole("heading", { name: "Profile & language" }),
     ).toBeVisible();
     expect(screen.getByText(/not saved to your profile/)).toBeVisible();
-    expect(storage).not.toHaveBeenCalled();
+    // The choice is remembered on this device only, never on the profile.
+    expect(storage).toHaveBeenCalledTimes(1);
+    expect(storage).toHaveBeenCalledWith("clinic.locale", "en");
     expect(screen.queryByRole("button", { name: /switch role/i })).toBeNull();
     expect(screen.queryByRole("textbox")).toBeNull();
   } finally {

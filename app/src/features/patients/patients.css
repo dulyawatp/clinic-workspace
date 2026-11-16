@@ -42,6 +42,23 @@
   font: inherit;
 }
 
+.patients-field select {
+  min-height: var(--target-min);
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.patients-write { margin: 20px 0; }
+.patients-write form { padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); }
+.patients-write h3 { margin-top: 0; }
+.patients-write-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: 16px; }
+.patients-write-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }
+
 .patients-hint {
   margin: 12px 0 24px;
   font-size: 0.875rem;
@@ -159,10 +176,16 @@
   background: var(--surface);
 }
 
+.patients-profile-identity {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .patients-profile-name {
   margin: 0 0 8px;
   font-size: 1.375rem;
   line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .patients-profile-id {
@@ -172,6 +195,11 @@
   margin: 0 0 16px;
   font-size: 0.875rem;
   color: var(--muted);
+}
+
+.patients-profile-id .patients-id {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .patients-profile-facts {
@@ -342,4 +370,332 @@
     font-weight: 600;
     color: var(--muted);
   }
+}
+
+/* ---------------------------------------------------------------- PAT-02
+   Designed ten-field registration form. Two columns above the tablet band,
+   one column on a phone, 44px controls and a visible focus ring throughout. */
+.patient-create-form {
+  display: grid;
+  gap: 20px;
+  margin-top: 20px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.patient-create-group {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin: 0;
+  padding: 16px 20px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--pc-radius-l);
+  background: var(--surface);
+}
+
+.patient-create-group > legend {
+  padding: 0 8px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.patient-create-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 20px;
+  min-width: 0;
+}
+
+.patient-create-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.patient-create-field label {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--ink);
+  flex-wrap: wrap;
+}
+
+.patient-create-field input,
+.patient-create-field select,
+.patient-create-field textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--target-min);
+  padding: 10px 12px;
+  border: 1px solid var(--pc-field-border);
+  border-radius: var(--pc-radius-s);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1.4;
+}
+
+.patient-create-field textarea {
+  min-height: 5rem;
+  resize: vertical;
+}
+
+.patient-create-field input:hover,
+.patient-create-field select:hover,
+.patient-create-field textarea:hover {
+  border-color: color-mix(in oklch, var(--pc-field-border) 70%, var(--ink));
+}
+
+.patient-create-field input:focus-visible,
+.patient-create-field select:focus-visible,
+.patient-create-field textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--pc-ring-cyan);
+}
+
+.patient-create-field [aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.patient-create-field--required > label::after {
+  content: " *";
+  color: var(--danger);
+}
+
+.patient-create-hint,
+.patient-create-note,
+.patient-create-status {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.patient-create-field-error {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--danger);
+}
+
+.patient-create-errors,
+.patient-create-duplicate {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in oklch, var(--danger) 35%, var(--border));
+  border-radius: var(--pc-radius-m);
+  background: var(--pc-danger-wash);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.patient-create-duplicate {
+  border-color: color-mix(in oklch, var(--pc-status-warning) 45%, var(--border));
+  background: var(--pc-warn-wash);
+}
+
+.patient-create-errors ul,
+.patient-create-duplicate ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.patient-create-errors li,
+.patient-create-duplicate li {
+  line-height: 1.6;
+}
+
+.patient-create-consent {
+  background: var(--pc-sage);
+}
+
+.patient-create-consent p {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.patient-create-sample-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.patient-create-sr-note {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.patient-create-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.patient-create-confirm {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--pc-radius-l);
+  background: var(--pc-sage);
+}
+
+.patient-create-confirm h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.patient-create-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 20px;
+  margin: 0;
+}
+
+.patient-create-summary dt {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.patient-create-summary dd {
+  margin: 2px 0 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.patient-create-success {
+  margin: 16px 0;
+  font-weight: 600;
+}
+
+@media (max-width: 767px) {
+  .patient-create-grid,
+  .patient-create-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .patient-create-group {
+    padding: 14px 16px 16px;
+  }
+}
+
+/* ------------------------------------------- PAT-03 overview summary cards */
+.patients-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+  margin-bottom: 20px;
+  min-width: 0;
+}
+
+.patients-summary-grid > * {
+  min-width: 0;
+}
+
+.patients-summary-facts {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.patients-summary-facts dt {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.patients-summary-facts dd {
+  margin: 2px 0 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.patients-redaction {
+  margin-bottom: 20px;
+}
+
+.patients-redaction ul {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.patients-consent-facts {
+  display: grid;
+  grid-template-columns: minmax(7rem, 10rem) minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 12px 0 0;
+  font-size: 0.8125rem;
+}
+
+.patients-consent-facts dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.patients-consent-facts dd {
+  margin: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.patients-consent-empty {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+@media (max-width: 1023px) {
+  .patients-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .patients-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .patients-consent-facts {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .patients-consent-facts dt {
+    margin-top: 8px;
+  }
+}
+
+.patients-summary-grid .patients-vitals {
+  margin-bottom: 0;
+}
+
+.patients-redaction .pc-banner__title h2 {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.patients-redaction .pc-banner__body p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
 }

@@ -12,6 +12,8 @@ import { PageHeader } from "../../ui/PageHeader";
 import { StatePanel } from "../../ui/StatePanel";
 import { useCapabilities } from "../shell/CapabilityProvider";
 import { AppointmentActions } from "./AppointmentActions";
+import { LiveAppointmentPage } from "./LiveAppointmentPage";
+import { ReturnVisitLink } from "./ReturnVisitLink";
 
 function Detail({ id }: { id: string }) {
   const { t } = useTranslation();
@@ -77,6 +79,10 @@ function Detail({ id }: { id: string }) {
           ))}
         </div>
         <AppointmentActions appointment={appointment} caps={caps} />
+        <ReturnVisitLink
+          patientId={appointment.patientId}
+          appointmentId={appointment.id}
+        />
       </section>
     </>
   );
@@ -98,7 +104,9 @@ function AddressedAppointment({ id, title }: { id?: string; title: string }) {
   const { session } = useSession();
   const capability = getCapability(caps, "read.appointment");
   if (session?.mode === "live")
-    return (
+    return id ? (
+      <LiveAppointmentPage id={id} />
+    ) : (
       <div className="shell-page-body">
         <StatePanel
           kind="empty"

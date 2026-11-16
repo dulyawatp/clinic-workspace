@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import type { CapabilityMap } from "../domain/capability";
 import { CapabilityProvider } from "../features/shell/CapabilityProvider";
 import { LocaleProvider } from "../i18n/LocaleProvider";
+import { readStoredLocale } from "../i18n/locale-storage";
 import { SessionProvider, useSession } from "./SessionProvider";
 
 const EMPTY_CAPABILITIES: CapabilityMap = {};
@@ -50,7 +51,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <LocaleProvider initial="th">
+      <LocaleProvider initial={readStoredLocale() ?? "th"}>
         <AppErrorBoundary>
           <SessionProvider>
             <SessionCapabilities>{children}</SessionCapabilities>

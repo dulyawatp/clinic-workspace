@@ -154,15 +154,12 @@ it.each([
   expect(handler).not.toHaveBeenCalled();
 });
 
-it("advertises only live PHA navigation", () => {
+it("advertises pharmacy to pharmacy roles only", () => {
   expect(ROUTES.pharmacy).toBe("/clinic/pharmacy");
   expect(
-    navFor(["PHA"], {}, "live").some((item) => item.routeKey === "pharmacy"),
+    navFor(["PHA"], {}).some((item) => item.routeKey === "pharmacy"),
   ).toBe(true);
   expect(
-    navFor(["PHA"], {}, "fixture").some((item) => item.routeKey === "pharmacy"),
-  ).toBe(false);
-  expect(
-    navFor(["DOC"], {}, "live").some((item) => item.routeKey === "pharmacy"),
+    navFor(["DOC"], {}).some((item) => item.routeKey === "pharmacy"),
   ).toBe(false);
 });

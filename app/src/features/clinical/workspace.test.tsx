@@ -1,5 +1,5 @@
 import clinical from "@clinic/contracts/fixtures/clinical.json";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { Link, Route, Routes } from "react-router-dom";
@@ -163,11 +163,13 @@ it.each(["REC", "PHA", "CAS", "MGR", "ADM"] as const)(
     window.history.pushState({}, "", "/clinic/visits/ENC-1");
     server.use(...createHandlers({ role }));
     render(<App />);
-    await waitFor(() =>
-      expect(screen.getByRole("alert")).toHaveTextContent(
-        /ไม่มีสิทธิ์|does not have permission/i,
-      ),
+    // The designed role matrix keeps these roles out of the clinical workspace,
+    // so the route guard states the denial before any clinical read starts.
+    expect(await screen.findByTestId("role-guard-denied")).toHaveAttribute(
+      "data-surface",
+      "DOC-02",
     );
+    expect(screen.getByText(/ไม่มีสิทธิ์เข้าถึงหน้านี้/)).toBeVisible();
     expectNoWorkspace();
   },
 );

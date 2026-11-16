@@ -1,4 +1,3 @@
-import { useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ROUTES } from "../../app/routes";
@@ -8,36 +7,39 @@ import {
   type VisitSection,
 } from "../../domain/clinical";
 import { toI18nKey } from "../../domain/errors";
+import { coreData } from "../../fixtures/data";
 import { useReadQuery } from "../../transport/read/query";
 import { PageHeader } from "../../ui/PageHeader";
 import { StatePanel } from "../../ui/StatePanel";
+import { AuthoredVisitWorkspace } from "./AuthoredVisitWorkspace";
 import { DiagnosesSection } from "./DiagnosesSection";
 import { ExamSection } from "./ExamSection";
 import { HistorySection } from "./HistorySection";
+import { ExternalLabSection } from "./LabPanels";
 import { MedicationsSection } from "./MedicationsSection";
 import { NoteSection } from "./NoteSection";
 import { OverviewSection } from "./OverviewSection";
 import { ReviewSection } from "./ReviewSection";
 import { SectionFrame } from "./SectionFrame";
-import { SECTION_ORDER, sectionLabelKey } from "./sections";
+import { SECTION_ORDER } from "./sections";
 import { VisitHeader } from "./VisitHeader";
-import { VisitSectionNav } from "./VisitSectionNav";
+import { PhotosSection, ProceduresSection } from "./VisitSampleSections";
+import { VisitSectionsLayout } from "./VisitSectionsLayout";
 
-function subscribe(notify: () => void) {
-  window.addEventListener("resize", notify);
-  return () => window.removeEventListener("resize", notify);
-}
-function isMobile() {
-  return window.innerWidth < 768;
-}
-
-function VisitDetail({ id }: { id: string }) {
+/**
+ * DOC-02 addresses two sources on purpose:
+ *  - an authored sample encounter (`DC-VIS-…`) renders the designed canonical
+ *    editor demo, entirely local and network-free;
+ *  - a read-model encounter (`ENC-…`) keeps the verified proxy read and its
+ *    read-only sections, including the three designed sections that used to be
+ *    placeholders.
+ */
+function ReadVisitDetail({ id }: { id: string }) {
   const { t } = useTranslation();
   const [params, setParams] = useSearchParams();
-  const mobile = useSyncExternalStore(subscribe, isMobile, () => false);
   const selected = params.get("section");
   const active: VisitSection =
-    SECTION_ORDER.find((s) => s === selected) ?? "overview";
+    SECTION_ORDER.find((section) => section === selected) ?? "overview";
   const query = useReadQuery<VisitContext>("clinical-visits", {
     filters: { encounterId: id },
     limit: 1,
@@ -79,59 +81,29 @@ function VisitDetail({ id }: { id: string }) {
         <MedicationsSection patientId={context.patientId} encounterId={id} />
       ) : section === "review" ? (
         <ReviewSection patientId={context.patientId} encounterId={id} />
+      ) : section === "photos" ? (
+        <PhotosSection patientId={context.patientId} />
+      ) : section === "procedures" ? (
+        <ProceduresSection patientId={context.patientId} />
       ) : (
-        <p className="visit-placeholder">{t("clinical.sectionPending")}</p>
+        <ExternalLabSection patientId={context.patientId} />
       )}
     </SectionFrame>
   );
   return (
     <div className="visit-workspace">
       <VisitHeader context={context} />
-      {!mobile ? (
-        <div className="visit-desktop">
-          <VisitSectionNav active={active} onChange={change} />
-          <div>
-            {SECTION_ORDER.map((section) => (
-              <div
-                key={section}
-                role="tabpanel"
-                id={`visit-panel-${section}`}
-                aria-labelledby={`visit-tab-${section}`}
-                hidden={section !== active}
-              >
-                {section === active && content(section)}
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : (
-        <div className="visit-accordion" data-testid="section-accordion">
-          {SECTION_ORDER.map((section) => (
-            <div className="visit-accordion-item" key={section}>
-              <h2>
-                <button
-                  type="button"
-                  aria-expanded={active === section}
-                  aria-controls={`accordion-panel-${section}`}
-                  onClick={() => change(section)}
-                >
-                  {t(sectionLabelKey(section))}
-                  <span aria-hidden="true">
-                    {active === section ? "−" : "+"}
-                  </span>
-                </button>
-              </h2>
-              <div
-                id={`accordion-panel-${section}`}
-                hidden={active !== section}
-              >
-                {active === section && content(section)}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <VisitSectionsLayout active={active} onChange={change} render={content} />
     </div>
+  );
+}
+
+function VisitDetail({ id }: { id: string }) {
+  const authored = coreData.visitById(id);
+  return authored ? (
+    <AuthoredVisitWorkspace visit={authored} />
+  ) : (
+    <ReadVisitDetail id={id} />
   );
 }
 
@@ -141,12 +113,12 @@ export function VisitWorkspacePage() {
   return (
     <>
       <PageHeader
-        title={t("clinical.title")}
+        title={t("surface.DOC-02")}
         breadcrumb={<Link to={ROUTES.home}>{t("nav.today")}</Link>}
       />
       <div className="shell-page-body">
         {id ? (
-          <VisitDetail id={id} />
+          <VisitDetail key={id} id={id} />
         ) : (
           <StatePanel kind="empty" title={t("clinical.notFound")} />
         )}
