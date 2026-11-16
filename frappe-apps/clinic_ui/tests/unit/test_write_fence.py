@@ -1795,6 +1795,8 @@ class AppointmentKindTests(FenceTestCase):
                     "purchase_order_draft",
                     "purchase_order_submit",
                     "purchase_receipt",
+                    "invoice_submit",
+                    "payment_receive",
                 }
             ),
         )
@@ -1806,6 +1808,17 @@ class AppointmentKindTests(FenceTestCase):
         )
         ledger_tests = write_fence.PROCEDURE_OPERATION_KINDS
         self.assertTrue(ledger_tests.issubset(write_fence.OPERATION_KINDS))
+
+    def test_finance_kinds_are_additive(self):
+        self.assertEqual(
+            write_fence.FINANCE_OPERATION_KINDS,
+            frozenset({"invoice_submit", "payment_receive"}),
+        )
+        self.assertTrue(
+            write_fence.FINANCE_OPERATION_KINDS.issubset(
+                write_fence.OPERATION_KINDS
+            )
+        )
 
     def test_admin_kinds_are_additive(self):
         self.assertEqual(

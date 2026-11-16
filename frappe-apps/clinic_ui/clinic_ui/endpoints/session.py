@@ -26,7 +26,9 @@ from clinic_ui.core.policy import (
     APPOINTMENT_WRITE_ROLE_CODES,
     ENCOUNTER_COMPLETE_ROLE_CODES,
     ENCOUNTER_ROLE_CODES,
+    INVOICE_ROLE_CODES,
     PATIENT_WRITE_ROLE_CODES,
+    PAYMENT_ROLE_CODES,
     PO_ROLE_CODES,
     PROCEDURE_ROLE_CODES,
     STOCK_ROLE_CODES,
@@ -279,6 +281,38 @@ def _purchase_write_flags(gateway, settings, role):
         return disabled
 
 
+def _finance_write_flags(gateway, settings, role):
+    """Return ``(invoice, payment)`` when the finance surface is open.
+
+    Independent of the purchasing and clinical flags: exact approved site,
+    boundary and installed-field preflight, the finance flag, the deployment
+    marker, a ready fence store and the caller's own native authority on the
+    document it would create. Customers, price lists, accounts, modes of payment
+    and the discount permission are decided per request; these flags only
+    advertise that the surface exists.
+    """
+
+    disabled = (False, False)
+    if role not in (INVOICE_ROLE_CODES | PAYMENT_ROLE_CODES):
+        return disabled
+    try:
+        if gateway.native_finance_boundary_problem() is not None:
+            return disabled
+        if gateway.native_finance_install_problem() is not None:
+            return disabled
+        if not settings.finance_write_enabled:
+            return disabled
+        if gateway.write_deployment_approved() is not True:
+            return disabled
+        if gateway.write_fence_ready() is not True:
+            return disabled
+        invoice_ok = gateway.native_finance_can_write("Sales Invoice") is True
+        payment_ok = gateway.native_finance_can_write("Payment Entry") is True
+        return invoice_ok, payment_ok
+    except Exception:
+        return disabled
+
+
 def _admin_write_flags(gateway, settings, role):
     """Return ``(user, master)`` when the admin surface is open.
 
@@ -354,6 +388,9 @@ def bootstrap(gateway):
             write_purchase_order_submit,
             write_purchase_receipt,
         ) = _purchase_write_flags(gateway, settings, role)
+        write_invoice_submit, write_payment_receive = _finance_write_flags(
+            gateway, settings, role
+        )
         capabilities = bootstrap_capabilities(
             write_patient_create=write_create,
             write_patient_update=write_update,
@@ -373,6 +410,8 @@ def bootstrap(gateway):
             write_stock_adjust=write_stock_adjust,
             write_purchase_order_draft=write_purchase_order_draft,
             write_purchase_order_submit=write_purchase_order_submit,
+            write_invoice_submit=write_invoice_submit,
+            write_payment_receive=write_payment_receive,
             write_admin_user=write_admin_user,
             write_admin_master=write_admin_master,
         )

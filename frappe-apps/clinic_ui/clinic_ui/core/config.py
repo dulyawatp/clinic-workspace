@@ -124,6 +124,17 @@ STOCK_WRITE_SITE_KEY = "clinic_ui_native_stock_write_site"
 # authority are decided per request.
 PURCHASE_WRITE_ENABLED_KEY = "clinic_ui_native_purchase_write_enabled"
 PURCHASE_WRITE_SITE_KEY = "clinic_ui_native_purchase_write_site"
+# Separate, default-off finance (invoice submit + payment receive) gate.
+# Independent of the purchasing and clinical flags: both finance operations need
+# this flag and the exact approved site. Customers, price lists, accounts, modes
+# of payment and every amount are decided per request.
+FINANCE_WRITE_ENABLED_KEY = "clinic_ui_native_finance_write_enabled"
+FINANCE_WRITE_SITE_KEY = "clinic_ui_native_finance_write_site"
+# The discount sub-capability's permission condition (CSV:123's CAS +
+# permission qualifier, folded to configuration): the discount path exists only
+# when the installed child is present AND this flag is on. No rate is ever
+# configured or invented here.
+INVOICE_DISCOUNT_ENABLED_KEY = "clinic_ui_invoice_discount_enabled"
 
 # The one and only site identity on which this local experiment may run. Exact
 # string equality against the resolved current site is required; the configured
@@ -174,6 +185,8 @@ class Settings:
     admin_write_enabled: bool = False
     stock_write_enabled: bool = False
     purchase_write_enabled: bool = False
+    finance_write_enabled: bool = False
+    invoice_discount_enabled: bool = False
 
     def as_role_map(self):
         return {code: tuple(roles) for code, roles in self.role_map}
@@ -515,6 +528,25 @@ def _purchase_write_settings(getter, site):
     return True
 
 
+def _finance_write_settings(getter, site):
+    """Return ``(enabled, discount_enabled)`` for the finance family.
+
+    The gate needs the exact approved site and its own flag. The discount path
+    needs that gate plus its own permission flag; the installed ``deductions``
+    child is checked separately from metadata, so a site without the child still
+    lands invoices (the recorded fallback cut) and only loses the discount.
+    """
+
+    if site != APPROVED_WRITE_SITE or site in DISALLOWED_WRITE_SITES:
+        return False, False
+    if not _enabled(getter(FINANCE_WRITE_ENABLED_KEY)):
+        return False, False
+    configured = getter(FINANCE_WRITE_SITE_KEY)
+    if not isinstance(configured, str) or configured != APPROVED_WRITE_SITE:
+        return False, False
+    return True, _enabled(getter(INVOICE_DISCOUNT_ENABLED_KEY))
+
+
 def load_settings(getter, site):
     """Return validated settings, or ``None`` when the feature is unavailable."""
 
@@ -572,6 +604,10 @@ def load_settings(getter, site):
     ):
         return None
 
+    finance_write_enabled, invoice_discount_enabled = _finance_write_settings(
+        getter, site
+    )
+
     return Settings(
         role_map=role_map,
         allowlist=allowlist,
@@ -591,4 +627,6 @@ def load_settings(getter, site):
         admin_write_enabled=_admin_write_settings(getter, site),
         stock_write_enabled=_stock_write_settings(getter, site),
         purchase_write_enabled=_purchase_write_settings(getter, site),
+        finance_write_enabled=finance_write_enabled,
+        invoice_discount_enabled=invoice_discount_enabled,
     )

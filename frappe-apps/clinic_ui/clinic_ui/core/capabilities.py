@@ -94,6 +94,8 @@ DEPLOYMENT_GATED_WRITE_NAMES = frozenset(
         "write.stock.adjust",
         "write.purchase_order.draft",
         "write.purchase_order.submit",
+        "write.invoice.submit",
+        "write.payment.receive",
         "write.admin.user",
         "write.admin.master",
     }
@@ -127,6 +129,8 @@ def bootstrap_capabilities(
     write_stock_adjust=False,
     write_purchase_order_draft=False,
     write_purchase_order_submit=False,
+    write_invoice_submit=False,
+    write_payment_receive=False,
     write_admin_user=False,
     write_admin_master=False,
 ):
@@ -183,6 +187,13 @@ def bootstrap_capabilities(
         capabilities["write.purchase_order.draft"] = ENABLED_STATE
     if write_purchase_order_submit is True:
         capabilities["write.purchase_order.submit"] = ENABLED_STATE
+    # Invoice submit and payment receive are two independent contract surfaces
+    # that share one site-config finance gate; bootstrap passes each only after
+    # that gate passes. Void/amend and refund stay read_only (both cut).
+    if write_invoice_submit is True:
+        capabilities["write.invoice.submit"] = ENABLED_STATE
+    if write_payment_receive is True:
+        capabilities["write.payment.receive"] = ENABLED_STATE
     # Admin users and masters are two independent contract surfaces that share
     # one site-config gate; bootstrap passes each only after that gate passes.
     if write_admin_user is True:

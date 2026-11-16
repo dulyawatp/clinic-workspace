@@ -196,6 +196,28 @@ def authorize_purchase_write(gateway, allowed_codes, csrf_token=None):
     return settings, view, role
 
 
+def authorize_finance_write(gateway, allowed_codes, csrf_token=None):
+    """Read gate, explicit CSRF, and the separate finance-write gate.
+
+    The finance gate is independent of the purchasing and clinical flags. It
+    requires the exact approved site, the finance flag and the same private
+    deployment marker bound to the fence store. Customers, price lists, ledger
+    accounts, payment modes and native authority are decided per request; no
+    configuration value is authority on its own.
+    """
+
+    settings, view, role = authorize(gateway, allowed_codes)
+    if view.user == write_fence.LATCH_ACTOR:
+        gateway.deny()
+    if not gateway.csrf_token_valid(csrf_token):
+        gateway.deny()
+    if not settings.finance_write_enabled:
+        gateway.deny()
+    if not gateway.write_deployment_approved():
+        gateway.deny()
+    return settings, view, role
+
+
 def authorize_admin_write(gateway, allowed_codes, csrf_token=None):
     """Read gate, explicit CSRF, and the separate admin-write gate.
 

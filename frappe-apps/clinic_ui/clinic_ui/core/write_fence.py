@@ -207,6 +207,12 @@ STOCK_OPERATION_KINDS = frozenset(
 PURCHASE_OPERATION_KINDS = frozenset(
     {"purchase_order_draft", "purchase_order_submit", "purchase_receipt"}
 )
+# Finance kinds are additive on the same ledger. ``invoice_submit`` is one
+# mutation unit (insert then submit the installed ``Sales Invoice``) and
+# ``payment_receive`` one ``Payment Entry`` Receive; both carry their registry
+# names because they are also the budget keys and the durable receipt kinds.
+# There is no refund kind (D-13 open) and no void/amend kind (cut this wave).
+FINANCE_OPERATION_KINDS = frozenset({"invoice_submit", "payment_receive"})
 OPERATION_KINDS = (
     PATIENT_OPERATION_KINDS
     | APPOINTMENT_OPERATION_KINDS
@@ -215,6 +221,7 @@ OPERATION_KINDS = (
     | ADMIN_OPERATION_KINDS
     | STOCK_OPERATION_KINDS
     | PURCHASE_OPERATION_KINDS
+    | FINANCE_OPERATION_KINDS
 )
 
 # Reserved identity for the durable site-wide manual-investigation latch. It is
@@ -346,11 +353,13 @@ __all__ = [
     "COMMITTED",
     "CommittedAppointmentReceipt",
     "CommittedCreateReceipt",
+    "CommittedFinanceReceipt",
     "CommittedPurchaseReceipt",
     "DISPATCHED",
     "EnumerationOverflow",
     "FenceError",
     "FenceReleased",
+    "FINANCE_OPERATION_KINDS",
     "InvalidOperation",
     "Ledger",
     "LedgerInfo",
@@ -590,6 +599,21 @@ class CommittedPurchaseReceipt:
     interpret it. It carries the posted document reference, the purchase order
     the operation belongs to and (for a receipt) the item, warehouse and
     quantity.
+    """
+
+    kind: str
+    actor: str
+    operation_key: str
+    receipt: str
+
+
+@dataclass(frozen=True)
+class CommittedFinanceReceipt:
+    """One read-only committed finance receipt discovered in the fence.
+
+    The receipt is opaque to this module: only the separate finance codec may
+    interpret it. It carries the posted document reference, the invoice it
+    belongs to and the amount (never any card data).
     """
 
     kind: str
@@ -1276,6 +1300,82 @@ class Ledger:
             )
         return [
             CommittedPurchaseReceipt(
+                kind=row["kind"],
+                actor=row["actor"],
+                operation_key=row["operation_key"],
+                receipt=row["receipt"],
+            )
+            for row in rows
+        ]
+
+    def committed_finance_receipts(
+        self, *, limit, kind=None, operation_key=None
+    ):
+        """Enumerate terminal ``COMMITTED`` finance receipts, bounded.
+
+        A separate, read-only namespace from every other family: only
+        ``invoice_submit`` and ``payment_receive`` rows are selected. The
+        reserved latch actor and key are excluded, as is every non-terminal
+        state. ``limit`` is a hard server-side bound; an over-full page raises
+        :class:`EnumerationOverflow` instead of silently truncating. The method
+        appends nothing and acquires no write claim.
+        """
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= MAX_RECEIPT_ENUMERATION
+        ):
+            raise InvalidOperation("enumeration limit is invalid")
+        if kind is not None:
+            kind = _require_kind(kind)
+            if kind not in FINANCE_OPERATION_KINDS:
+                raise InvalidOperation("kind is not a finance kind")
+        if operation_key is not None:
+            operation_key = _require_operation_key(operation_key)
+        kinds = tuple(sorted(FINANCE_OPERATION_KINDS))
+        sql = (
+            "SELECT e.kind, e.actor, e.operation_key, e.receipt FROM events AS e"
+            " WHERE e.deployment_id = (SELECT deployment_id FROM meta)"
+            f" AND e.kind IN ({', '.join('?' for _ in kinds)})"
+            " AND e.state = 'COMMITTED'"
+            " AND e.actor != ?"
+            " AND e.operation_key != ?"
+            " AND e.sequence = ("
+            "   SELECT MAX(e2.sequence) FROM events AS e2"
+            "   WHERE e2.deployment_id = e.deployment_id"
+            "     AND e2.actor = e.actor"
+            "     AND e2.kind = e.kind"
+            "     AND e2.operation_key = e.operation_key"
+            " )"
+        )
+        parameters = [*kinds, LATCH_ACTOR, LATCH_OPERATION_KEY]
+        if kind is not None:
+            sql += " AND e.kind = ?"
+            parameters.append(kind)
+        if operation_key is not None:
+            sql += " AND e.operation_key = ?"
+            parameters.append(operation_key)
+        sql += " ORDER BY e.sequence LIMIT ?"
+        parameters.append(limit + 1)
+
+        directory_fd = self._open_pinned_directory()
+        try:
+            with self._connection(directory_fd) as connection:
+                try:
+                    rows = connection.execute(sql, parameters).fetchall()
+                except sqlite3.DatabaseError as exc:
+                    raise StoreUnavailable(
+                        "could not read committed finance receipts"
+                    ) from exc
+        finally:
+            os.close(directory_fd)
+        if len(rows) > limit:
+            raise EnumerationOverflow(
+                "committed finance receipts exceed the bound"
+            )
+        return [
+            CommittedFinanceReceipt(
                 kind=row["kind"],
                 actor=row["actor"],
                 operation_key=row["operation_key"],
