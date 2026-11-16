@@ -89,6 +89,8 @@ DEPLOYMENT_GATED_WRITE_NAMES = frozenset(
         "write.procedure.complete",
         "write.invoice.void_amend",
         "write.stock.consume",
+        "write.admin.user",
+        "write.admin.master",
     }
 )
 ENABLEABLE_NAMES = (
@@ -115,6 +117,8 @@ def bootstrap_capabilities(
     write_encounter_complete=False,
     write_encounter_amend=False,
     write_procedure_complete=False,
+    write_admin_user=False,
+    write_admin_master=False,
 ):
     """Return the default read-only map with reviewed writes enabled.
 
@@ -154,6 +158,12 @@ def bootstrap_capabilities(
     if write_procedure_complete is True:
         capabilities["write.procedure.complete"] = ENABLED_STATE
         capabilities["write.stock.consume"] = ENABLED_STATE
+    # Admin users and masters are two independent contract surfaces that share
+    # one site-config gate; bootstrap passes each only after that gate passes.
+    if write_admin_user is True:
+        capabilities["write.admin.user"] = ENABLED_STATE
+    if write_admin_master is True:
+        capabilities["write.admin.master"] = ENABLED_STATE
     return capabilities
 
 

@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import date as _date
 
 from clinic_ui.core import (
+    admin_contract,
     appointment_contract,
     appointment_write,
     config,
@@ -3522,3 +3523,537 @@ class Gateway:
         """Decode the just-committed receipt back to the created Stock Entry."""
 
         return procedure_write.decode_receipt(receipt).stock_entry
+
+    # -- admin user/master surface --------------------------------------
+
+    def _admin_meta_fields(self):
+        """Resolve the installed field names through the metadata cache."""
+
+        cached = getattr(self, "_admin_fields_cache", None)
+        if cached is not None:
+            return cached
+        frappe = self.frappe
+        get_meta = getattr(getattr(frappe, "db", None), "get_meta", None)
+        if not callable(get_meta):
+            get_meta = frappe.get_meta
+        fields = {}
+        for doctype in admin_contract.REQUIRED_FIELDS:
+            fields[doctype] = set(get_meta(doctype).get_valid_columns())
+        self._admin_fields_cache = fields
+        return fields
+
+    def native_admin_install_problem(self):
+        """Preflight the installed DocType/field set; a gap is a refusal."""
+
+        try:
+            return admin_contract.install_problem(self._admin_meta_fields())
+        except Exception:
+            return "installed metadata unreadable"
+
+    def native_admin_can_write(self):
+        """The acting user's native User-create authority."""
+
+        try:
+            return bool(
+                self.frappe.has_permission(
+                    admin_contract.USER_DOCTYPE,
+                    ptype="create",
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
+    def native_admin_can_create(self, doctype):
+        """The acting user's native create authority for one target DocType."""
+
+        try:
+            return bool(
+                self.frappe.has_permission(
+                    doctype,
+                    ptype="create",
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
+    def native_admin_missing_roles(self, roles):
+        """Return the assignable roles that are not installed on the site."""
+
+        missing = []
+        for role in roles or ():
+            try:
+                if not self.frappe.db.exists(admin_contract.ROLE_DOCTYPE, role):
+                    missing.append(role)
+            except Exception:
+                missing.append(role)
+        return missing
+
+    def native_admin_user_exists(self, identifier):
+        try:
+            return bool(
+                self.frappe.db.exists(admin_contract.USER_DOCTYPE, identifier)
+            )
+        except Exception:
+            return True
+
+    def native_admin_practitioner_exists(self, name):
+        try:
+            return bool(
+                self.frappe.db.exists(admin_contract.PRACTITIONER_DOCTYPE, name)
+            )
+        except Exception:
+            return False
+
+    def native_admin_master_exists(self, master_type, identifier):
+        doctype = admin_contract.MASTER_DOCTYPES.get(master_type)
+        if doctype is None:
+            return True
+        try:
+            return bool(self.frappe.db.exists(doctype, identifier))
+        except Exception:
+            return True
+
+    def native_admin_item_price_exists(self, item_code, price_list):
+        try:
+            return bool(
+                self.frappe.db.exists(
+                    admin_contract.ITEM_PRICE_DOCTYPE,
+                    {"item_code": item_code, "price_list": price_list},
+                )
+            )
+        except Exception:
+            return True
+
+    def _admin_company(self):
+        company = None
+        try:
+            company = self._text_value(
+                self.frappe.db.get_single_value(
+                    "Global Defaults", "default_company"
+                )
+            )
+        except Exception:
+            company = None
+        if not company:
+            try:
+                company = self._text_value(
+                    self.frappe.defaults.get_default("company")
+                )
+            except Exception:
+                company = None
+        if not company:
+            raise patient_write.WriteUncertain()
+        return company
+
+    def _admin_currency(self, company):
+        currency = None
+        try:
+            currency = self._text_value(
+                self.frappe.db.get_value(
+                    "Company", company, "default_currency"
+                )
+            )
+        except Exception:
+            currency = None
+        if not currency:
+            raise patient_write.WriteUncertain()
+        return currency
+
+    def create_native_admin_user(self, payload):
+        """Create the User, its roles and the optional practitioner link once.
+
+        The password is caller-supplied and the welcome mail is suppressed, as
+        on the installed site. The credentials never leave this mutation: the
+        caller receives the created user name only.
+        """
+
+        try:
+            doc = {
+                "doctype": admin_contract.USER_DOCTYPE,
+                "email": payload["email"] or payload["username"],
+                "first_name": payload["full_name"],
+                "full_name": payload["full_name"],
+                "enabled": 1,
+                "user_type": "System User",
+                "send_welcome_email": 0,
+                "new_password": payload["password"],
+                "roles": [
+                    {"role": role} for role in payload.get("roles") or ()
+                ],
+            }
+            if payload.get("username"):
+                doc["username"] = payload["username"]
+            user = self.frappe.get_doc(doc)
+            user.flags.no_welcome_mail = True
+            user.insert()
+            practitioner = payload.get("practitioner")
+            if practitioner:
+                self.frappe.db.set_value(
+                    admin_contract.PRACTITIONER_DOCTYPE,
+                    practitioner,
+                    "user_id",
+                    user.name,
+                )
+            return self._text_value(user.name)
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def create_native_admin_master(self, master_type, payload):
+        """Create one master row (with its bundled price/account child).
+
+        Company and currency are read from the site's own records; none is
+        accepted from the client.
+        """
+
+        try:
+            company = self._admin_company()
+            currency = self._admin_currency(company)
+            if master_type == "warehouse":
+                doc = self.frappe.get_doc(
+                    {
+                        "doctype": admin_contract.WAREHOUSE_DOCTYPE,
+                        "warehouse_name": payload["warehouse_name"],
+                        "company": company,
+                    }
+                )
+                doc.insert()
+                return self._text_value(doc.name)
+            if master_type == "supplier":
+                doc = self.frappe.get_doc(
+                    {
+                        "doctype": admin_contract.SUPPLIER_DOCTYPE,
+                        "supplier_name": payload["supplier_name"],
+                        "supplier_group": "All Supplier Groups",
+                    }
+                )
+                doc.insert()
+                return self._text_value(doc.name)
+            if master_type == "item":
+                doc = self.frappe.get_doc(
+                    {
+                        "doctype": admin_contract.ITEM_DOCTYPE,
+                        "item_code": payload["item_code"],
+                        "item_name": payload["item_name"],
+                        "item_group": payload["item_group"],
+                        "stock_uom": payload["stock_uom"],
+                        "is_stock_item": 1,
+                    }
+                )
+                doc.insert()
+                price = self.frappe.get_doc(
+                    {
+                        "doctype": admin_contract.ITEM_PRICE_DOCTYPE,
+                        "item_code": doc.name,
+                        "price_list": payload["price_list"],
+                        "rate": payload["rate"],
+                        "currency": currency,
+                        "selling": 1,
+                    }
+                )
+                price.insert()
+                return self._text_value(doc.name)
+            if master_type == "price_list":
+                doc = self.frappe.get_doc(
+                    {
+                        "doctype": admin_contract.PRICE_LIST_DOCTYPE,
+                        "price_list_name": payload["price_list_name"],
+                        "currency": currency,
+                        "selling": 1,
+                        "enabled": 1,
+                    }
+                )
+                doc.insert()
+                return self._text_value(doc.name)
+            if master_type == "mode_of_payment":
+                doc = self.frappe.get_doc(
+                    {
+                        "doctype": admin_contract.MODE_OF_PAYMENT_DOCTYPE,
+                        "mode_of_payment": payload["mode_of_payment"],
+                        "enabled": 1,
+                        "accounts": [
+                            {
+                                "company": company,
+                                "default_account": payload["account"],
+                            }
+                        ],
+                    }
+                )
+                doc.insert()
+                return self._text_value(doc.name)
+            if master_type == "procedure_template":
+                item = self.frappe.db.get_value(
+                    admin_contract.ITEM_DOCTYPE,
+                    payload["item_code"],
+                    ["item_group", "stock_uom"],
+                    as_dict=True,
+                )
+                if item is None:
+                    raise patient_write.WriteUncertain()
+                item_get = (
+                    item.get
+                    if hasattr(item, "get")
+                    else (lambda key, default=None: default)
+                )
+                doc = self.frappe.get_doc(
+                    {
+                        "doctype": admin_contract.PROCEDURE_TEMPLATE_DOCTYPE,
+                        "template": payload["template_name"],
+                        "item_code": payload["item_code"],
+                        "item_group": self._text_value(item_get("item_group")),
+                        "uom": self._text_value(item_get("stock_uom")),
+                        "rate": payload["rate"],
+                        "company": company,
+                    }
+                )
+                doc.insert()
+                return self._text_value(doc.name)
+            raise patient_write.WriteUncertain()
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def native_admin_user_facts(self, user):
+        """Closed-world re-read after one user mutation."""
+
+        try:
+            row = self.frappe.db.get_value(
+                admin_contract.USER_DOCTYPE,
+                user,
+                ["name", "enabled"],
+                as_dict=True,
+            )
+            if row is None:
+                raise patient_write.WriteUncertain()
+            get = (
+                row.get
+                if hasattr(row, "get")
+                else (lambda key, default=None: default)
+            )
+            roles = self.frappe.get_all(
+                "User Role",
+                filters={"parent": user},
+                pluck="role",
+            ) or ()
+            practitioner = self.frappe.db.get_value(
+                admin_contract.PRACTITIONER_DOCTYPE,
+                {"user_id": user},
+                "name",
+            )
+            return {
+                "user": self._text_value(get("name")),
+                "enabled": get("enabled"),
+                "roles": list(roles),
+                "practitioner": (
+                    self._text_value(practitioner) or None
+                ),
+            }
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def native_admin_master_facts(self, master_type, name):
+        """Closed-world re-read after one master mutation."""
+
+        try:
+            if master_type == "warehouse":
+                row = self.frappe.db.get_value(
+                    admin_contract.WAREHOUSE_DOCTYPE,
+                    name,
+                    ["name", "company"],
+                    as_dict=True,
+                )
+                return self._admin_facts_row(row, ("company",))
+            if master_type == "supplier":
+                row = self.frappe.db.get_value(
+                    admin_contract.SUPPLIER_DOCTYPE,
+                    name,
+                    ["name", "supplier_name"],
+                    as_dict=True,
+                )
+                return self._admin_facts_row(row, ("supplier_name",))
+            if master_type == "item":
+                row = self.frappe.db.get_value(
+                    admin_contract.ITEM_DOCTYPE,
+                    name,
+                    ["name", "item_code"],
+                    as_dict=True,
+                )
+                facts = self._admin_facts_row(row, ("item_code",))
+                prices = self.frappe.get_all(
+                    admin_contract.ITEM_PRICE_DOCTYPE,
+                    filters={"item_code": name},
+                    fields=["price_list", "rate"],
+                    order_by="creation desc",
+                    limit=1,
+                ) or ()
+                price = prices[0] if prices else None
+                price_get = (
+                    price.get
+                    if hasattr(price, "get")
+                    else (lambda key, default=None: default)
+                )
+                facts["price_list"] = self._text_value(
+                    price_get("price_list")
+                )
+                facts["rate"] = price_get("rate")
+                return facts
+            if master_type == "price_list":
+                row = self.frappe.db.get_value(
+                    admin_contract.PRICE_LIST_DOCTYPE,
+                    name,
+                    ["name", "currency", "selling"],
+                    as_dict=True,
+                )
+                return self._admin_facts_row(row, ("currency", "selling"))
+            if master_type == "mode_of_payment":
+                row = self.frappe.db.get_value(
+                    admin_contract.MODE_OF_PAYMENT_DOCTYPE,
+                    name,
+                    ["name"],
+                    as_dict=True,
+                )
+                facts = self._admin_facts_row(row, ())
+                accounts = self.frappe.get_all(
+                    "Mode of Payment Account",
+                    filters={"parent": name},
+                    fields=["default_account"],
+                    order_by="idx asc",
+                    limit=1,
+                ) or ()
+                account = accounts[0] if accounts else None
+                account_get = (
+                    account.get
+                    if hasattr(account, "get")
+                    else (lambda key, default=None: default)
+                )
+                facts["account"] = self._text_value(
+                    account_get("default_account")
+                )
+                return facts
+            if master_type == "procedure_template":
+                row = self.frappe.db.get_value(
+                    admin_contract.PROCEDURE_TEMPLATE_DOCTYPE,
+                    name,
+                    ["name", "template", "item_code"],
+                    as_dict=True,
+                )
+                return self._admin_facts_row(row, ("template", "item_code"))
+            raise patient_write.WriteUncertain()
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def _admin_facts_row(self, row, fields):
+        if row is None:
+            raise patient_write.WriteUncertain()
+        get = (
+            row.get
+            if hasattr(row, "get")
+            else (lambda key, default=None: default)
+        )
+        facts = {"name": self._text_value(get("name"))}
+        for field in fields:
+            facts[field] = self._text_value(get(field))
+        return facts
+
+    # -- admin fence, receipts and acknowledgement -----------------------
+
+    def lookup_admin_receipt(self, actor, kind, operation_key):
+        if kind not in write_fence.ADMIN_OPERATION_KINDS:
+            raise patient_write.WriteUncertain()
+        ledger = self._ledger()
+        try:
+            record = ledger.lookup(
+                actor=actor, kind=kind, operation_key=operation_key
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+        if record is None:
+            return None
+        if record.state == write_fence.COMMITTED:
+            return record.receipt
+        raise patient_write.WriteLocked()
+
+    def list_committed_admin_receipts(self, limit, kind=None, operation_key=None):
+        ledger = self._ledger()
+        try:
+            return ledger.committed_admin_receipts(
+                limit=limit, kind=kind, operation_key=operation_key
+            )
+        except write_fence.EnumerationOverflow as exc:
+            raise admin_contract.AdminBudgetExhausted() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    def acknowledge_admin_write(
+        self, secret, actor, kind, operation_key, ack_token
+    ):
+        if kind not in write_fence.ADMIN_OPERATION_KINDS:
+            return "invalid"
+        ledger = self._ledger()
+        try:
+            record = ledger.lookup(
+                actor=actor, kind=kind, operation_key=operation_key
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+        if (
+            record is None
+            or record.state != write_fence.COMMITTED
+            or not record.receipt
+        ):
+            return "invalid"
+        expected = admin_contract.ack_token(
+            secret, self.site, actor, kind, operation_key, record.receipt
+        )
+        if not hmac.compare_digest(expected, ack_token):
+            return "invalid"
+        try:
+            return ledger.acknowledge_barrier(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                ack_receipt="ack:" + expected,
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    @contextmanager
+    def admin_write_fence(self, actor, kind, operation_key, payload_digest):
+        if kind not in write_fence.ADMIN_OPERATION_KINDS:
+            raise patient_write.WriteUncertain()
+        ledger = self._ledger()
+        try:
+            with ledger.fence(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                payload_digest=payload_digest,
+            ) as claim:
+                yield claim
+        except write_fence.OperationLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.SiteLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.OperationConflict as exc:
+            raise patient_write.WriteConflict() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+

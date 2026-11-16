@@ -21,6 +21,7 @@ from clinic_ui.core import dto
 from clinic_ui.core.capabilities import bootstrap_capabilities
 from clinic_ui.core.epoch import session_epoch
 from clinic_ui.core.policy import (
+    ADMIN_ROLE_CODES,
     APPOINTMENT_WRITE_ROLE_CODES,
     ENCOUNTER_COMPLETE_ROLE_CODES,
     ENCOUNTER_ROLE_CODES,
@@ -193,6 +194,35 @@ def _procedure_write_flags(gateway, settings, role):
         return False
 
 
+def _admin_write_flags(gateway, settings, role):
+    """Return ``(user, master)`` when the admin surface is open.
+
+    Independent of every clinical write flag: exact approved site, installed
+    preflight, the admin flag, the deployment marker, a ready fence store and
+    the caller's own native authority. The role allowlist and duplicate checks
+    are decided per request; these flags only advertise that the surface
+    exists.
+    """
+
+    disabled = (False, False)
+    if role not in ADMIN_ROLE_CODES:
+        return disabled
+    try:
+        if gateway.native_admin_install_problem() is not None:
+            return disabled
+        if not settings.admin_write_enabled:
+            return disabled
+        if gateway.write_deployment_approved() is not True:
+            return disabled
+        if gateway.write_fence_ready() is not True:
+            return disabled
+        if gateway.native_admin_can_write() is not True:
+            return disabled
+        return True, True
+    except Exception:
+        return disabled
+
+
 def bootstrap(gateway):
     common.begin(gateway)
 
@@ -226,6 +256,9 @@ def bootstrap(gateway):
         write_procedure_complete = _procedure_write_flags(
             gateway, settings, role
         )
+        write_admin_user, write_admin_master = _admin_write_flags(
+            gateway, settings, role
+        )
         capabilities = bootstrap_capabilities(
             write_patient_create=write_create,
             write_patient_update=write_update,
@@ -238,6 +271,8 @@ def bootstrap(gateway):
             write_encounter_complete=write_encounter_complete,
             write_encounter_amend=write_encounter_amend,
             write_procedure_complete=write_procedure_complete,
+            write_admin_user=write_admin_user,
+            write_admin_master=write_admin_master,
         )
         return dto.build_bootstrap(
             session_epoch=epoch,

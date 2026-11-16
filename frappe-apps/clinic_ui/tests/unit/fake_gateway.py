@@ -286,6 +286,41 @@ class FakeGateway:
         self.procedure_fence_claim = FakeClaim()
         self.procedure_fence_error = None
 
+        # -- admin user/master write surface -------------------------------
+        self.admin_install_problem = None
+        self.admin_can_write = True
+        self.admin_can_create = {}
+        self.admin_missing_roles = []
+        self.admin_users = set()
+        self.admin_practitioners = set()
+        self.admin_masters = set()
+        self.admin_item_prices = set()
+        self.admin_user_exists_sequence = []
+        self.admin_user_exists_calls = []
+        self.admin_practitioner_exists_calls = []
+        self.admin_master_exists_calls = []
+        self.admin_item_price_exists_calls = []
+        self.admin_user_create_calls = []
+        self.admin_user_create_error = None
+        self.created_admin_user = None
+        self.admin_master_create_calls = []
+        self.admin_master_create_error = None
+        self.created_admin_master = None
+        self.admin_user_facts = {}
+        self.admin_master_facts = {}
+        self.admin_user_facts_calls = []
+        self.admin_master_facts_calls = []
+        self.admin_receipts = {}
+        self.admin_receipt_records = []
+        self.admin_receipt_calls = []
+        self.admin_receipt_list_error = None
+        self.admin_ack_calls = []
+        self.admin_ack_status = "acked"
+        self.admin_ack_error = None
+        self.admin_fence_calls = []
+        self.admin_fence_claim = FakeClaim()
+        self.admin_fence_error = None
+
     def setting(self, key):
         sequence = self.setting_sequences.get(key)
         if sequence:
@@ -956,6 +991,142 @@ class FakeGateway:
 
         return procedure_write.decode_receipt(receipt).stock_entry
 
+    # -- local admin user/master write path -----------------------------
+
+    def native_admin_install_problem(self):
+        return self.admin_install_problem
+
+    def native_admin_can_write(self):
+        return self.admin_can_write
+
+    def native_admin_can_create(self, doctype):
+        return self.admin_can_create.get(doctype, True)
+
+    def native_admin_missing_roles(self, roles):
+        return list(self.admin_missing_roles)
+
+    def native_admin_user_exists(self, identifier):
+        self.admin_user_exists_calls.append(identifier)
+        if self.admin_user_exists_sequence:
+            return self.admin_user_exists_sequence.pop(0)
+        return identifier in self.admin_users
+
+    def native_admin_practitioner_exists(self, name):
+        self.admin_practitioner_exists_calls.append(name)
+        return name in self.admin_practitioners
+
+    def native_admin_master_exists(self, master_type, identifier):
+        self.admin_master_exists_calls.append((master_type, identifier))
+        return (master_type, identifier) in self.admin_masters
+
+    def native_admin_item_price_exists(self, item_code, price_list):
+        self.admin_item_price_exists_calls.append((item_code, price_list))
+        return (item_code, price_list) in self.admin_item_prices
+
+    def create_native_admin_user(self, payload):
+        self.admin_user_create_calls.append(dict(payload))
+        if self.admin_user_create_error is not None:
+            raise self.admin_user_create_error
+        if self.created_admin_user:
+            return self.created_admin_user
+        return payload.get("email") or payload.get("username")
+
+    def create_native_admin_master(self, master_type, payload):
+        self.admin_master_create_calls.append((master_type, dict(payload)))
+        if self.admin_master_create_error is not None:
+            raise self.admin_master_create_error
+        if self.created_admin_master:
+            return self.created_admin_master
+        if master_type == "warehouse":
+            return payload["warehouse_name"]
+        if master_type == "supplier":
+            return payload["supplier_name"]
+        if master_type == "item":
+            return payload["item_code"]
+        if master_type == "price_list":
+            return payload["price_list_name"]
+        if master_type == "mode_of_payment":
+            return payload["mode_of_payment"]
+        return payload["template_name"]
+
+    def native_admin_user_facts(self, user):
+        self.admin_user_facts_calls.append(user)
+        if self.admin_user_facts:
+            return dict(self.admin_user_facts)
+        payload = self.admin_user_create_calls[-1]
+        return {
+            "user": user,
+            "enabled": 1,
+            "roles": list(payload["roles"]),
+            "practitioner": payload.get("practitioner"),
+        }
+
+    def native_admin_master_facts(self, master_type, name):
+        self.admin_master_facts_calls.append((master_type, name))
+        if self.admin_master_facts:
+            return dict(self.admin_master_facts)
+        _master_type, payload = self.admin_master_create_calls[-1]
+        if master_type == "warehouse":
+            return {"name": name, "company": "SIT Synthetic Company"}
+        if master_type == "supplier":
+            return {"name": name, "supplier_name": payload["supplier_name"]}
+        if master_type == "item":
+            return {
+                "name": name,
+                "item_code": payload["item_code"],
+                "price_list": payload["price_list"],
+                "rate": payload["rate"],
+            }
+        if master_type == "price_list":
+            return {"name": name, "currency": "USD", "selling": 1}
+        if master_type == "mode_of_payment":
+            return {"name": name, "account": payload["account"]}
+        return {"name": name, "item_code": payload["item_code"]}
+
+    def lookup_admin_receipt(self, actor, kind, operation_key):
+        value = self.admin_receipts.get((actor, kind, operation_key))
+        if isinstance(value, Exception):
+            raise value
+        if value is not None:
+            return value
+        for record in self.admin_receipt_records:
+            if (
+                record.actor == actor
+                and record.kind == kind
+                and record.operation_key == operation_key
+            ):
+                return record.receipt
+        return None
+
+    def list_committed_admin_receipts(self, limit, kind=None, operation_key=None):
+        self.admin_receipt_calls.append((limit, kind, operation_key))
+        if self.admin_receipt_list_error is not None:
+            raise self.admin_receipt_list_error
+        from clinic_ui.core import admin_contract
+
+        records = [
+            record
+            for record in self.admin_receipt_records
+            if (kind is None or record.kind == kind)
+            and (operation_key is None or record.operation_key == operation_key)
+        ]
+        if len(records) > limit:
+            raise admin_contract.AdminBudgetExhausted()
+        return records
+
+    def acknowledge_admin_write(
+        self, secret, actor, kind, operation_key, ack_token
+    ):
+        self.admin_ack_calls.append((actor, kind, operation_key, ack_token))
+        if self.admin_ack_error is not None:
+            raise self.admin_ack_error
+        return self.admin_ack_status
+
+    def admin_write_fence(self, actor, kind, operation_key, payload_digest):
+        self.call_order.append("admin_fence")
+        self.admin_fence_calls.append((actor, kind, operation_key, payload_digest))
+        return FakeFence(self.admin_fence_claim, self.admin_fence_error)
+
 
 
 def detail():
@@ -1026,6 +1197,16 @@ class FakeEncounterReceipt:
 
 class FakeProcedureReceipt:
     """One committed procedure row as the gateway would enumerate it."""
+
+    def __init__(self, kind, actor, operation_key, receipt):
+        self.kind = kind
+        self.actor = actor
+        self.operation_key = operation_key
+        self.receipt = receipt
+
+
+class FakeAdminReceipt:
+    """One committed admin row as the gateway would enumerate it."""
 
     def __init__(self, kind, actor, operation_key, receipt):
         self.kind = kind

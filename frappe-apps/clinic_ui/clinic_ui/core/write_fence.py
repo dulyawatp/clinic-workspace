@@ -187,11 +187,17 @@ ENCOUNTER_OPERATION_KINDS = frozenset(
 # kind. A procedure completion is refused pre-fence once it happened, so this
 # kind can be claimed at most once per approved target.
 PROCEDURE_OPERATION_KINDS = frozenset({"procedure_complete"})
+# Admin kinds are additive on the same ledger. ``admin_user`` and
+# ``admin_master`` carry their registry names because they are also the budget
+# keys and the durable receipt kinds. Each admin operation creates exactly one
+# user (plus its roles and optional practitioner link) or one master row.
+ADMIN_OPERATION_KINDS = frozenset({"admin_user", "admin_master"})
 OPERATION_KINDS = (
     PATIENT_OPERATION_KINDS
     | APPOINTMENT_OPERATION_KINDS
     | ENCOUNTER_OPERATION_KINDS
     | PROCEDURE_OPERATION_KINDS
+    | ADMIN_OPERATION_KINDS
 )
 
 # Reserved identity for the durable site-wide manual-investigation latch. It is
@@ -519,6 +525,21 @@ class CommittedProcedureReceipt:
     The receipt is opaque to this module: only the separate procedure codec may
     interpret it, and the caller must re-verify it before use. Patient,
     appointment and encounter receipts are never returned here.
+    """
+
+    kind: str
+    actor: str
+    operation_key: str
+    receipt: str
+
+
+@dataclass(frozen=True)
+class CommittedAdminReceipt:
+    """One read-only committed admin receipt discovered in the fence.
+
+    The receipt is opaque to this module: only the separate admin codec may
+    interpret it. It carries the created user or master name and never a
+    credential.
     """
 
     kind: str
@@ -980,6 +1001,80 @@ class Ledger:
             )
         return [
             CommittedProcedureReceipt(
+                kind=row["kind"],
+                actor=row["actor"],
+                operation_key=row["operation_key"],
+                receipt=row["receipt"],
+            )
+            for row in rows
+        ]
+
+    def committed_admin_receipts(self, *, limit, kind=None, operation_key=None):
+        """Enumerate terminal ``COMMITTED`` admin receipts, bounded.
+
+        A separate, read-only namespace from every other family: only
+        ``admin_user`` and ``admin_master`` rows are selected. The reserved
+        latch actor and key are excluded, as is every non-terminal state.
+        ``limit`` is a hard server-side bound; an over-full page raises
+        :class:`EnumerationOverflow` instead of silently truncating. The method
+        appends nothing and acquires no write claim.
+        """
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= MAX_RECEIPT_ENUMERATION
+        ):
+            raise InvalidOperation("enumeration limit is invalid")
+        if kind is not None:
+            kind = _require_kind(kind)
+            if kind not in ADMIN_OPERATION_KINDS:
+                raise InvalidOperation("kind is not an admin kind")
+        if operation_key is not None:
+            operation_key = _require_operation_key(operation_key)
+        kinds = tuple(sorted(ADMIN_OPERATION_KINDS))
+        sql = (
+            "SELECT e.kind, e.actor, e.operation_key, e.receipt FROM events AS e"
+            " WHERE e.deployment_id = (SELECT deployment_id FROM meta)"
+            f" AND e.kind IN ({', '.join('?' for _ in kinds)})"
+            " AND e.state = 'COMMITTED'"
+            " AND e.actor != ?"
+            " AND e.operation_key != ?"
+            " AND e.sequence = ("
+            "   SELECT MAX(e2.sequence) FROM events AS e2"
+            "   WHERE e2.deployment_id = e.deployment_id"
+            "     AND e2.actor = e.actor"
+            "     AND e2.kind = e.kind"
+            "     AND e2.operation_key = e.operation_key"
+            " )"
+        )
+        parameters = [*kinds, LATCH_ACTOR, LATCH_OPERATION_KEY]
+        if kind is not None:
+            sql += " AND e.kind = ?"
+            parameters.append(kind)
+        if operation_key is not None:
+            sql += " AND e.operation_key = ?"
+            parameters.append(operation_key)
+        sql += " ORDER BY e.sequence LIMIT ?"
+        parameters.append(limit + 1)
+
+        directory_fd = self._open_pinned_directory()
+        try:
+            with self._connection(directory_fd) as connection:
+                try:
+                    rows = connection.execute(sql, parameters).fetchall()
+                except sqlite3.DatabaseError as exc:
+                    raise StoreUnavailable(
+                        "could not read committed admin receipts"
+                    ) from exc
+        finally:
+            os.close(directory_fd)
+        if len(rows) > limit:
+            raise EnumerationOverflow(
+                "committed admin receipts exceed the bound"
+            )
+        return [
+            CommittedAdminReceipt(
                 kind=row["kind"],
                 actor=row["actor"],
                 operation_key=row["operation_key"],

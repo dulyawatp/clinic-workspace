@@ -107,6 +107,12 @@ PROCEDURE_WRITE_SITE_KEY = "clinic_ui_native_procedure_write_site"
 # complete. The workspace id is the only procedure identifier returned to the
 # client; the native docname is never exposed.
 PROCEDURES_KEY = "clinic_ui_synthetic_procedures"
+# Separate, default-off admin users + masters gate. Independent of every other
+# write flag: creating a user or a master needs this flag and the exact
+# approved site. The role allowlist, duplicates and native authority are decided
+# per request by the admin contract and endpoint.
+ADMIN_WRITE_ENABLED_KEY = "clinic_ui_native_admin_write_enabled"
+ADMIN_WRITE_SITE_KEY = "clinic_ui_native_admin_write_site"
 
 # The one and only site identity on which this local experiment may run. Exact
 # string equality against the resolved current site is required; the configured
@@ -154,6 +160,7 @@ class Settings:
     encounter_company: str | None = None
     procedure_write_enabled: bool = False
     procedure_allowlist: tuple = ()
+    admin_write_enabled: bool = False
 
     def as_role_map(self):
         return {code: tuple(roles) for code, roles in self.role_map}
@@ -440,6 +447,24 @@ def _procedure_write_settings(getter, site):
     return True
 
 
+def _admin_write_settings(getter, site):
+    """Return ``True`` when the admin user/master gate is open.
+
+    The gate needs the exact approved site and its own flag. The role
+    allowlist, duplicates and native authority are decided per request by the
+    admin contract and endpoint, never from configuration alone.
+    """
+
+    if site != APPROVED_WRITE_SITE or site in DISALLOWED_WRITE_SITES:
+        return False
+    if not _enabled(getter(ADMIN_WRITE_ENABLED_KEY)):
+        return False
+    configured = getter(ADMIN_WRITE_SITE_KEY)
+    if not isinstance(configured, str) or configured != APPROVED_WRITE_SITE:
+        return False
+    return True
+
+
 def load_settings(getter, site):
     """Return validated settings, or ``None`` when the feature is unavailable."""
 
@@ -513,4 +538,5 @@ def load_settings(getter, site):
         encounter_company=encounter_company,
         procedure_write_enabled=_procedure_write_settings(getter, site),
         procedure_allowlist=procedure_allowlist,
+        admin_write_enabled=_admin_write_settings(getter, site),
     )

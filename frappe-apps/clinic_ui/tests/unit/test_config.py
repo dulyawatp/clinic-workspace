@@ -542,5 +542,137 @@ class AppointmentWriteSettingsTests(unittest.TestCase):
         self.assertEqual(settings.appointment_checkin_patient, "WS-2")
 
 
+class ProcedureNamespaceTests(unittest.TestCase):
+    """Task-4 review request: the procedure dimension joins the disjointness."""
+
+    PATIENTS = [
+        {"workspace_patient_id": "WS-1", "native_patient_id": "PAT-1"},
+    ]
+    APPOINTMENTS = [
+        {
+            "workspace_appointment_id": "APPT-1",
+            "native_appointment_id": "NATIVE-APPT-1",
+        }
+    ]
+
+    def load_with_procedure(self, procedure):
+        return load(
+            base(
+                **{
+                    config.ALLOWLIST_KEY: self.PATIENTS,
+                    config.APPOINTMENTS_KEY: self.APPOINTMENTS,
+                    config.PROCEDURES_KEY: procedure,
+                }
+            )
+        )
+
+    def procedure(self, workspace, native):
+        return [
+            {
+                "workspace_procedure_id": workspace,
+                "native_procedure_id": native,
+            }
+        ]
+
+    def test_disjoint_procedure_namespace_parses(self):
+        settings = self.load_with_procedure(
+            self.procedure("WS-PROC-1", "HLC-CPR-1")
+        )
+        self.assertIsNotNone(settings)
+        self.assertEqual(
+            settings.procedure_allowlist, (("WS-PROC-1", "HLC-CPR-1"),)
+        )
+
+    def test_patient_workspace_matching_procedure_native_is_refused(self):
+        settings = load(
+            base(
+                **{
+                    config.ALLOWLIST_KEY: [
+                        {
+                            "workspace_patient_id": "SHARED",
+                            "native_patient_id": "PAT-1",
+                        }
+                    ],
+                    config.PROCEDURES_KEY: self.procedure(
+                        "WS-PROC-1", "SHARED"
+                    ),
+                }
+            )
+        )
+        self.assertIsNone(settings)
+
+    def test_appointment_workspace_matching_procedure_native_is_refused(self):
+        settings = load(
+            base(
+                **{
+                    config.APPOINTMENTS_KEY: [
+                        {
+                            "workspace_appointment_id": "SHARED",
+                            "native_appointment_id": "NATIVE-APPT-1",
+                        }
+                    ],
+                    config.PROCEDURES_KEY: self.procedure(
+                        "WS-PROC-1", "SHARED"
+                    ),
+                }
+            )
+        )
+        self.assertIsNone(settings)
+
+    def test_procedure_workspace_matching_another_family_native_is_refused(self):
+        settings = load(
+            base(
+                **{
+                    config.ALLOWLIST_KEY: [
+                        {
+                            "workspace_patient_id": "WS-1",
+                            "native_patient_id": "PAT-1",
+                        }
+                    ],
+                    config.PROCEDURES_KEY: self.procedure(
+                        "PAT-1", "HLC-CPR-1"
+                    ),
+                }
+            )
+        )
+        self.assertIsNone(settings)
+
+
+class AdminWriteSettingsTests(unittest.TestCase):
+    APPROVED = config.APPROVED_WRITE_SITE
+
+    def values(self, **overrides):
+        values = {
+            config.ENABLED_KEY: 1,
+            config.SITE_KEY: self.APPROVED,
+            config.EPOCH_SECRET_KEY: SECRET,
+            config.ROLE_MAP_KEY: {"ADM": ["System Manager"]},
+            config.ALLOWLIST_KEY: [
+                {"workspace_patient_id": "WS-1", "native_patient_id": "PAT-1"}
+            ],
+            config.ADMIN_WRITE_ENABLED_KEY: 1,
+            config.ADMIN_WRITE_SITE_KEY: self.APPROVED,
+        }
+        values.update(overrides)
+        return values
+
+    def test_the_gate_opens_only_for_the_exact_approved_site(self):
+        self.assertTrue(load(self.values(), site=self.APPROVED).admin_write_enabled)
+        self.assertIsNone(load(self.values(), site="lab.test"))
+        self.assertFalse(
+            load(
+                self.values(**{config.ADMIN_WRITE_SITE_KEY: "lab.test"}),
+                site=self.APPROVED,
+            ).admin_write_enabled
+        )
+
+    def test_the_gate_is_default_off(self):
+        settings = load(
+            self.values(**{config.ADMIN_WRITE_ENABLED_KEY: 0}),
+            site=self.APPROVED,
+        )
+        self.assertFalse(settings.admin_write_enabled)
+
+
 if __name__ == "__main__":
     unittest.main()

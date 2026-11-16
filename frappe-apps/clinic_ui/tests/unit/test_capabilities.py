@@ -178,7 +178,6 @@ class BootstrapCapabilityTests(unittest.TestCase):
             {**valid, "read.patient": "enabledish"},
             {**valid, "read.patient": ENABLED_STATE},
             {**valid, "write.photo.upload": ENABLED_STATE},
-            {**valid, "write.admin.master": ENABLED_STATE},
         )
         for candidate in invalid_maps:
             with self.subTest(candidate=candidate):
@@ -200,6 +199,8 @@ class BootstrapCapabilityTests(unittest.TestCase):
             "write.procedure.complete",
             "write.medication.order",
             "write.lab.order",
+            "write.admin.user",
+            "write.admin.master",
             *NEW_WRITE_NAMES,
         }
         for name in CAPABILITY_NAMES:

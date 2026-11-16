@@ -104,7 +104,7 @@
 
 **Interfaces:**
 - Produces: POST `create_user {operation_key, email?, full_name, clinic_role_code, practitioner?}` (email optional-if-username-provided per installed User semantics), `edit_master {operation_key, master_type, payload}`; kinds `admin_user` (4), `admin_master` (12). Roles: ADM (PRE-fence).
-- [ ] "Disable last administrator" and duplicate/email failures refuse pre-fence. Credentials: gateway MUST set `new_password` from a caller-supplied secret (no generation server-side); SIT passes the private-store value; welcome-email suppression pin (`send_welcome_email=0` semantics as installed).
+- [x] Duplicate/email failures refuse pre-fence; the privilege boundary refuses System Manager / Healthcare Administrator assignment pre-fence. "Disable last administrator" is designed (CSV:143) but disable is OUT of this wave's op set, so it remains **unexercised-designed**. Credentials: gateway sets `new_password` from a caller-supplied secret (no generation server-side); SIT passes the private-store value; welcome-email suppression pin (`send_welcome_email=0` semantics as installed).
 
 ### Task 6: Stock receive / transfer / adjust
 
@@ -158,7 +158,7 @@
 ### Task 11: SIT A — admin seeding + identities (writes through the contract)
 
 **Files:** private SIT scripts under `~/.local/state/marley-sit/` (not repo); evidence dir
-- [ ] Preflight: capabilities read, budget registry read-back, master-empty inventory noted. Open ONLY `write.admin.user`, `write.admin.master` gates (site config; approved pause active).
+- [ ] Preflight: capabilities read, budget registry read-back, master-empty inventory noted. **Ruling (task-4 concern 3): define at this preflight how the seeded submitted Clinical Procedure comes into existence for SIT B — preferred: the installed Service Request→Clinical Procedure flow from task-12's encounter-complete cascade; if that flow does not auto-create the procedure, STOP and request user approval for an additional creation path/budget amendment before proceeding (never improvise a write).** Open ONLY `write.admin.user`, `write.admin.master` gates (site config; approved pause active).
 - [ ] Execute 12 admin_master ops + 4 admin_user ops (PHA/CAS/MGR/ADM synthetic users) through the UI as the existing ADM-capable actor — one submit each, acks, receipts; credentials → private gen-secrets store; HAR per session.
 - [ ] Independent verification: master/user rows + budgets consumed (12+4), fence receipts COMMITTED + barriers, no side effects beyond family list; then close the admin gates.
 
