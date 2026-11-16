@@ -1983,5 +1983,8 @@
   "encounterWrite.conflict": "This encounter was already written by another request.",
   "encounterWrite.invalid": "Some fields are missing or invalid.",
   "encounterWrite.forbidden": "Your role cannot perform this write.",
-  "encounterWrite.uncertain": "The outcome is uncertain. Do not retry; ask an operator to reconcile."
+  "encounterWrite.uncertain": "The outcome is uncertain. Do not retry; ask an operator to reconcile.",
+  "encounterWrite.medicationCode": "Medicine code",
+  "encounterWrite.labTestCode": "Lab test code",
+  "encounterWrite.procedureCode": "Procedure code"
 }

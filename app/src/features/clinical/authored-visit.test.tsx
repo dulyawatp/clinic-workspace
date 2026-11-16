@@ -324,3 +324,105 @@ it("reports a refused native save without retrying", async () => {
   expect(posts.posts.filter((url) => url.includes("save_draft"))).toHaveLength(1);
   posts.stop();
 });
+
+it("authors medication and lab rows into the native draft payload", async () => {
+  vi.stubEnv("VITE_CLINIC_NATIVE", "1");
+  const user = userEvent.setup();
+  let body: Record<string, unknown> | null = null;
+  server.use(
+    http.get(NATIVE_BOOTSTRAP, () =>
+      nativeSession("DOC", nativeCaps() as CapabilityMap),
+    ),
+    http.post(SAVE_DRAFT, async ({ request }) => {
+      body = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json({
+        message: {
+          status: "draft_saved",
+          ackToken: ACK_TOKEN,
+          encounter: {
+            encounter_id: NATIVE_ENCOUNTER,
+            workspace_patient_id: "PT-1",
+            state: "draft",
+            status: "Draft",
+            modified: "2026-11-14 09:30:00.123456",
+          },
+        },
+      });
+    }),
+    http.post(ACK, () => HttpResponse.json({ message: { acknowledged: true } })),
+  );
+  renderWithFixtures(nativeWorkspace(), {
+    sessionMode: "live",
+    role: "DOC",
+    caps: nativeCaps() as CapabilityMap,
+    path: ROUTES.visit("ENC-1"),
+  });
+
+  await user.click(await screen.findByRole("tab", { name: /ยา|medication/i }));
+  await user.click(
+    await screen.findByRole("button", { name: "เพิ่มยา" }),
+  );
+  await user.type(
+    screen.getByLabelText("รหัสยา"),
+    "DRUG-1",
+  );
+  await user.type(screen.getByLabelText("ขนาดยา"), "1 tab");
+
+  await user.click(screen.getByRole("tab", { name: /ผลแล็บ|lab/i }));
+  await user.click(
+    await screen.findByRole("button", { name: "สั่งตรวจแล็บ" }),
+  );
+  await user.type(screen.getByLabelText("รหัสตรวจแล็บ"), "CBC");
+
+  await user.click(screen.getByRole("button", { name: "บันทึกฉบับร่าง" }));
+  await waitFor(() => expect(body).not.toBeNull());
+  expect(body).toMatchObject({
+    medications: [{ drug_code: "DRUG-1", dosage: "1 tab" }],
+    lab_tests: [{ lab_test_code: "CBC" }],
+    procedures: [],
+  });
+});
+
+it("removes an authored row before it reaches the payload", async () => {
+  vi.stubEnv("VITE_CLINIC_NATIVE", "1");
+  const user = userEvent.setup();
+  let body: Record<string, unknown> | null = null;
+  server.use(
+    http.get(NATIVE_BOOTSTRAP, () =>
+      nativeSession("DOC", nativeCaps() as CapabilityMap),
+    ),
+    http.post(SAVE_DRAFT, async ({ request }) => {
+      body = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json({
+        message: {
+          status: "draft_saved",
+          ackToken: ACK_TOKEN,
+          encounter: {
+            encounter_id: NATIVE_ENCOUNTER,
+            workspace_patient_id: "PT-1",
+            state: "draft",
+            status: "Draft",
+            modified: "2026-11-14 09:30:00.123456",
+          },
+        },
+      });
+    }),
+    http.post(ACK, () => HttpResponse.json({ message: { acknowledged: true } })),
+  );
+  renderWithFixtures(nativeWorkspace(), {
+    sessionMode: "live",
+    role: "DOC",
+    caps: nativeCaps() as CapabilityMap,
+    path: ROUTES.visit("ENC-1"),
+  });
+
+  await user.click(await screen.findByRole("tab", { name: /หัตถการ|procedure/i }));
+  await user.click(
+    await screen.findByRole("button", { name: "เพิ่มหัตถการ" }),
+  );
+  await user.type(screen.getByLabelText("รหัสหัตถการ"), "PROC-1");
+  await user.click(screen.getByRole("button", { name: "ลบ" }));
+  await user.click(screen.getByRole("button", { name: "บันทึกฉบับร่าง" }));
+  await waitFor(() => expect(body).not.toBeNull());
+  expect(body).toMatchObject({ procedures: [] });
+});

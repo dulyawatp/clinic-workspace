@@ -59,7 +59,14 @@ export interface NativeVisitBinding {
   state?: "draft" | "completed";
 }
 
-function nativePayload(values: AuthoredVisitValues) {
+function nativePayload(
+  values: AuthoredVisitValues,
+  rows: {
+    medications: NativeRow[];
+    labTests: NativeRow[];
+    procedures: NativeRow[];
+  },
+) {
   const vitals: Record<string, string> = {};
   for (const key of ["temp", "pulse", "resp", "sys", "dia", "height", "weight"]) {
     const raw = (values as unknown as Record<string, string>)[key] ?? "";
@@ -76,11 +83,23 @@ function nativePayload(values: AuthoredVisitValues) {
     vitals[mapping[key] as string] = raw.trim();
   }
   const diagnosis = values.diagnosisText.trim();
+  const coded = (list: NativeRow[]) =>
+    list.filter((row) => row.code.trim() !== "");
   return {
     complaint: values.complaint.trim() || null,
     diagnoses: diagnosis
       ? [{ diagnosis: values.diagnosisCode.trim() || diagnosis }]
       : [],
+    medications: coded(rows.medications).map((row) => ({
+      drug_code: row.code.trim(),
+      dosage: row.second?.trim() || null,
+    })),
+    lab_tests: coded(rows.labTests).map((row) => ({
+      lab_test_code: row.code.trim(),
+    })),
+    procedures: coded(rows.procedures).map((row) => ({
+      procedure: row.code.trim(),
+    })),
     vitals,
     note: {
       assessment: values.assessment,
@@ -90,6 +109,90 @@ function nativePayload(values: AuthoredVisitValues) {
     },
     allergy_reviewed: values.allergyReviewed,
   };
+}
+
+interface NativeRow {
+  code: string;
+  second?: string;
+}
+
+/** One native prescription-row list with add/remove. Demo mode never renders it. */
+function NativeRows({
+  id,
+  labelKey,
+  secondLabelKey,
+  addLabelKey,
+  emptyKey,
+  rows,
+  onChange,
+  disabled,
+}: {
+  id: string;
+  labelKey: string;
+  secondLabelKey?: string;
+  addLabelKey: string;
+  emptyKey: string;
+  rows: NativeRow[];
+  onChange: (rows: NativeRow[]) => void;
+  disabled: boolean;
+}) {
+  const { t } = useTranslation();
+  const update = (index: number, patch: Partial<NativeRow>) =>
+    onChange(rows.map((row, at) => (at === index ? { ...row, ...patch } : row)));
+  return (
+    <div className="pc-stack" data-testid={`native-rows-${id}`}>
+      {rows.length === 0 && <p className="pc-note">{t(emptyKey)}</p>}
+      {rows.map((row, index) => (
+        <div className="pc-field-grid" key={`${id}-${index}`}>
+          <div className="pc-field">
+            <label className="pc-field__label" htmlFor={`${id}-${index}-code`}>
+              {t(labelKey)}
+            </label>
+            <input
+              id={`${id}-${index}-code`}
+              value={row.code}
+              onChange={(event) => update(index, { code: event.target.value })}
+              disabled={disabled}
+            />
+          </div>
+          {secondLabelKey !== undefined && (
+            <div className="pc-field">
+              <label
+                className="pc-field__label"
+                htmlFor={`${id}-${index}-second`}
+              >
+                {t(secondLabelKey)}
+              </label>
+              <input
+                id={`${id}-${index}-second`}
+                value={row.second ?? ""}
+                onChange={(event) =>
+                  update(index, { second: event.target.value })
+                }
+                disabled={disabled}
+              />
+            </div>
+          )}
+          <div className="pc-row">
+            <Button
+              variant="ghost"
+              onClick={() => onChange(rows.filter((_row, at) => at !== index))}
+              disabled={disabled}
+            >
+              {t("action.delete")}
+            </Button>
+          </div>
+        </div>
+      ))}
+      <Button
+        variant="secondary"
+        onClick={() => onChange([...rows, { code: "" }])}
+        disabled={disabled}
+      >
+        {t(addLabelKey)}
+      </Button>
+    </div>
+  );
 }
 
 function writeFailureKey(code: string): string {
@@ -150,6 +253,9 @@ export function AuthoredVisitWorkspace({
     native?.baseModified ?? null,
   );
   const [busy, setBusy] = useState(false);
+  const [medicationRows, setMedicationRows] = useState<NativeRow[]>([]);
+  const [labRows, setLabRows] = useState<NativeRow[]>([]);
+  const [procedureRows, setProcedureRows] = useState<NativeRow[]>([]);
 
   const locked = phase === "completed";
   const readiness = readinessOf(values, phase);
@@ -201,7 +307,11 @@ export function AuthoredVisitWorkspace({
       encounter: encounterAlias,
       base_modified: baseModified,
       appointment: native.appointmentId ?? null,
-      ...nativePayload(values),
+      ...nativePayload(values, {
+        medications: medicationRows,
+        labTests: labRows,
+        procedures: procedureRows,
+      }),
     })
       .then((result) => {
         setEncounterAlias(result.encounter.encounter_id);
@@ -479,40 +589,82 @@ export function AuthoredVisitWorkspace({
       ) : section === "photos" ? (
         <PhotosSection patientId={native?.patientId ?? visit?.patientId ?? ""} />
       ) : section === "lab" ? (
-        <ExternalLabSection
-          patientId={native?.patientId ?? visit?.patientId ?? ""}
-        />
+        native ? (
+          <div className="pc-stack">
+            <NativeRows
+              id="native-lab"
+              labelKey="encounterWrite.labTestCode"
+              addLabelKey="action.addLab"
+              emptyKey="visit.noLabs"
+              rows={labRows}
+              onChange={setLabRows}
+              disabled={locked || !canDraft}
+            />
+            <p className="clinical-notice">{t("visit.medicationsNotice")}</p>
+          </div>
+        ) : (
+          <ExternalLabSection patientId={visit?.patientId ?? ""} />
+        )
       ) : section === "medications" ? (
-        <div className="pc-stack">
-          {!visit || visit.meds.length === 0 ? (
-            <p className="pc-note">{t("clinical.noMedications")}</p>
-          ) : (
-            <ul className="pc-lab-list">
-              {visit.meds.map((med) => (
-                <li className="pc-listrow" key={med.item}>
-                  <div className="pc-listrow__grow">
-                    <strong>{translateClinicalText(med.item)}</strong>
-                    <p className="pc-listrow__meta">
-                      {translateClinicalText(med.dose)} ·{" "}
-                      {translateClinicalText(med.freq)} ·{" "}
-                      {translateClinicalText(med.duration)}
-                    </p>
-                  </div>
-                  <Badge tone="info">
-                    {med.status === "prescribed"
-                      ? t("clinical.ordered")
-                      : med.status}
-                  </Badge>
-                </li>
-              ))}
-            </ul>
-          )}
-          <p className="clinical-notice">{t("visit.medicationsNotice")}</p>
-        </div>
+        native ? (
+          <div className="pc-stack">
+            <NativeRows
+              id="native-medications"
+              labelKey="encounterWrite.medicationCode"
+              secondLabelKey="field.dose"
+              addLabelKey="action.addMedication"
+              emptyKey="clinical.noMedications"
+              rows={medicationRows}
+              onChange={setMedicationRows}
+              disabled={locked || !canDraft}
+            />
+            <p className="clinical-notice">{t("visit.medicationsNotice")}</p>
+          </div>
+        ) : (
+          <div className="pc-stack">
+            {!visit || visit.meds.length === 0 ? (
+              <p className="pc-note">{t("clinical.noMedications")}</p>
+            ) : (
+              <ul className="pc-lab-list">
+                {visit.meds.map((med) => (
+                  <li className="pc-listrow" key={med.item}>
+                    <div className="pc-listrow__grow">
+                      <strong>{translateClinicalText(med.item)}</strong>
+                      <p className="pc-listrow__meta">
+                        {translateClinicalText(med.dose)} ·{" "}
+                        {translateClinicalText(med.freq)} ·{" "}
+                        {translateClinicalText(med.duration)}
+                      </p>
+                    </div>
+                    <Badge tone="info">
+                      {med.status === "prescribed"
+                        ? t("clinical.ordered")
+                        : med.status}
+                    </Badge>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="clinical-notice">{t("visit.medicationsNotice")}</p>
+          </div>
+        )
       ) : section === "procedures" ? (
-        <ProceduresSection
-          patientId={native?.patientId ?? visit?.patientId ?? ""}
-        />
+        native ? (
+          <div className="pc-stack">
+            <NativeRows
+              id="native-procedures"
+              labelKey="encounterWrite.procedureCode"
+              addLabelKey="action.addProcedure"
+              emptyKey="visit.noProcedures"
+              rows={procedureRows}
+              onChange={setProcedureRows}
+              disabled={locked || !canDraft}
+            />
+            <p className="clinical-notice">{t("visit.proceduresNotice")}</p>
+          </div>
+        ) : (
+          <ProceduresSection patientId={visit?.patientId ?? ""} />
+        )
       ) : section === "review" ? (
         <div className="pc-stack">
           <h3>{t("visit.reviewComposed")}</h3>
