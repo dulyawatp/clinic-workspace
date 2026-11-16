@@ -19,6 +19,8 @@ interface FieldSpec {
   label: string;
   kind: FieldKind;
   maxLength?: number;
+  /** Amendment A1.1: the practitioner ``user`` link may be left empty. */
+  optional?: boolean;
 }
 
 interface MasterSpec {
@@ -81,6 +83,19 @@ export const MASTER_SPECS: Record<MasterType, MasterSpec> = {
     title: "adminWrite.masterSupplierGroup",
     fields: [
       { name: "supplier_group_name", label: "adminWrite.supplierGroupName", kind: "text", maxLength: 140 },
+    ],
+  },
+  practitioner: {
+    title: "adminWrite.masterPractitioner",
+    fields: [
+      { name: "practitioner_name", label: "adminWrite.practitionerName", kind: "text", maxLength: 140 },
+      {
+        name: "user",
+        label: "adminWrite.practitionerUser",
+        kind: "text",
+        maxLength: 140,
+        optional: true,
+      },
     ],
   },
 };
@@ -286,6 +301,10 @@ export function AdminMasterWriteForm({ masterType }: { masterType: MasterType })
     for (const field of spec.fields) {
       const raw = (values[field.name] ?? "").trim();
       if (!raw) {
+        if (field.optional) {
+          payload[field.name] = "";
+          continue;
+        }
         setError(t("adminWrite.invalid"));
         return;
       }
@@ -352,7 +371,7 @@ export function AdminMasterWriteForm({ masterType }: { masterType: MasterType })
                   min={field.kind === "number" ? 0 : undefined}
                   step={field.kind === "number" ? "0.01" : undefined}
                   value={values[field.name] ?? ""}
-                  required
+                  required={!field.optional}
                   onChange={(event) =>
                     setField(field.name, event.target.value)
                   }

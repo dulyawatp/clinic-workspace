@@ -181,6 +181,7 @@ export function AdminClinicalPage() {
           ) : null}
 
           {tab === "practitioners" ? (
+            <>
             <DataTable
               caption={copy("แพทย์", "Practitioner")}
               columns={[
@@ -212,6 +213,8 @@ export function AdminClinicalPage() {
               ])}
               empty={copy("ไม่พบรายการตามตัวกรอง", "No records match these filters")}
             />
+            <AdminMasterWriteForm masterType="practitioner" />
+            </>
           ) : null}
 
           {tab === "providers" ? (

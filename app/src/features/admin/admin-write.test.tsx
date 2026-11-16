@@ -7,6 +7,7 @@ import { server } from "../../test/msw/server";
 import { NATIVE_BOOTSTRAP, nativeSession } from "../../test/network-spy";
 import { renderWithFixtures } from "../../test/render";
 import { clearNativeCsrfToken } from "../../transport/native/session";
+import { AdminClinicalPage } from "./AdminClinicalPage";
 import { AdminSettingsPage } from "./AdminSettingsPage";
 import { AdminUsersPage } from "./AdminUsersPage";
 
@@ -189,6 +190,88 @@ it.each([
     expect(await screen.findByText("สร้างข้อมูลหลักแล้ว")).toBeVisible();
   },
 );
+
+it("creates a practitioner master with an optional user link", async () => {
+  const user = userEvent.setup();
+  const bodies: Record<string, unknown>[] = [];
+  serve(ENABLED_USERS);
+  server.use(
+    http.post(EDIT_MASTER, async ({ request }) => {
+      bodies.push((await request.json()) as Record<string, unknown>);
+      return HttpResponse.json({
+        message: {
+          status: "created",
+          master: {
+            master_type: "practitioner",
+            master_id: "HLC-PRAC-2026-00001",
+          },
+          ackToken: TOKEN,
+        },
+      });
+    }),
+    http.post(ACK, ack),
+  );
+  renderWithFixtures(<AdminClinicalPage />, {
+    role: "ADM",
+    sessionMode: "live",
+    path: `${ROUTES.adminClinical}?tab=practitioners`,
+  });
+  await screen.findByTestId("admin-clinical");
+
+  await user.click(screen.getByRole("button", { name: "สร้างแพทย์" }));
+  await user.type(screen.getByLabelText("ชื่อแพทย์"), "SIT Doctor");
+  await user.type(
+    screen.getByLabelText("ผู้ใช้ที่เชื่อมโยง (ไม่บังคับ)"),
+    "sit.doc@example.invalid",
+  );
+  await user.click(screen.getByRole("button", { name: "สร้างแพทย์" }));
+
+  await waitFor(() => expect(bodies).toHaveLength(1));
+  expect(bodies[0]!.master_type).toBe("practitioner");
+  expect(bodies[0]!.payload).toEqual({
+    practitioner_name: "SIT Doctor",
+    user: "sit.doc@example.invalid",
+  });
+  expect(await screen.findByText("สร้างข้อมูลหลักแล้ว")).toBeVisible();
+});
+
+it("creates a practitioner master with no user link", async () => {
+  const user = userEvent.setup();
+  const bodies: Record<string, unknown>[] = [];
+  serve(ENABLED_USERS);
+  server.use(
+    http.post(EDIT_MASTER, async ({ request }) => {
+      bodies.push((await request.json()) as Record<string, unknown>);
+      return HttpResponse.json({
+        message: {
+          status: "created",
+          master: {
+            master_type: "practitioner",
+            master_id: "HLC-PRAC-2026-00002",
+          },
+          ackToken: TOKEN,
+        },
+      });
+    }),
+    http.post(ACK, ack),
+  );
+  renderWithFixtures(<AdminClinicalPage />, {
+    role: "ADM",
+    sessionMode: "live",
+    path: `${ROUTES.adminClinical}?tab=practitioners`,
+  });
+  await screen.findByTestId("admin-clinical");
+
+  await user.click(screen.getByRole("button", { name: "สร้างแพทย์" }));
+  await user.type(screen.getByLabelText("ชื่อแพทย์"), "SIT Doctor Two");
+  await user.click(screen.getByRole("button", { name: "สร้างแพทย์" }));
+
+  await waitFor(() => expect(bodies).toHaveLength(1));
+  expect(bodies[0]!.payload).toEqual({
+    practitioner_name: "SIT Doctor Two",
+    user: "",
+  });
+});
 
 it("hides the master forms when the master capability is read_only", async () => {
   serve({ "write.admin.user": "enabled" });

@@ -46,6 +46,7 @@ export const MASTER_TYPES = [
   "procedure_template",
   "uom",
   "supplier_group",
+  "practitioner",
 ] as const;
 export type MasterType = (typeof MASTER_TYPES)[number];
 
