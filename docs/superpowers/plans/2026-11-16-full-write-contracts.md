@@ -116,7 +116,7 @@
 
 **Interfaces:**
 - Produces: kinds `stock_receive`(1), `stock_transfer`(1), `stock_adjust`(1). Roles: receive/transfer PHA + transfer per CSV `PHA`; adjust ADM.
-- [ ] EXPECTED side effects (receipts in revalidation): SLE rows counted per submitted doc; Bin deltas asserted; negative-result → pre-fence refusal (ledger never directly written).
+- [x] EXPECTED side effects (receipts in revalidation): SLE rows counted per submitted doc; Bin deltas asserted; negative-result → pre-fence refusal (ledger never directly written).
 
 ### Task 7: Purchasing (PO draft/submit + receipt)
 
