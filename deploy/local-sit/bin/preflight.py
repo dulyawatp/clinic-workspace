@@ -59,6 +59,24 @@ MASTER_DOCTYPES = {
 # created in the 11B window, so absence is reported, never a refusal.
 PRACTITIONER_LINK_USER = "sit.doc@example.invalid"
 
+# DocTypes the admin contract refuses pre-fence when the acting user has no
+# native create authority (`native_admin_can_create` / `native_admin_can_write`).
+# `item_price` is the bundled child of the item op and `user` is the admin-user
+# op's target; both are probed because both can deny the whole surface.
+ADMIN_AUTHORITY_DOCTYPES = {
+    "uom": "UOM",
+    "supplier_group": "Supplier Group",
+    "price_list": "Price List",
+    "item": "Item",
+    "item_price": "Item Price",
+    "mode_of_payment": "Mode of Payment",
+    "procedure_template": "Clinical Procedure Template",
+    "warehouse": "Warehouse",
+    "supplier": "Supplier",
+    "practitioner": "Healthcare Practitioner",
+    "user": "User",
+}
+
 failures: list[str] = []
 
 
@@ -82,6 +100,69 @@ def admin_install_probe_script() -> str:
         "}))\n"
         "PY"
     )
+
+
+def admin_authority_probe_script(email: str) -> str:
+    """Backend probe: one user's native create authority for the admin surface.
+
+    Read-only. The check is the same one the endpoint makes before the fence
+    (`frappe.has_permission(<DocType>, 'create', user=<actor>)`), evaluated with
+    an explicit ``user`` argument so no session is switched and no row is
+    written. A failure here is the refusal an operator would otherwise discover
+    as a 403 in the browser after the window opened.
+    """
+
+    doctypes = repr(dict(ADMIN_AUTHORITY_DOCTYPES))
+    return (
+        "cd sites && ../env/bin/python - <<'PY'\n"
+        "import json\n"
+        "import frappe\n"
+        f"frappe.init(site={SITE!r}, sites_path='.')\n"
+        "frappe.connect()\n"
+        f"email = {email!r}\n"
+        f"doctypes = {doctypes}\n"
+        "exists = bool(frappe.db.exists('User', email))\n"
+        "authority = {}\n"
+        "for label, doctype in doctypes.items():\n"
+        "    try:\n"
+        "        authority[label] = bool(\n"
+        "            frappe.has_permission(doctype, ptype='create', user=email)\n"
+        "        )\n"
+        "    except Exception:\n"
+        "        authority[label] = None\n"
+        "print(json.dumps({\n"
+        "    'email': email,\n"
+        "    'exists': exists,\n"
+        "    'authority': authority,\n"
+        "}))\n"
+        "PY"
+    )
+
+
+def admin_authority_problems(report):
+    """Return the named native-authority problems for one report."""
+
+    if not isinstance(report, dict):
+        return ["admin authority probe unreadable"]
+    email = report.get("email")
+    if not isinstance(email, str) or not email.strip():
+        return ["admin authority probe reported no account"]
+    if report.get("exists") is not True:
+        return [f"account {email} does not exist"]
+    authority = report.get("authority")
+    if not isinstance(authority, dict):
+        return ["admin authority map unreadable"]
+    problems = []
+    for label in ADMIN_AUTHORITY_DOCTYPES:
+        if label not in authority:
+            problems.append(f"no authority reading for {label}")
+            continue
+        value = authority[label]
+        if value is None:
+            problems.append(f"authority unreadable for {label}")
+        elif value is not True:
+            problems.append(f"missing create authority for {label}")
+    return problems
 
 
 def admin_install_problems(report):
@@ -427,6 +508,73 @@ def selfcheck() -> int:
             and bool(admin_install_problems({}))
             and bool(admin_install_problems({"problem": ""})),
         ),
+        (
+            "a fully granted admin authority report passes",
+            not admin_authority_problems(
+                {
+                    "email": "sit.adm@example.invalid",
+                    "exists": True,
+                    "authority": {
+                        label: True for label in ADMIN_AUTHORITY_DOCTYPES
+                    },
+                }
+            ),
+        ),
+        (
+            "one missing admin authority is named",
+            admin_authority_problems(
+                {
+                    "email": "sit.adm@example.invalid",
+                    "exists": True,
+                    "authority": dict(
+                        {label: True for label in ADMIN_AUTHORITY_DOCTYPES},
+                        supplier_group=False,
+                    ),
+                }
+            )
+            == ["missing create authority for supplier_group"],
+        ),
+        (
+            "an unreadable admin authority reading is refused",
+            bool(
+                admin_authority_problems(
+                    {
+                        "email": "sit.adm@example.invalid",
+                        "exists": True,
+                        "authority": dict(
+                            {label: True for label in ADMIN_AUTHORITY_DOCTYPES},
+                            practitioner=None,
+                        ),
+                    }
+                )
+            ),
+        ),
+        (
+            "an absent admin account is refused",
+            bool(
+                admin_authority_problems(
+                    {"email": "nobody@example.invalid", "exists": False}
+                )
+            ),
+        ),
+        (
+            "a malformed admin authority report is refused",
+            bool(admin_authority_problems(None))
+            and bool(admin_authority_problems({}))
+            and bool(
+                admin_authority_problems(
+                    {"email": "x@example.invalid", "exists": True, "authority": None}
+                )
+            ),
+        ),
+        (
+            "the admin authority probe reports every contracted DocType",
+            all(
+                repr(doctype) in admin_authority_probe_script("sit.adm@example.invalid")
+                for doctype in ADMIN_AUTHORITY_DOCTYPES.values()
+            )
+            and "has_permission" in admin_authority_probe_script("x"),
+        ),
         ("embedded backend probes compile", probes_compile()),
     ]
     failed = [name for name, ok in cases if not ok]
@@ -602,6 +750,7 @@ def probes_compile() -> bool:
             masters_probe_script(),
             finance_counts_probe_script(),
             boundary_shas_probe_script(),
+            admin_authority_probe_script("sit.adm@example.invalid"),
         ):
             compile(probe_body(script), "backend-probe", "exec")
         return True
@@ -630,6 +779,35 @@ def run_admin_install() -> int:
     if problems:
         return 1
     print("PREFLIGHT OK: the admin install preflight passes on this image")
+    return 0
+
+
+def run_admin_authority(email: str) -> int:
+    """Read-only: assert one account can exercise every admin master + user op."""
+
+    probe = in_backend(admin_authority_probe_script(email))
+    if probe.returncode != 0:
+        print("REFUSE admin-authority: backend probe failed")
+        print(probe.stderr.strip()[-400:])
+        return 1
+    report = json.loads(probe.stdout)
+    authority = report.get("authority") if isinstance(report, dict) else None
+    if isinstance(authority, dict):
+        for label in ADMIN_AUTHORITY_DOCTYPES:
+            state = authority.get(label)
+            if state is True:
+                verdict = "granted"
+            elif state is False:
+                verdict = "MISSING"
+            else:
+                verdict = "unreadable"
+            print(f"INFO admin authority {label}: {verdict}")
+    problems = admin_authority_problems(report)
+    for problem in problems:
+        print(f"REFUSE {problem}")
+    if problems:
+        return 1
+    print(f"PREFLIGHT OK: {email} holds native create authority for the admin surface")
     return 0
 
 
@@ -753,9 +931,14 @@ def main(argv: list[str] | None = None) -> int:
     if "--selfcheck" in arguments:
         return selfcheck()
     if arguments and arguments[0] == "--help":
-        print("usage: preflight.py [--selfcheck | masters | admin-install | finance-counts | boundary-shas]")
+        print(
+            "usage: preflight.py [--selfcheck | masters | admin-install | "
+            "admin-authority <email> | finance-counts | boundary-shas]"
+        )
         print("no argument: refuse ownership collisions for the marley-sit project")
         return 0
+    if len(arguments) == 2 and arguments[0] == "admin-authority":
+        return run_admin_authority(arguments[1])
     for name, run in SITE_COMMANDS.items():
         if arguments == [name]:
             return run()

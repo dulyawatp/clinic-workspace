@@ -1113,10 +1113,22 @@ def main() -> int:
         "    'sit.doc@example.invalid': ['Physician'],\n"
         "    'sit.nur@example.invalid': ['Nursing User'],\n"
         "    'sit.rec@example.invalid': ['Healthcare Administrator'],\n"
+        "    # sit.adm is the approved one-time bench bootstrap identity (outside\n"
+        "    # the contract): it carries the three standard master roles granted\n"
+        "    # for the SIT A window on top of System Manager + Item Manager.\n"
+        "    'sit.adm@example.invalid': [\n"
+        "        'Accounts Manager',\n"
+        "        'Item Manager',\n"
+        "        'Laboratory User',\n"
+        "        'Purchase Master Manager',\n"
+        "        'System Manager',\n"
+        "    ],\n"
         "    'sit.pha@example.invalid': ['Stock Manager'],\n"
         "    'sit.cas@example.invalid': ['Accounts User'],\n"
         "    'sit.mgr@example.invalid': ['Purchase User'],\n"
-        "    'sit.adm@example.invalid': ['Item Manager'],\n"
+        "    # sit.adm2 is the contract-created ADM synthetic user: one\n"
+        "    # code-mapped role, never System Manager.\n"
+        "    'sit.adm2@example.invalid': ['Item Manager'],\n"
         "}\n"
         "system = {'Administrator', 'Guest'}\n"
         "users = {\n"
@@ -1190,7 +1202,7 @@ def main() -> int:
     record(
         "exact non-system synthetic users and roles",
         probe_run.returncode == 0
-        and data.get("non_system_user_count") == 7
+        and data.get("non_system_user_count") == 8
         and data.get("users_exact")
         and data.get("users_enabled")
         and data.get("user_roles_exact"),
