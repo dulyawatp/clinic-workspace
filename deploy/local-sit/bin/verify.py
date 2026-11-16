@@ -81,6 +81,7 @@ WRITE_CAPABILITY_GATES = {
     "write.encounter.complete": ("encounter", ("DOC",)),
     "write.encounter.amend": ("encounter", ("DOC",)),
     "write.procedure.complete": ("procedure", ("DOC",)),
+    "write.procedure.create": ("procedure", ("DOC",)),
     "write.stock.consume": ("procedure", ("DOC",)),
     "write.stock.receive": ("stock", ("PHA",)),
     "write.stock.transfer": ("stock", ("PHA",)),
@@ -136,6 +137,7 @@ APPROVED_BUDGETS = {
     "encounter_draft": 2,
     "encounter_complete": 1,
     "encounter_amend": 1,
+    "procedure_create": 1,
     "procedure_complete": 1,
     "lab_order": 1,
     "stock_receive": 1,
@@ -147,7 +149,7 @@ APPROVED_BUDGETS = {
     "invoice_submit": 1,
     "payment_receive": 1,
     "admin_user": 4,
-    "admin_master": 12,
+    "admin_master": 14,
 }
 
 # Kinds the durable fence may legitimately carry (write_fence.OPERATION_KINDS).
@@ -163,6 +165,7 @@ APPROVED_OPERATION_KINDS = frozenset(
         "encounter_draft",
         "encounter_complete",
         "encounter_amend",
+        "procedure_create",
         "procedure_complete",
         "admin_user",
         "admin_master",
@@ -186,7 +189,7 @@ EXPECTED_FENCE_EVENTS = int(os.environ.get("MARLEY_SIT_EXPECTED_FENCE_EVENTS", "
 EXPECTED_POST_SURFACE = {
     "clinic_ui.api.appointments_cancel_write": ("cancel", "no_show"),
     "clinic_ui.api.encounters_write": ("save_draft", "complete", "amend", "ack"),
-    "clinic_ui.api.procedures_write": ("complete", "ack"),
+    "clinic_ui.api.procedures_write": ("create", "complete", "ack"),
     "clinic_ui.api.admin_write": ("create_user", "edit_master", "ack"),
     "clinic_ui.api.stock_write": ("receive", "transfer", "adjust", "ack"),
     "clinic_ui.api.purchase_write": (
@@ -409,6 +412,37 @@ def selfcheck() -> int:
         ("unknown fence kind is caught", bool(fence_ledger_problems(
             dict(good_ledger, kinds=["create", "made_up"]), 24, APPROVED_BUDGETS
         ))),
+        ("budget v3 carries the admin master fourteen", (
+            APPROVED_BUDGETS["admin_master"] == 14
+            and APPROVED_BUDGETS["procedure_create"] == 1
+            and len(APPROVED_BUDGETS) == 18
+        )),
+        ("a v2 admin master budget is caught", bool(fence_ledger_problems(
+            good_ledger, 24, dict(APPROVED_BUDGETS, admin_master=12)
+        ))),
+        ("a missing procedure_create budget is caught", bool(
+            fence_ledger_problems(
+                good_ledger,
+                24,
+                {k: v for k, v in APPROVED_BUDGETS.items()
+                 if k != "procedure_create"},
+            )
+        )),
+        ("the procedure gate opens both procedure writes", (
+            {"write.procedure.create", "write.procedure.complete"}
+            <= expected_enabled_writes(
+                dict(good_gates, procedure=1),
+                "DOC",
+            )
+        )),
+        ("a created-procedure kind is an approved fence kind", (
+            "procedure_create" in APPROVED_OPERATION_KINDS
+            and not fence_ledger_problems(
+                dict(good_ledger, kinds=["create", "procedure_create"]),
+                24,
+                APPROVED_BUDGETS,
+            )
+        )),
         ("role map parses", not role_map_problems(
             {code: list(roles) for code, roles in EXPECTED_ROLE_MAP.items()}
         )),
@@ -939,9 +973,9 @@ def main() -> int:
         name for name, state in capabilities.items() if state == "enabled"
     }
     record(
-        "bootstrap publishes the frozen capability contract (39 ids)",
+        "bootstrap publishes the frozen capability contract (40 ids)",
         set(capabilities) == set(expected_capabilities)
-        and len(capabilities) == 39
+        and len(capabilities) == 40
         and all(
             state in ("read_only", "enabled") for state in capabilities.values()
         ),
@@ -1079,6 +1113,10 @@ def main() -> int:
         "    'sit.doc@example.invalid': ['Physician'],\n"
         "    'sit.nur@example.invalid': ['Nursing User'],\n"
         "    'sit.rec@example.invalid': ['Healthcare Administrator'],\n"
+        "    'sit.pha@example.invalid': ['Stock Manager'],\n"
+        "    'sit.cas@example.invalid': ['Accounts User'],\n"
+        "    'sit.mgr@example.invalid': ['Purchase User'],\n"
+        "    'sit.adm@example.invalid': ['Item Manager'],\n"
         "}\n"
         "system = {'Administrator', 'Guest'}\n"
         "users = {\n"
@@ -1152,7 +1190,7 @@ def main() -> int:
     record(
         "exact non-system synthetic users and roles",
         probe_run.returncode == 0
-        and data.get("non_system_user_count") == 3
+        and data.get("non_system_user_count") == 7
         and data.get("users_exact")
         and data.get("users_enabled")
         and data.get("user_roles_exact"),

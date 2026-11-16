@@ -37,8 +37,12 @@ EXPECTED_NETWORK = f"{PROJECT}_default"
 PUBLISHED_PORT = "18081"
 SITE = "marley-sit.local"
 
-# Family-master inventory the SIT lanes seed through the admin contract.
+# Family-master inventory the SIT lanes seed through the admin contract. Design
+# Amendment A1 (budget v3) added the two prerequisites the install lacks: ``uom``
+# and ``supplier_group``.
 MASTER_DOCTYPES = {
+    "supplier_group": "Supplier Group",
+    "uom": "UOM",
     "warehouse": "Warehouse",
     "supplier": "Supplier",
     "customer": "Customer",
@@ -54,10 +58,12 @@ failures: list[str] = []
 def masters_order_problems(inventory):
     """Return named dependency-order problems for the master inventory.
 
-    The approved seed order is price list -> item (the item master writes an
-    Item Price against it) -> procedure template (which names the item).
-    Warehouse, supplier and customer are reported present-or-absent, not
-    asserted: the SIT lanes decide when to seed them.
+    The approved seed order (Amendment A1) is uom -> supplier_group -> price list
+    -> item (which writes an Item Price against the list) -> procedure template
+    (which names the item). A supplier row cannot precede any Supplier Group, and
+    an item row needs an installed UOM. Warehouse, supplier and customer rows are
+    reported present-or-absent, not asserted: the SIT lanes decide when to seed
+    them.
     """
 
     if not isinstance(inventory, dict):
@@ -69,10 +75,33 @@ def masters_order_problems(inventory):
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             return [f"master count unreadable for {kind}"]
         counts[kind] = value
+    if counts["item"] > 0 and counts["uom"] == 0:
+        problems.append("items exist without any UOM")
     if counts["item"] > 0 and counts["price_list"] == 0:
         problems.append("items exist without any Price List")
+    if counts["supplier"] > 0 and counts["supplier_group"] == 0:
+        problems.append("suppliers exist without any Supplier Group")
     if counts["procedure_template"] > 0 and counts["item"] == 0:
         problems.append("procedure templates exist without any Item")
+    return problems
+
+
+def masters_prerequisite_problems(company, inventory):
+    """Return the named D2 data-prerequisite problems for the master lanes.
+
+    The admin contract refuses every master op pre-fence when no company
+    resolves, so the preflight refuses it here instead of letting a lane
+    discover it. UOM and Supplier Group are contract masters now: their absence
+    is the next seed step, reported, never a refusal.
+    """
+
+    problems = []
+    if not isinstance(company, str) or not company.strip():
+        problems.append(
+            "no default Company resolves for the admin master surface"
+        )
+    if not isinstance(inventory, dict):
+        problems.append("master inventory unreadable")
     return problems
 
 
@@ -105,6 +134,8 @@ def selfcheck() -> int:
     """Run the pure preflight functions against fixtures; 0 only when all pass."""
 
     good_inventory = {
+        "supplier_group": 0,
+        "uom": 0,
         "warehouse": 0,
         "supplier": 0,
         "customer": 0,
@@ -138,7 +169,13 @@ def selfcheck() -> int:
         (
             "a seeded order passes",
             not masters_order_problems(
-                dict(good_inventory, price_list=1, item=1, procedure_template=1)
+                dict(
+                    good_inventory,
+                    uom=1,
+                    price_list=1,
+                    item=1,
+                    procedure_template=1,
+                )
             ),
         ),
         (
@@ -152,6 +189,40 @@ def selfcheck() -> int:
         (
             "unreadable counts are caught",
             bool(masters_order_problems(dict(good_inventory, item=None))),
+        ),
+        (
+            "items without a uom are caught",
+            bool(masters_order_problems(dict(good_inventory, item=1))),
+        ),
+        (
+            "suppliers without a supplier group are caught",
+            bool(masters_order_problems(dict(good_inventory, supplier=1))),
+        ),
+        (
+            "the amended seed order passes",
+            not masters_order_problems(
+                dict(
+                    good_inventory,
+                    uom=1,
+                    supplier_group=1,
+                    supplier=1,
+                    price_list=1,
+                    item=1,
+                    procedure_template=1,
+                )
+            ),
+        ),
+        (
+            "a resolved company has no prerequisite problem",
+            not masters_prerequisite_problems("SIT Synthetic Company", good_inventory),
+        ),
+        (
+            "an unresolved company is refused",
+            bool(masters_prerequisite_problems("", good_inventory)),
+        ),
+        (
+            "an unreadable inventory is refused by the prerequisite check",
+            bool(masters_prerequisite_problems("SIT Synthetic Company", None)),
         ),
         ("a pinned boundary passes", not boundary_sha_problems(good_report)),
         (
@@ -199,6 +270,11 @@ def selfcheck() -> int:
             "'procedure', '_collect_procedure_boundary_snapshot'"
             in boundary_shas_probe_script(),
         ),
+        (
+            "the masters probe reports the two contract prerequisite kinds",
+            "'uom': 'UOM'" in masters_probe_script()
+            and "'supplier_group': 'Supplier Group'" in masters_probe_script(),
+        ),
         ("embedded backend probes compile", probes_compile()),
     ]
     failed = [name for name, ok in cases if not ok]
@@ -227,7 +303,12 @@ def in_backend(script: str) -> subprocess.CompletedProcess:
 
 
 def masters_probe_script() -> str:
-    """Backend probe: read-only master counts for the dependency check."""
+    """Backend probe: read-only master counts plus the resolved company.
+
+    The company resolution mirrors the contract's own resolver (Global Defaults,
+    then the frappe-16 database default, then exactly one Company row) so the
+    preflight reports the same state the admin master ops will see.
+    """
 
     doctypes = repr(dict(MASTER_DOCTYPES))
     return (
@@ -237,8 +318,17 @@ def masters_probe_script() -> str:
         f"frappe.init(site={SITE!r}, sites_path='.')\n"
         "frappe.connect()\n"
         f"doctypes = {doctypes}\n"
-        "print(json.dumps({kind: frappe.db.count(doctype)\n"
-        "                  for kind, doctype in doctypes.items()}))\n"
+        "company = frappe.db.get_single_value('Global Defaults', 'default_company')\n"
+        "if not company:\n"
+        "    company = frappe.db.get_default('company')\n"
+        "if not company:\n"
+        "    rows = frappe.get_all('Company', pluck='name') or ()\n"
+        "    company = rows[0] if len(rows) == 1 else None\n"
+        "print(json.dumps({\n"
+        "    'company': company,\n"
+        "    'masters': {kind: frappe.db.count(doctype)\n"
+        "                for kind, doctype in doctypes.items()},\n"
+        "}))\n"
         "PY"
     )
 
@@ -356,15 +446,27 @@ def run_masters() -> int:
         print("REFUSE masters: backend probe failed")
         print(probe.stderr.strip()[-400:])
         return 1
-    inventory = json.loads(probe.stdout)
+    report = json.loads(probe.stdout)
+    inventory = report.get("masters") if isinstance(report, dict) else None
+    company = report.get("company") if isinstance(report, dict) else None
+    if not isinstance(inventory, dict):
+        print("REFUSE masters: master inventory unreadable")
+        return 1
     problems = masters_order_problems(inventory)
+    prerequisites = masters_prerequisite_problems(company, inventory)
+    if isinstance(company, str) and company.strip():
+        print(f"INFO admin company: {company}")
     for kind, doctype in MASTER_DOCTYPES.items():
         count = inventory.get(kind)
         state = "absent" if count == 0 else f"present ({count})"
+        if kind in ("uom", "supplier_group") and count == 0:
+            state += " — the contract seeds it first (budget v3)"
         print(f"INFO master {kind} ({doctype}): {state}")
     for problem in problems:
         print(f"REFUSE master order: {problem}")
-    if problems:
+    for problem in prerequisites:
+        print(f"REFUSE master prerequisite: {problem}")
+    if problems or prerequisites:
         return 1
     print("PREFLIGHT OK: master inventory is in dependency order")
     return 0
