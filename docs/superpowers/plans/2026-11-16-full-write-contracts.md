@@ -139,7 +139,13 @@
 
 **Interfaces:**
 - Produces: kinds `invoice_submit`(1), `payment_receive`(1). Roles: CAS; void MGR (gated).
-- [ ] Client arithmetic display ≠ truth: contract re-reads totals server-side; tests assert posted total vs submitted payload.
+- [x] Client arithmetic display ≠ truth: contract re-reads totals server-side; tests assert posted total vs submitted payload.
+  Implementation decisions (recorded): void/amend **cut** (no approved budget line and no reviewed
+  cancel/amend lifecycle path — `write.invoice.void_amend` stays read_only, control not-available);
+  refund **cut** (D-13); discount rides `deductions` only behind the `clinic_ui_invoice_discount_enabled`
+  site flag + installed-child preflight (absent child cuts only the discount path); duplicate linked
+  charges enforced as the duplicate-item guard because the installed `Sales Invoice Item` has no
+  clinic charge-reference field.
 
 ### Task 9: Capability/verifier/deploy extension
 
