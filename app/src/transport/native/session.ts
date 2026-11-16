@@ -91,7 +91,11 @@ const NATIVE_ENABLEABLE = new Set<string>([
   "write.appointment.cancel",
   "write.appointment.checkin",
   "write.appointment.no_show",
+  "write.encounter.draft",
+  "write.encounter.complete",
   "write.encounter.amend",
+  "write.medication.order",
+  "write.lab.order",
   "write.invoice.void_amend",
   "write.stock.consume",
 ]);

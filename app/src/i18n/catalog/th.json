@@ -1969,5 +1969,19 @@
   "ops.vocab.labProvider": "ผู้ให้บริการแล็บ",
   "ops.vocab.practitioners": "แพทย์",
   "ops.vocab.periodInvoices": "ใบแจ้งหนี้ในช่วง",
-  "ops.vocab.vat": "VAT 7%"
+  "ops.vocab.vat": "VAT 7%",
+  "encounterWrite.title": "บันทึกเวชระเบียนจริง",
+  "encounterWrite.notice": "การบันทึกจะเขียนลงเซิร์ฟเวอร์คลินิก ยังไม่ถือว่าลงนามจนกว่าจะยืนยันจบการตรวจ",
+  "encounterWrite.draftTag": "ฉบับร่างจริง",
+  "encounterWrite.saved": "บันทึกลงเซิร์ฟเวอร์แล้ว · {{time}}",
+  "encounterWrite.unsaved": "ยังไม่ได้บันทึกลงเซิร์ฟเวอร์",
+  "encounterWrite.completeBody": "การยืนยันจะส่งเวชระเบียนและปิดนัดที่เชื่อมไว้ สั่งยาแล้วแต่ยังไม่จ่ายยา",
+  "encounterWrite.reviewNote": "การยืนยันทำที่เซิร์ฟเวอร์และตรวจซ้ำที่นั่น",
+  "encounterWrite.saveFirst": "บันทึกฉบับร่างก่อนทำรายการนี้",
+  "encounterWrite.locked": "มีรายการเขียนก่อนหน้าที่ยังไม่ชัดเจน กรุณาให้ผู้ดูแลตรวจสอบก่อนลองใหม่",
+  "encounterWrite.stale": "เวชระเบียนนี้เปลี่ยนหลังโหลด กรุณาโหลดใหม่ก่อนบันทึก",
+  "encounterWrite.conflict": "เวชระเบียนนี้ถูกเขียนโดยคำขออื่นแล้ว",
+  "encounterWrite.invalid": "มีบางฟิลด์ขาดหรือไม่ถูกต้อง",
+  "encounterWrite.forbidden": "บทบาทของคุณทำรายการนี้ไม่ได้",
+  "encounterWrite.uncertain": "ผลลัพธ์ไม่ชัดเจน ห้ามลองซ้ำ กรุณาให้ผู้ดูแลตรวจสอบ"
 }

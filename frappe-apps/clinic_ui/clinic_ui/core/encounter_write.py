@@ -73,8 +73,6 @@ ACK_KEYS = frozenset({"operation_key", "kind", "ack_token"})
 ACK_TOKEN_LENGTH = 64
 ACK_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 
-_FIELD_TYPES = (str, int, bool, type(None))
-
 
 class EncounterWriteError(ValueError):
     """An encounter write input or codec value is outside the accepted shape."""

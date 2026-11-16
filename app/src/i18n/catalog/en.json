@@ -1969,5 +1969,19 @@
   "ops.vocab.labProvider": "Lab provider",
   "ops.vocab.practitioners": "Practitioners",
   "ops.vocab.periodInvoices": "Period invoices",
-  "ops.vocab.vat": "VAT 7%"
+  "ops.vocab.vat": "VAT 7%",
+  "encounterWrite.title": "Live clinical note",
+  "encounterWrite.notice": "Saving writes to the clinic server. Nothing is signed until you confirm completion.",
+  "encounterWrite.draftTag": "Live draft",
+  "encounterWrite.saved": "Saved to the clinic server · {{time}}",
+  "encounterWrite.unsaved": "Not saved to the server yet",
+  "encounterWrite.completeBody": "Completion submits the encounter and closes the linked appointment. Prescriptions are ordered, not dispensed.",
+  "encounterWrite.reviewNote": "Completion runs on the server and is re-verified there.",
+  "encounterWrite.saveFirst": "Save the draft before this action.",
+  "encounterWrite.locked": "A previous write is unresolved. Ask an operator to reconcile before retrying.",
+  "encounterWrite.stale": "This encounter changed since it was loaded. Reload before saving.",
+  "encounterWrite.conflict": "This encounter was already written by another request.",
+  "encounterWrite.invalid": "Some fields are missing or invalid.",
+  "encounterWrite.forbidden": "Your role cannot perform this write.",
+  "encounterWrite.uncertain": "The outcome is uncertain. Do not retry; ask an operator to reconcile."
 }

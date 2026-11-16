@@ -112,6 +112,33 @@ export function initialVisitValues(
   };
 }
 
+export function emptyVisitValues(): AuthoredVisitValues {
+  return {
+    complaint: "",
+    hpi: "",
+    past: "",
+    surgical: "",
+    family: "",
+    allergyReviewed: false,
+    temp: "",
+    pulse: "",
+    resp: "",
+    sys: "",
+    dia: "",
+    height: "",
+    weight: "",
+    examArea: "",
+    examFindings: "",
+    assessment: "",
+    plan: "",
+    rationale: "",
+    followup: "",
+    diagnosisCode: "",
+    diagnosisText: "",
+    primary: true,
+  };
+}
+
 export function missingRequiredFields(
   values: AuthoredVisitValues,
 ): readonly string[] {

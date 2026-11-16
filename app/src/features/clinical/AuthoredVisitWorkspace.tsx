@@ -7,9 +7,17 @@ import { coreData, type Patient, type Visit } from "../../fixtures/data";
 import { translateClinicalText } from "../../i18n";
 import { formatDateTime } from "../../i18n/format";
 import { useLocale } from "../../i18n/LocaleProvider";
+import { useCapabilities } from "../shell/CapabilityProvider";
+import {
+  amendNativeEncounter,
+  completeNativeEncounter,
+  NativeEncounterWriteError,
+  saveNativeEncounterDraft,
+} from "../../transport/native/encounter-write";
 import {
   type AuthoredVisitValues,
   checkCompletion,
+  emptyVisitValues,
   initialVisitValues,
   outOfRangeVitals,
   readinessOf,
@@ -42,35 +50,116 @@ function FieldError({ message }: { message: string }) {
   );
 }
 
+/** Binding for the native encounter write loop (an `ENC-` read-model visit). */
+export interface NativeVisitBinding {
+  patientId: string;
+  appointmentId?: string | null;
+  encounter?: string | null;
+  baseModified?: string | null;
+  state?: "draft" | "completed";
+}
+
+function nativePayload(values: AuthoredVisitValues) {
+  const vitals: Record<string, string> = {};
+  for (const key of ["temp", "pulse", "resp", "sys", "dia", "height", "weight"]) {
+    const raw = (values as unknown as Record<string, string>)[key] ?? "";
+    if (raw.trim() === "") continue;
+    const mapping: Record<string, string> = {
+      temp: "temperature",
+      pulse: "pulse",
+      resp: "respiratory_rate",
+      sys: "bp_systolic",
+      dia: "bp_diastolic",
+      height: "height",
+      weight: "weight",
+    };
+    vitals[mapping[key] as string] = raw.trim();
+  }
+  const diagnosis = values.diagnosisText.trim();
+  return {
+    complaint: values.complaint.trim() || null,
+    diagnoses: diagnosis
+      ? [{ diagnosis: values.diagnosisCode.trim() || diagnosis }]
+      : [],
+    vitals,
+    note: {
+      assessment: values.assessment,
+      plan: values.plan,
+      rationale: values.rationale,
+      followup: values.followup,
+    },
+    allergy_reviewed: values.allergyReviewed,
+  };
+}
+
+function writeFailureKey(code: string): string {
+  switch (code) {
+    case "stale":
+      return "encounterWrite.stale";
+    case "conflict":
+      return "encounterWrite.conflict";
+    case "validation":
+      return "encounterWrite.invalid";
+    case "forbidden":
+    case "auth":
+      return "encounterWrite.forbidden";
+    case "locked":
+      return "encounterWrite.locked";
+    default:
+      return "encounterWrite.uncertain";
+  }
+}
+
 /**
- * Designed DOC-02 canonical editor over the authored sample encounter.
+ * Designed DOC-02 canonical editor.
  *
- * Save / review / complete / amend are demo state transitions only: nothing is
- * sent anywhere, there is no signature, order, stock movement or invoice, and
- * the surface says so above and beside the controls.
+ * With an authored fixture `visit` it stays the local demo: save / review /
+ * complete / amend are state transitions only and nothing is sent. With a
+ * `native` binding (`ENC-` read-model visits) the same form drives the real
+ * default-off encounter transport, but only where bootstrap enabled the exact
+ * capability: draft (DOC/NUR vitals), complete and amend (DOC).
  */
-export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
+export function AuthoredVisitWorkspace({
+  visit,
+  native,
+}: {
+  visit?: Visit;
+  native?: NativeVisitBinding;
+}) {
   const { t } = useTranslation();
   const { locale } = useLocale();
+  const { get } = useCapabilities();
   const [params, setParams] = useSearchParams();
   const selected = params.get("section");
   const active: VisitSection =
     SECTION_ORDER.find((section) => section === selected) ?? "overview";
   const [values, setValues] = useState<AuthoredVisitValues>(() =>
-    initialVisitValues(visit, locale),
+    native ? emptyVisitValues() : initialVisitValues(visit as Visit, locale),
   );
-  const [phase, setPhase] = useState<"draft" | "completed">(visit.state);
+  const [phase, setPhase] = useState<"draft" | "completed">(
+    native ? (native.state ?? "draft") : (visit as Visit).state,
+  );
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [addendum, setAddendum] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"complete" | "amend" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [encounterAlias, setEncounterAlias] = useState<string | null>(
+    native?.encounter ?? null,
+  );
+  const [baseModified, setBaseModified] = useState<string | null>(
+    native?.baseModified ?? null,
+  );
+  const [busy, setBusy] = useState(false);
 
   const locked = phase === "completed";
   const readiness = readinessOf(values, phase);
-  const patient = coreData.patientById(visit.patientId);
-  const practitioner = coreData.practitionerById(visit.practitioner).name[
-    locale
-  ];
+  const patient = native ? null : coreData.patientById((visit as Visit).patientId);
+  const practitioner = native
+    ? (native.patientId ?? "—")
+    : coreData.practitionerById((visit as Visit).practitioner).name[locale];
+  const canDraft = get("write.encounter.draft") === "enabled";
+  const canComplete = get("write.encounter.complete") === "enabled";
+  const canAmend = get("write.encounter.amend") === "enabled";
 
   const change = (section: VisitSection) => {
     const next = new URLSearchParams(params);
@@ -94,8 +183,43 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
     };
 
   const save = () => {
-    setSavedAt(new Date().toISOString());
+    if (!native) {
+      setSavedAt(new Date().toISOString());
+      setError(null);
+      return;
+    }
+    if (!canDraft) {
+      setError(t("encounterWrite.forbidden"));
+      return;
+    }
+    setBusy(true);
     setError(null);
+    const operationKey = crypto.randomUUID();
+    void saveNativeEncounterDraft({
+      operation_key: operationKey,
+      patient: native.patientId,
+      encounter: encounterAlias,
+      base_modified: baseModified,
+      appointment: native.appointmentId ?? null,
+      ...nativePayload(values),
+    })
+      .then((result) => {
+        setEncounterAlias(result.encounter.encounter_id);
+        setBaseModified(result.encounter.modified);
+        setSavedAt(new Date().toISOString());
+      })
+      .catch((failure: unknown) => {
+        setError(
+          t(
+            writeFailureKey(
+              failure instanceof NativeEncounterWriteError
+                ? failure.code
+                : "uncertain",
+            ),
+          ),
+        );
+      })
+      .finally(() => setBusy(false));
   };
 
   const confirmCompletion = () => {
@@ -114,9 +238,80 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
       return;
     }
     setError(null);
-    setPhase("completed");
-    setSavedAt(new Date().toISOString());
     setDialog(null);
+    if (!native) {
+      setPhase("completed");
+      setSavedAt(new Date().toISOString());
+      return;
+    }
+    if (!canComplete) {
+      setError(t("encounterWrite.forbidden"));
+      return;
+    }
+    if (!encounterAlias) {
+      setError(t("encounterWrite.saveFirst"));
+      return;
+    }
+    setBusy(true);
+    void completeNativeEncounter({
+      operation_key: crypto.randomUUID(),
+      encounter: encounterAlias,
+      allergy_reviewed: values.allergyReviewed,
+    })
+      .then((result) => {
+        setPhase("completed");
+        setBaseModified(result.encounter.modified);
+      })
+      .catch((failure: unknown) => {
+        setError(
+          t(
+            writeFailureKey(
+              failure instanceof NativeEncounterWriteError
+                ? failure.code
+                : "uncertain",
+            ),
+          ),
+        );
+      })
+      .finally(() => setBusy(false));
+  };
+
+  const submitAmendment = (text: string) => {
+    setDialog(null);
+    if (!native) {
+      setAddendum(text);
+      return;
+    }
+    if (!canAmend) {
+      setError(t("encounterWrite.forbidden"));
+      return;
+    }
+    if (!encounterAlias) {
+      setError(t("encounterWrite.saveFirst"));
+      return;
+    }
+    setBusy(true);
+    void amendNativeEncounter({
+      operation_key: crypto.randomUUID(),
+      encounter: encounterAlias,
+      addendum: text,
+    })
+      .then((result) => {
+        setAddendum(result.addendum ?? text);
+        setBaseModified(result.encounter.modified);
+      })
+      .catch((failure: unknown) => {
+        setError(
+          t(
+            writeFailureKey(
+              failure instanceof NativeEncounterWriteError
+                ? failure.code
+                : "uncertain",
+            ),
+          ),
+        );
+      })
+      .finally(() => setBusy(false));
   };
 
   const numberField = (key: keyof typeof VITAL_RANGES) => (
@@ -168,7 +363,7 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
             </div>
             <div>
               <dt>{t("clinical.appointment")}</dt>
-              <dd>{visit.appointmentId ?? "—"}</dd>
+              <dd>{visit?.appointmentId ?? native?.appointmentId ?? "—"}</dd>
             </div>
             <div>
               <dt>{t("clinical.allergies")}</dt>
@@ -177,7 +372,7 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
           </dl>
           <h3>{t("visit.previousHistory")}</h3>
           <p className="visit-readout">
-            {visit.history.past
+            {visit?.history.past
               ? translateClinicalText(visit.history.past)
               : t("clinical.sourceUnavailable")}
           </p>
@@ -230,10 +425,10 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
           {textArea("examFindings", "field.examFindings", true)}
           <p className="pc-note">
             {t("visit.vitalsRecorded")}:{" "}
-            {visit.exam.vitals
+            {visit?.exam.vitals
               ? formatDateTime(visit.exam.vitals.recordedAt, locale)
               : t("clinical.notRecorded")}{" "}
-            · {visit.exam.vitals?.by ?? t("clinical.sourceUnavailable")}
+            · {visit?.exam.vitals?.by ?? t("clinical.sourceUnavailable")}
           </p>
         </div>
       ) : section === "note" ? (
@@ -282,12 +477,14 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
           </label>
         </div>
       ) : section === "photos" ? (
-        <PhotosSection patientId={visit.patientId} />
+        <PhotosSection patientId={native?.patientId ?? visit?.patientId ?? ""} />
       ) : section === "lab" ? (
-        <ExternalLabSection patientId={visit.patientId} />
+        <ExternalLabSection
+          patientId={native?.patientId ?? visit?.patientId ?? ""}
+        />
       ) : section === "medications" ? (
         <div className="pc-stack">
-          {visit.meds.length === 0 ? (
+          {!visit || visit.meds.length === 0 ? (
             <p className="pc-note">{t("clinical.noMedications")}</p>
           ) : (
             <ul className="pc-lab-list">
@@ -313,7 +510,9 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
           <p className="clinical-notice">{t("visit.medicationsNotice")}</p>
         </div>
       ) : section === "procedures" ? (
-        <ProceduresSection patientId={visit.patientId} />
+        <ProceduresSection
+          patientId={native?.patientId ?? visit?.patientId ?? ""}
+        />
       ) : section === "review" ? (
         <div className="pc-stack">
           <h3>{t("visit.reviewComposed")}</h3>
@@ -342,13 +541,17 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
               {t("visit.addendum", { text: addendum })}
             </p>
           )}
-          <p className="pc-note">{t("visit.sampleCompletionNote")}</p>
+          <p className="pc-note">
+            {native
+              ? t("encounterWrite.reviewNote")
+              : t("visit.sampleCompletionNote")}
+          </p>
           {locked && (
             <div className="pc-row">
               <Button
                 variant="secondary"
                 onClick={() => setDialog("amend")}
-                disabled={locked && addendum !== null}
+                disabled={busy || (native && !canAmend) || addendum !== null}
               >
                 {t("visit.amendAction")}
               </Button>
@@ -366,11 +569,21 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
     <div
       className="visit-workspace"
       data-surface="DOC-02"
-      data-testid="sample-visit-workspace"
+      data-testid={native ? "native-visit-workspace" : "sample-visit-workspace"}
+      data-mode={native ? "native" : "demo"}
     >
-      <SampleBanner label={t("app.demoTag")} title={t("visit.sampleBanner")}>
-        <p className="pc-note">{t("visit.sampleNoWrite")}</p>
-      </SampleBanner>
+      {native ? (
+        <div className="pc-banner pc-banner--demo" data-testid="native-write-banner">
+          <div className="pc-banner__body">
+            <div className="pc-banner__title">{t("encounterWrite.title")}</div>
+            <p className="pc-note">{t("encounterWrite.notice")}</p>
+          </div>
+        </div>
+      ) : (
+        <SampleBanner label={t("app.demoTag")} title={t("visit.sampleBanner")}>
+          <p className="pc-note">{t("visit.sampleNoWrite")}</p>
+        </SampleBanner>
+      )}
 
       <header className="visit-identity">
         <div className="visit-identity-heading">
@@ -379,28 +592,48 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
           </span>
           <div>
             <p>{t("clinical.patient")}</p>
-            <h2>{coreData.patientName(visit.patientId, locale)}</h2>
+            <h2>
+              {native
+                ? native.patientId
+                : coreData.patientName((visit as Visit).patientId, locale)}
+            </h2>
           </div>
           <span className="visit-readonly">
-            {locked ? t("visit.readinessLocked") : t("app.demoTag")}
+            {locked
+              ? t("visit.readinessLocked")
+              : native
+                ? t("encounterWrite.draftTag")
+                : t("app.demoTag")}
           </span>
         </div>
         <dl>
           <div>
             <dt>{t("clinical.encounterId")}</dt>
-            <dd data-testid="encounter-id">{visit.id}</dd>
+            <dd data-testid="encounter-id">
+              {native ? (encounterAlias ?? "—") : (visit as Visit).id}
+            </dd>
           </div>
           <div>
             <dt>{t("clinical.patientId")}</dt>
-            <dd>{visit.patientId}</dd>
+            <dd>{native ? native.patientId : (visit as Visit).patientId}</dd>
           </div>
           <div>
             <dt>{t("clinical.started")}</dt>
-            <dd>{formatDateTime(visit.date, locale)}</dd>
+            <dd>
+              {native
+                ? savedAt
+                  ? formatDateTime(savedAt, locale)
+                  : "—"
+                : formatDateTime((visit as Visit).date, locale)}
+            </dd>
           </div>
           <div>
             <dt>{t("clinical.appointment")}</dt>
-            <dd>{visit.appointmentId ?? "—"}</dd>
+            <dd>
+              {native
+                ? (native.appointmentId ?? "—")
+                : ((visit as Visit).appointmentId ?? "—")}
+            </dd>
           </div>
           <div>
             <dt>{t("clinical.practitioner")}</dt>
@@ -443,13 +676,23 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
           {locked
             ? t("visit.readinessLocked")
             : savedAt
-              ? t("visit.draftKept", {
-                  time: formatDateTime(savedAt, locale),
-                })
-              : `${t("visit.unsaved")} · ${t("visit.sampleNoWrite")}`}
+              ? native
+                ? t("encounterWrite.saved", {
+                    time: formatDateTime(savedAt, locale),
+                  })
+                : t("visit.draftKept", {
+                    time: formatDateTime(savedAt, locale),
+                  })
+              : native
+                ? t("encounterWrite.unsaved")
+                : `${t("visit.unsaved")} · ${t("visit.sampleNoWrite")}`}
         </p>
         <div className="pc-row">
-          <Button variant="secondary" onClick={save} disabled={locked}>
+          <Button
+            variant="secondary"
+            onClick={save}
+            disabled={locked || busy || (native && !canDraft)}
+          >
             {t("action.saveDraft")}
           </Button>
           <Button variant="secondary" onClick={() => change("review")}>
@@ -458,7 +701,7 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
           <Button
             variant="primary"
             onClick={() => setDialog("complete")}
-            disabled={locked}
+            disabled={locked || busy || (native && !canComplete)}
           >
             {t("visit.completeAction")}
           </Button>
@@ -481,7 +724,7 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
           }
         >
           <div className="pc-stack">
-            <p>{t("visit.completeBody")}</p>
+            <p>{native ? t("encounterWrite.completeBody") : t("visit.completeBody")}</p>
             {outOfRangeVitals(values).length > 0 && (
               <p className="pc-error">
                 {t("visit.vitalsRange", {
@@ -491,7 +734,7 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
                 })}
               </p>
             )}
-            <p className="pc-note">{t("visit.sampleNoWrite")}</p>
+            {!native && <p className="pc-note">{t("visit.sampleNoWrite")}</p>}
           </div>
         </Drawer>
       )}
@@ -499,10 +742,7 @@ export function AuthoredVisitWorkspace({ visit }: { visit: Visit }) {
       {dialog === "amend" && (
         <AmendmentDrawer
           onClose={() => setDialog(null)}
-          onConfirm={(text) => {
-            setAddendum(text);
-            setDialog(null);
-          }}
+          onConfirm={submitAmendment}
         />
       )}
     </div>

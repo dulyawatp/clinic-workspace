@@ -124,7 +124,7 @@ describe("native session bootstrap", () => {
       capabilities: {
         "read.patient": "read_only",
         "write.patient.create": "enabled",
-        "write.encounter.draft": "read_only",
+        "write.encounter.draft": "enabled",
       },
     });
     expect(fetchSpy).toHaveBeenCalledWith(
@@ -148,7 +148,7 @@ describe("native session bootstrap", () => {
     expect((await fetchNativeSession())?.capabilities).toEqual({
       "write.patient.create": "enabled",
       "write.patient.update": "enabled",
-      "write.encounter.draft": "read_only",
+      "write.encounter.draft": "enabled",
       "read.patient": "read_only",
     });
     for (const value of [null, true, {}, "ENABLED", "read_only", "denied", ""]) {

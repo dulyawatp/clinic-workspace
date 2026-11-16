@@ -98,13 +98,41 @@ function ReadVisitDetail({ id }: { id: string }) {
   );
 }
 
+function NativeVisitDetail({ id }: { id: string }) {
+  const [params] = useSearchParams();
+  const patientId = params.get("patient") ?? "";
+  const appointment = params.get("appointment");
+  const encounter = params.get("encounter");
+  const alias = /^wse1_[0-9a-f]{32}_[0-9a-f]{16}_[A-Za-z0-9_-]{16,128}$/.test(
+    encounter ?? "",
+  )
+    ? encounter
+    : null;
+  const appointmentAlias =
+    appointment && /^wsa1_/.test(appointment) ? appointment : null;
+  // A native draft needs either an existing server-derived encounter alias or
+  // the server-derived appointment alias the draft will be opened against. The
+  // read-only proxy context does not carry either, so an `ENC-` address without
+  // them keeps the verified read view.
+  if (!patientId || (!alias && !appointmentAlias)) return <ReadVisitDetail id={id} />;
+  return (
+    <AuthoredVisitWorkspace
+      native={{
+        patientId,
+        appointmentId: appointmentAlias,
+        encounter: alias,
+        baseModified: params.get("modified"),
+        state: params.get("state") === "completed" ? "completed" : "draft",
+      }}
+    />
+  );
+}
+
 function VisitDetail({ id }: { id: string }) {
   const authored = coreData.visitById(id);
-  return authored ? (
-    <AuthoredVisitWorkspace visit={authored} />
-  ) : (
-    <ReadVisitDetail id={id} />
-  );
+  if (authored) return <AuthoredVisitWorkspace visit={authored} />;
+  if (id.startsWith("ENC-")) return <NativeVisitDetail id={id} />;
+  return <ReadVisitDetail id={id} />;
 }
 
 export function VisitWorkspacePage() {
