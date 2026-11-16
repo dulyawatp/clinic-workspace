@@ -197,6 +197,7 @@ class BootstrapCapabilityTests(unittest.TestCase):
             "write.appointment.checkin",
             "write.encounter.draft",
             "write.encounter.complete",
+            "write.procedure.complete",
             "write.medication.order",
             "write.lab.order",
             *NEW_WRITE_NAMES,

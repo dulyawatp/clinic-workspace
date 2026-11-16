@@ -98,6 +98,15 @@ ENCOUNTER_WRITE_ENABLED_KEY = "clinic_ui_native_encounter_write_enabled"
 ENCOUNTER_WRITE_SITE_KEY = "clinic_ui_native_encounter_write_site"
 ENCOUNTER_PRACTITIONER_KEY = "clinic_ui_encounter_practitioner"
 ENCOUNTER_COMPANY_KEY = "clinic_ui_encounter_company"
+# Separate, default-off procedure-completion gate. Independent of the other
+# write flags: completion needs this flag, the exact approved site and the
+# server-owned procedure allowlist below.
+PROCEDURE_WRITE_ENABLED_KEY = "clinic_ui_native_procedure_write_enabled"
+PROCEDURE_WRITE_SITE_KEY = "clinic_ui_native_procedure_write_site"
+# Server-owned allowlist of the workspace procedure targets this surface may
+# complete. The workspace id is the only procedure identifier returned to the
+# client; the native docname is never exposed.
+PROCEDURES_KEY = "clinic_ui_synthetic_procedures"
 
 # The one and only site identity on which this local experiment may run. Exact
 # string equality against the resolved current site is required; the configured
@@ -123,6 +132,9 @@ ALLOWLIST_KEYS = frozenset({"workspace_patient_id", "native_patient_id"})
 APPOINTMENT_ALLOWLIST_KEYS = frozenset(
     {"workspace_appointment_id", "native_appointment_id"}
 )
+PROCEDURE_ALLOWLIST_KEYS = frozenset(
+    {"workspace_procedure_id", "native_procedure_id"}
+)
 
 
 @dataclass(frozen=True)
@@ -140,9 +152,19 @@ class Settings:
     encounter_write_enabled: bool = False
     encounter_practitioner: str | None = None
     encounter_company: str | None = None
+    procedure_write_enabled: bool = False
+    procedure_allowlist: tuple = ()
 
     def as_role_map(self):
         return {code: tuple(roles) for code, roles in self.role_map}
+
+    def native_procedure_for(self, workspace_procedure_id):
+        """Return the native docname for one approved workspace procedure id."""
+
+        for workspace, native in self.procedure_allowlist:
+            if workspace == workspace_procedure_id:
+                return native
+        return None
 
 
 def _enabled(raw: Any) -> bool:
@@ -246,6 +268,61 @@ def _appointment_allowlist(raw: Any):
     return tuple(entries)
 
 
+def _procedure_allowlist(raw: Any):
+    """Parse the optional procedure allowlist; absent means empty.
+
+    Completion targets are server-owned: a client value selects one entry and
+    never names a native document. The same workspace/native disjointness rule
+    as the patient and appointment lists applies.
+    """
+
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        return None
+    if len(raw) > MAX_ALLOWLIST_ENTRIES:
+        return None
+
+    entries = []
+    identifiers = set()
+    for entry in raw:
+        if not isinstance(entry, dict) or set(entry) != PROCEDURE_ALLOWLIST_KEYS:
+            return None
+        workspace_id = normalize_identifier(entry["workspace_procedure_id"])
+        native_id = normalize_identifier(entry["native_procedure_id"])
+        if not is_valid_identifier(workspace_id) or not is_valid_identifier(native_id):
+            return None
+        if (
+            workspace_id == native_id
+            or workspace_id in identifiers
+            or native_id in identifiers
+        ):
+            return None
+        identifiers.update((workspace_id, native_id))
+        entries.append((workspace_id, native_id))
+
+    return tuple(entries)
+
+
+def _procedure_namespaces_disjoint(
+    patient_allowlist, appointment_allowlist, procedure_allowlist
+):
+    """True when no public id of any family equals any native id of any family.
+
+    The procedure list joins the one client-visible public namespace and the one
+    server-owned native namespace. A collision in either cross-type direction
+    would let a client value be mistaken for a native identifier.
+    """
+
+    lists = (patient_allowlist, appointment_allowlist, procedure_allowlist)
+    public_ids = set()
+    native_ids = set()
+    for entries in lists:
+        public_ids.update(workspace for workspace, _native in entries)
+        native_ids.update(native for _workspace, native in entries)
+    return public_ids.isdisjoint(native_ids)
+
+
 def _public_native_namespaces_disjoint(patient_allowlist, appointment_allowlist):
     """True when no public workspace id equals any native docname.
 
@@ -345,6 +422,24 @@ def _encounter_write_settings(getter, site):
     return True, practitioner.strip(), company.strip()
 
 
+def _procedure_write_settings(getter, site):
+    """Return ``True`` when the procedure-completion gate is open.
+
+    The gate needs the exact approved site and its own flag. The completion
+    target itself is decided per request from the server-owned procedure
+    allowlist, never from configuration alone.
+    """
+
+    if site != APPROVED_WRITE_SITE or site in DISALLOWED_WRITE_SITES:
+        return False
+    if not _enabled(getter(PROCEDURE_WRITE_ENABLED_KEY)):
+        return False
+    configured = getter(PROCEDURE_WRITE_SITE_KEY)
+    if not isinstance(configured, str) or configured != APPROVED_WRITE_SITE:
+        return False
+    return True
+
+
 def load_settings(getter, site):
     """Return validated settings, or ``None`` when the feature is unavailable."""
 
@@ -394,6 +489,14 @@ def load_settings(getter, site):
         encounter_company,
     ) = _encounter_write_settings(getter, site)
 
+    procedure_allowlist = _procedure_allowlist(getter(PROCEDURES_KEY))
+    if procedure_allowlist is None:
+        return None
+    if not _procedure_namespaces_disjoint(
+        allowlist, appointment_allowlist, procedure_allowlist
+    ):
+        return None
+
     return Settings(
         role_map=role_map,
         allowlist=allowlist,
@@ -408,4 +511,6 @@ def load_settings(getter, site):
         encounter_write_enabled=encounter_write_enabled,
         encounter_practitioner=encounter_practitioner,
         encounter_company=encounter_company,
+        procedure_write_enabled=_procedure_write_settings(getter, site),
+        procedure_allowlist=procedure_allowlist,
     )

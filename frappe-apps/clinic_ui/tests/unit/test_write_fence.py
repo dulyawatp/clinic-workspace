@@ -1786,9 +1786,18 @@ class AppointmentKindTests(FenceTestCase):
                     "encounter_draft",
                     "encounter_complete",
                     "encounter_amend",
+                    "procedure_complete",
                 }
             ),
         )
+
+    def test_procedure_kind_is_additive(self):
+        self.assertEqual(
+            write_fence.PROCEDURE_OPERATION_KINDS,
+            frozenset({"procedure_complete"}),
+        )
+        ledger_tests = write_fence.PROCEDURE_OPERATION_KINDS
+        self.assertTrue(ledger_tests.issubset(write_fence.OPERATION_KINDS))
 
     def test_encounter_kinds_are_additive(self):
         self.assertEqual(

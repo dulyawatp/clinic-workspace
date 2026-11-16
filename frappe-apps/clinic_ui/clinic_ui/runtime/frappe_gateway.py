@@ -34,6 +34,8 @@ from clinic_ui.core import (
     encounter_write,
     fence_store,
     patient_write,
+    procedure_contract,
+    procedure_write,
     write_fence,
 )
 from clinic_ui.runtime.traceback import UNSAFE_V1_KEYS, WRITE_ERROR_CODES
@@ -242,6 +244,49 @@ class EncounterLockedState:
             "plan": self.plan,
             "followup": self.followup,
             "allergy_reviewed": False,
+        }
+
+
+@dataclass(frozen=True)
+class ProcedureLockedState:
+    """Freshly locked and verified procedure values passed to the endpoint."""
+
+    doc: object
+    patient: str | None
+    docstatus: object
+    status: str | None
+    consume_stock: bool
+    warehouse: str | None
+    company: str | None
+    price_list: str | None
+    customer: str | None
+    procedure_template: str | None
+    post_op_checklist: str | None
+    service_request: str | None
+    appointment: str | None
+    modified: str | None
+    items: tuple
+    allow_negative_stock: bool
+    today: str | None
+
+    def as_dict(self):
+        return {
+            "patient": self.patient,
+            "docstatus": self.docstatus,
+            "status": self.status,
+            "consume_stock": self.consume_stock,
+            "warehouse": self.warehouse,
+            "company": self.company,
+            "price_list": self.price_list,
+            "customer": self.customer,
+            "procedure_template": self.procedure_template,
+            "post_op_checklist": self.post_op_checklist,
+            "service_request": self.service_request,
+            "appointment": self.appointment,
+            "modified": self.modified,
+            "items": self.items,
+            "allow_negative_stock": self.allow_negative_stock,
+            "today": self.today,
         }
 
 
@@ -2940,3 +2985,540 @@ class Gateway:
         """Decode the just-committed receipt back to the native encounter id."""
 
         return encounter_write.decode_receipt(receipt).native_encounter_id
+
+    # -- procedure write path --------------------------------------------
+
+    def native_procedure_boundary_problem(self):
+        """Return pinned-boundary drift for the procedure path, or ``None``.
+
+        Tests supply ``frappe.procedure_boundary_snapshot``; production collects
+        the pinned versions, the sha256 of the installed file that defines the
+        driven method, the method name and callability, both submittable flags,
+        the wildcard/class overrides on the path and the enabled Server Script
+        count. Any failure is a non-empty problem so callers fail closed.
+        """
+
+        try:
+            snapshot = getattr(self.frappe, "procedure_boundary_snapshot", None)
+            if snapshot is None:
+                snapshot = self._collect_procedure_boundary_snapshot()
+            return procedure_contract.boundary_problem(snapshot)
+        except Exception:
+            return "boundary unreadable"
+
+    def _collect_procedure_boundary_snapshot(self):
+        import hashlib
+        import importlib
+
+        frappe = self.frappe
+
+        def version(module_name, module=None):
+            if module is not None:
+                return getattr(module, "__version__", None)
+            return getattr(importlib.import_module(module_name), "__version__", None)
+
+        path = frappe.get_app_path(
+            "healthcare", *procedure_contract.PROCEDURE_SOURCE_PATH
+        )
+        with open(path, "rb") as handle:
+            source_sha = hashlib.sha256(handle.read()).hexdigest()
+
+        controller = frappe.get_doc(
+            {"doctype": procedure_contract.PROCEDURE_DOCTYPE}
+        )
+        method = getattr(controller, procedure_contract.COMPLETE_METHOD, None)
+
+        hooks = frappe.get_hooks() or {}
+        doc_events = hooks.get("doc_events") or {}
+        wildcard = doc_events.get("*") or {}
+        overrides = hooks.get("override_doctype_class") or {}
+        extends = hooks.get("extend_doctype_class") or {}
+        server_scripts = frappe.get_all(
+            "Server Script", filters={"disabled": 0}, limit=1, pluck="name"
+        ) or ()
+        return {
+            "versions": {
+                "frappe": version("frappe", frappe),
+                "erpnext": version("erpnext"),
+                "healthcare": version("healthcare"),
+            },
+            "source_sha256": {"clinical_procedure": source_sha},
+            "complete_method": procedure_contract.COMPLETE_METHOD,
+            "complete_callable": 1 if callable(method) else 0,
+            "procedure_submittable": (
+                1
+                if frappe.get_meta(procedure_contract.PROCEDURE_DOCTYPE).get(
+                    "is_submittable"
+                )
+                else 0
+            ),
+            "stock_entry_submittable": (
+                1
+                if frappe.get_meta(procedure_contract.STOCK_ENTRY_DOCTYPE).get(
+                    "is_submittable"
+                )
+                else 0
+            ),
+            "enabled_server_scripts": len(server_scripts),
+            "doc_events": {
+                doctype: tuple(doc_events.get(doctype) or ())
+                for doctype in (
+                    procedure_contract.PROCEDURE_DOCTYPE,
+                    procedure_contract.STOCK_ENTRY_DOCTYPE,
+                )
+            },
+            "wildcard_doc_events": {
+                event: tuple(wildcard.get(event) or ())
+                for event in procedure_contract.REVIEWED_WILDCARD_EVENTS
+            },
+            "scheduler_procedure_jobs": tuple(
+                path
+                for handlers in (hooks.get("scheduler_events") or {}).values()
+                for path in (handlers or ())
+                if procedure_contract.SCHEDULER_PROCEDURE_TOKEN in str(path)
+            ),
+            "class_overrides": {
+                procedure_contract.PROCEDURE_DOCTYPE: tuple(
+                    overrides.get(procedure_contract.PROCEDURE_DOCTYPE) or ()
+                )
+                + tuple(extends.get(procedure_contract.PROCEDURE_DOCTYPE) or ())
+            },
+        }
+
+    def _procedure_meta_fields(self):
+        """Resolve the installed field names through the metadata cache."""
+
+        cached = getattr(self, "_procedure_fields_cache", None)
+        if cached is not None:
+            return cached
+        frappe = self.frappe
+        get_meta = getattr(getattr(frappe, "db", None), "get_meta", None)
+        if not callable(get_meta):
+            get_meta = frappe.get_meta
+        fields = {}
+        for doctype in procedure_contract.REQUIRED_FIELDS:
+            fields[doctype] = set(get_meta(doctype).get_valid_columns())
+        self._procedure_fields_cache = fields
+        return fields
+
+    def native_procedure_install_problem(self):
+        """Preflight the installed DocType/field set; a gap is a refusal."""
+
+        try:
+            return procedure_contract.install_problem(
+                self._procedure_meta_fields()
+            )
+        except Exception:
+            return "installed metadata unreadable"
+
+    def _procedure_field(self, doctype, logical, candidates=None):
+        return procedure_contract.resolve_field(
+            self._procedure_meta_fields(), doctype, logical, candidates
+        )
+
+    def native_procedure_can_write(self, native_procedure_id=None):
+        try:
+            return bool(
+                self.frappe.has_permission(
+                    procedure_contract.PROCEDURE_DOCTYPE,
+                    ptype="write",
+                    doc=native_procedure_id,
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
+    def native_procedure_action_detail(self, native_procedure_id):
+        """Read the pre-fence decision fields under native authority."""
+
+        if self.native_procedure_can_write(native_procedure_id) is not True:
+            return None
+        try:
+            doc = self.frappe.get_doc(
+                procedure_contract.PROCEDURE_DOCTYPE, native_procedure_id
+            )
+            return self._procedure_state_values(doc)
+        except Exception:
+            return None
+
+    def _procedure_rows(self, native_procedure_id, warehouse):
+        """Per-row batch and stock facts read from the site's own masters."""
+
+        item_doctype = procedure_contract.ITEM_DOCTYPE
+        batch_field = self._procedure_field(item_doctype, "batch_no")
+        fields = ["item_code", "qty", "uom"]
+        if batch_field and batch_field not in fields:
+            fields.append(batch_field)
+        rows = self.frappe.get_all(
+            item_doctype,
+            filters={
+                "parent": native_procedure_id,
+                "parenttype": procedure_contract.PROCEDURE_DOCTYPE,
+            },
+            fields=fields,
+            order_by="idx asc",
+            limit=procedure_contract.MAX_ROWS + 1,
+        ) or ()
+        details = []
+        for row in rows:
+            get = (
+                row.get
+                if hasattr(row, "get")
+                else (lambda key, default=None: default)
+            )
+            batch_no = self._text_value(get(batch_field)) if batch_field else None
+            batch_item = batch_qty = batch_expiry = None
+            if batch_no:
+                batch = self.frappe.db.get_value(
+                    "Batch",
+                    batch_no,
+                    ["item", "batch_qty", "expiry_date"],
+                    as_dict=True,
+                )
+                if batch is not None:
+                    batch_get = (
+                        batch.get
+                        if hasattr(batch, "get")
+                        else (lambda key, default=None: default)
+                    )
+                    batch_item = self._text_value(batch_get("item"))
+                    batch_qty = batch_get("batch_qty")
+                    batch_expiry = self._text_value(batch_get("expiry_date"))
+            available = None
+            if warehouse:
+                available = self.frappe.db.get_value(
+                    "Bin",
+                    {"item_code": get("item_code"), "warehouse": warehouse},
+                    "actual_qty",
+                )
+            details.append(
+                {
+                    "item_code": self._text_value(get("item_code")),
+                    "qty": get("qty"),
+                    "uom": self._text_value(get("uom")),
+                    "batch_no": batch_no,
+                    "batch_item": batch_item,
+                    "batch_qty": batch_qty,
+                    "batch_expiry": batch_expiry,
+                    "available_qty": available,
+                }
+            )
+        return details
+
+    def _procedure_state_values(self, doc):
+        """Build the contract detail from a locked procedure document."""
+
+        native = doc.name
+        warehouse = self._text_value(getattr(doc, "warehouse", None))
+        try:
+            allow_negative = bool(
+                self.frappe.db.get_single_value(
+                    "Stock Settings", "allow_negative_stock"
+                )
+            )
+        except Exception:
+            allow_negative = False
+        rows = self._procedure_rows(native, warehouse)
+        patient = self._text_value(getattr(doc, "patient", None))
+        customer = None
+        if patient:
+            customer = self._text_value(
+                self.frappe.db.get_value("Patient", patient, "customer")
+            )
+        template = self._text_value(getattr(doc, "procedure_template", None))
+        post_op_checklist = None
+        if template:
+            post_op_checklist = self._text_value(
+                self.frappe.db.get_value(
+                    procedure_contract.PROCEDURE_TEMPLATE_DOCTYPE,
+                    template,
+                    "post_op_nursing_checklist_template",
+                )
+            )
+        return {
+            "patient": patient,
+            "docstatus": getattr(doc, "docstatus", None),
+            "status": self._text_value(getattr(doc, "status", None)),
+            "consume_stock": bool(getattr(doc, "consume_stock", 0)),
+            "warehouse": warehouse,
+            "company": self._text_value(getattr(doc, "company", None)),
+            "price_list": self._text_value(getattr(doc, "price_list", None)),
+            "customer": customer,
+            "procedure_template": template,
+            "post_op_checklist": post_op_checklist,
+            "service_request": self._text_value(
+                getattr(doc, "service_request", None)
+            ),
+            "appointment": self._text_value(getattr(doc, "appointment", None)),
+            "modified": self._text_value(getattr(doc, "modified", None)),
+            "items": tuple(rows),
+            "allow_negative_stock": allow_negative,
+            "today": self.site_today(),
+        }
+
+    def lock_procedure_target(self, native_procedure_id):
+        """Lock the procedure row and read the contract decision fields."""
+
+        try:
+            doc = self.frappe.get_doc(
+                procedure_contract.PROCEDURE_DOCTYPE,
+                native_procedure_id,
+                for_update=True,
+            )
+            values = self._procedure_state_values(doc)
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        return ProcedureLockedState(doc=doc, **values)
+
+    def native_stock_ledger_baseline(self, items, warehouse):
+        """Pre-fence Stock Ledger Entry and Bin baselines for the delta re-read."""
+
+        try:
+            bins = {}
+            for item in items or ():
+                code = item.get("item_code") if hasattr(item, "get") else None
+                if not code:
+                    continue
+                bins[code] = self.frappe.db.get_value(
+                    "Bin",
+                    {"item_code": code, "warehouse": warehouse},
+                    "actual_qty",
+                )
+            return {
+                "stock_ledger_rows": int(
+                    self.frappe.db.count(
+                        "Stock Ledger Entry",
+                        {"voucher_type": procedure_contract.STOCK_ENTRY_DOCTYPE},
+                    )
+                ),
+                "gl_rows": int(
+                    self.frappe.db.count(
+                        "GL Entry",
+                        {"voucher_type": procedure_contract.STOCK_ENTRY_DOCTYPE},
+                    )
+                ),
+                "bins": bins,
+            }
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def complete_native_procedure(self, state):
+        """Drive the pinned installed ``complete_procedure`` document method.
+
+        The method is called on the locked document; it creates and submits the
+        Material-Issue Stock Entry itself and sets the completion fields. Its
+        return value (the Stock Entry name) is returned verbatim, and a raised
+        error is an uncertain outcome: the stock may already have moved.
+        """
+
+        method = getattr(state.doc, procedure_contract.COMPLETE_METHOD, None)
+        if not callable(method):
+            raise patient_write.WriteUncertain()
+        try:
+            return self._text_value(method())
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def native_procedure_complete_facts(
+        self, native_procedure_id, stock_entry, baseline
+    ):
+        """Closed-world re-read after the driven method returns.
+
+        EXPECTED side effects only: the returned Stock Entry (submitted material
+        issue for the same company), the procedure status/actual end pair, the
+        Stock Ledger Entry row delta, the summed Bin delta at the procedure
+        warehouse, the GL row delta and the nursing task row count.
+        """
+
+        if not isinstance(baseline, dict):
+            raise patient_write.WriteUncertain()
+        try:
+            row = self.frappe.db.get_value(
+                procedure_contract.PROCEDURE_DOCTYPE,
+                native_procedure_id,
+                ["status", "actual_end_datetime", "company", "warehouse"],
+                as_dict=True,
+            )
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        if row is None:
+            raise patient_write.WriteUncertain()
+        get = (
+            row.get
+            if hasattr(row, "get")
+            else (lambda key, default=None: default)
+        )
+        warehouse = self._text_value(get("warehouse"))
+
+        entry_docstatus = entry_type = entry_company = None
+        sle_delta = 0
+        gl_delta = 0
+        bin_delta = 0.0
+        try:
+            if stock_entry:
+                entry = self.frappe.db.get_value(
+                    procedure_contract.STOCK_ENTRY_DOCTYPE,
+                    stock_entry,
+                    ["docstatus", "stock_entry_type", "company"],
+                    as_dict=True,
+                )
+                if entry is None:
+                    raise patient_write.WriteUncertain()
+                entry_get = (
+                    entry.get
+                    if hasattr(entry, "get")
+                    else (lambda key, default=None: default)
+                )
+                entry_docstatus = entry_get("docstatus")
+                entry_type = self._text_value(entry_get("stock_entry_type"))
+                entry_company = self._text_value(entry_get("company"))
+                sle_delta = int(
+                    self.frappe.db.count(
+                        "Stock Ledger Entry",
+                        {"voucher_type": procedure_contract.STOCK_ENTRY_DOCTYPE},
+                    )
+                ) - int(baseline.get("stock_ledger_rows") or 0)
+                gl_delta = int(
+                    self.frappe.db.count(
+                        "GL Entry",
+                        {"voucher_type": procedure_contract.STOCK_ENTRY_DOCTYPE},
+                    )
+                ) - int(baseline.get("gl_rows") or 0)
+                bins = baseline.get("bins") or {}
+                for code, before in bins.items():
+                    after = self.frappe.db.get_value(
+                        "Bin",
+                        {"item_code": code, "warehouse": warehouse},
+                        "actual_qty",
+                    )
+                    if isinstance(after, (int, float)):
+                        bin_delta += float(after) - float(before or 0)
+            nursing = int(
+                self.frappe.db.count(
+                    "Nursing Task",
+                    {
+                        "reference_doctype": procedure_contract.PROCEDURE_DOCTYPE,
+                        "reference_name": native_procedure_id,
+                    },
+                )
+            )
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        return {
+            "stock_entry": stock_entry,
+            "stock_entry_docstatus": entry_docstatus,
+            "stock_entry_type": entry_type,
+            "stock_entry_company": entry_company,
+            "procedure_company": self._text_value(get("company")),
+            "status": self._text_value(get("status")),
+            "actual_end_datetime": self._text_value(get("actual_end_datetime")),
+            "stock_ledger_rows": sle_delta,
+            "gl_rows": gl_delta,
+            "bin_delta": bin_delta,
+            "bin_warehouse": warehouse,
+            "nursing_task_rows": nursing,
+        }
+
+    # -- procedure fence, receipts and acknowledgement -------------------
+
+    def lookup_procedure_receipt(self, actor, kind, operation_key):
+        if kind not in write_fence.PROCEDURE_OPERATION_KINDS:
+            raise patient_write.WriteUncertain()
+        ledger = self._ledger()
+        try:
+            record = ledger.lookup(
+                actor=actor, kind=kind, operation_key=operation_key
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+        if record is None:
+            return None
+        if record.state == write_fence.COMMITTED:
+            return record.receipt
+        raise patient_write.WriteLocked()
+
+    def list_committed_procedure_receipts(
+        self, limit, kind=None, operation_key=None
+    ):
+        ledger = self._ledger()
+        try:
+            return ledger.committed_procedure_receipts(
+                limit=limit, kind=kind, operation_key=operation_key
+            )
+        except write_fence.EnumerationOverflow as exc:
+            raise procedure_write.ProcedureBudgetExhausted() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    def acknowledge_procedure_write(
+        self, secret, actor, kind, operation_key, ack_token
+    ):
+        if kind not in write_fence.PROCEDURE_OPERATION_KINDS:
+            return "invalid"
+        ledger = self._ledger()
+        try:
+            record = ledger.lookup(
+                actor=actor, kind=kind, operation_key=operation_key
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+        if (
+            record is None
+            or record.state != write_fence.COMMITTED
+            or not record.receipt
+        ):
+            return "invalid"
+        expected = procedure_write.ack_token(
+            secret, self.site, actor, kind, operation_key, record.receipt
+        )
+        if not hmac.compare_digest(expected, ack_token):
+            return "invalid"
+        try:
+            return ledger.acknowledge_barrier(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                ack_receipt="ack:" + expected,
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    @contextmanager
+    def procedure_write_fence(self, actor, kind, operation_key, payload_digest):
+        if kind not in write_fence.PROCEDURE_OPERATION_KINDS:
+            raise patient_write.WriteUncertain()
+        ledger = self._ledger()
+        try:
+            with ledger.fence(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                payload_digest=payload_digest,
+            ) as claim:
+                yield claim
+        except write_fence.OperationLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.SiteLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.OperationConflict as exc:
+            raise patient_write.WriteConflict() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    def receipt_stock_entry(self, receipt):
+        """Decode the just-committed receipt back to the created Stock Entry."""
+
+        return procedure_write.decode_receipt(receipt).stock_entry

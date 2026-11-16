@@ -255,6 +255,37 @@ class FakeGateway:
         self.encounter_fence_claim = FakeClaim()
         self.encounter_fence_error = None
 
+        # -- procedure write surface --------------------------------------
+        self.procedure_boundary_problem = None
+        self.procedure_install_problem = None
+        self.procedure_can_write = True
+        self.procedure_details = {}
+        self.procedure_action_detail_calls = []
+        self.procedure_locked = {}
+        self.procedure_lock_calls = []
+        self.procedure_lock_error = None
+        self.stock_baseline = {
+            "stock_ledger_rows": 0,
+            "gl_rows": 0,
+            "bins": {},
+        }
+        self.stock_baseline_calls = []
+        self.complete_procedure_calls = []
+        self.complete_procedure_error = None
+        self.created_stock_entry = "NATIVE-SE-1"
+        self.procedure_facts = {}
+        self.procedure_facts_calls = []
+        self.procedure_receipts = {}
+        self.procedure_receipt_records = []
+        self.procedure_receipt_calls = []
+        self.procedure_receipt_list_error = None
+        self.procedure_ack_calls = []
+        self.procedure_ack_status = "acked"
+        self.procedure_ack_error = None
+        self.procedure_fence_calls = []
+        self.procedure_fence_claim = FakeClaim()
+        self.procedure_fence_error = None
+
     def setting(self, key):
         sequence = self.setting_sequences.get(key)
         if sequence:
@@ -814,6 +845,117 @@ class FakeGateway:
 
         return encounter_write.decode_receipt(receipt).native_encounter_id
 
+    # -- local procedure write path -------------------------------------
+
+    def native_procedure_boundary_problem(self):
+        return self.procedure_boundary_problem
+
+    def native_procedure_install_problem(self):
+        return self.procedure_install_problem
+
+    def native_procedure_can_write(self, native_procedure_id=None):
+        return self.procedure_can_write
+
+    def native_procedure_action_detail(self, native_procedure_id):
+        self.procedure_action_detail_calls.append(native_procedure_id)
+        value = self.procedure_details.get(native_procedure_id)
+        return dict(value) if value is not None else None
+
+    def lock_procedure_target(self, native_procedure_id):
+        self.procedure_lock_calls.append(native_procedure_id)
+        if self.procedure_lock_error is not None:
+            raise self.procedure_lock_error
+        values = dict(self.procedure_details.get(native_procedure_id, {}))
+        values.update(self.procedure_locked.get(native_procedure_id, {}))
+        values.setdefault("doc", None)
+        return FakeLockedState(**values)
+
+    def native_stock_ledger_baseline(self, items, warehouse):
+        self.stock_baseline_calls.append((items, warehouse))
+        return dict(self.stock_baseline)
+
+    def complete_native_procedure(self, state):
+        self.complete_procedure_calls.append(state)
+        if self.complete_procedure_error is not None:
+            raise self.complete_procedure_error
+        return self.created_stock_entry
+
+    def native_procedure_complete_facts(
+        self, native_procedure_id, stock_entry, baseline
+    ):
+        self.procedure_facts_calls.append(
+            (native_procedure_id, stock_entry, baseline)
+        )
+        values = {
+            "stock_entry": stock_entry,
+            "stock_entry_docstatus": 1,
+            "stock_entry_type": "Material Issue",
+            "stock_entry_company": "COMP-1",
+            "procedure_company": "COMP-1",
+            "status": "Completed",
+            "actual_end_datetime": "2026-11-16 10:00:00",
+            "stock_ledger_rows": 1,
+            "gl_rows": 2,
+            "bin_delta": -1.0,
+            "bin_warehouse": "WH-1",
+            "nursing_task_rows": 0,
+        }
+        values.update(self.procedure_facts)
+        return values
+
+    def lookup_procedure_receipt(self, actor, kind, operation_key):
+        value = self.procedure_receipts.get((actor, kind, operation_key))
+        if isinstance(value, Exception):
+            raise value
+        if value is not None:
+            return value
+        for record in self.procedure_receipt_records:
+            if (
+                record.actor == actor
+                and record.kind == kind
+                and record.operation_key == operation_key
+            ):
+                return record.receipt
+        return None
+
+    def list_committed_procedure_receipts(
+        self, limit, kind=None, operation_key=None
+    ):
+        self.procedure_receipt_calls.append((limit, kind, operation_key))
+        if self.procedure_receipt_list_error is not None:
+            raise self.procedure_receipt_list_error
+        from clinic_ui.core import procedure_write
+
+        records = [
+            record
+            for record in self.procedure_receipt_records
+            if (kind is None or record.kind == kind)
+            and (operation_key is None or record.operation_key == operation_key)
+        ]
+        if len(records) > limit:
+            raise procedure_write.ProcedureBudgetExhausted()
+        return records
+
+    def acknowledge_procedure_write(
+        self, secret, actor, kind, operation_key, ack_token
+    ):
+        self.procedure_ack_calls.append((actor, kind, operation_key, ack_token))
+        if self.procedure_ack_error is not None:
+            raise self.procedure_ack_error
+        return self.procedure_ack_status
+
+    def procedure_write_fence(self, actor, kind, operation_key, payload_digest):
+        self.call_order.append("procedure_fence")
+        self.procedure_fence_calls.append(
+            (actor, kind, operation_key, payload_digest)
+        )
+        return FakeFence(self.procedure_fence_claim, self.procedure_fence_error)
+
+    def receipt_stock_entry(self, receipt):
+        from clinic_ui.core import procedure_write
+
+        return procedure_write.decode_receipt(receipt).stock_entry
+
 
 
 def detail():
@@ -874,6 +1016,16 @@ def settings(**overrides):
 
 class FakeEncounterReceipt:
     """One committed encounter row as the gateway would enumerate it."""
+
+    def __init__(self, kind, actor, operation_key, receipt):
+        self.kind = kind
+        self.actor = actor
+        self.operation_key = operation_key
+        self.receipt = receipt
+
+
+class FakeProcedureReceipt:
+    """One committed procedure row as the gateway would enumerate it."""
 
     def __init__(self, kind, actor, operation_key, receipt):
         self.kind = kind

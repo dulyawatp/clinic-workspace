@@ -182,10 +182,16 @@ ENCOUNTER_OPERATION_KINDS = frozenset(
         "encounter_amend",
     }
 )
+# Procedure kinds are additive on the same ledger. ``procedure_complete`` carries
+# its registry name because it is also the budget key and the durable receipt
+# kind. A procedure completion is refused pre-fence once it happened, so this
+# kind can be claimed at most once per approved target.
+PROCEDURE_OPERATION_KINDS = frozenset({"procedure_complete"})
 OPERATION_KINDS = (
     PATIENT_OPERATION_KINDS
     | APPOINTMENT_OPERATION_KINDS
     | ENCOUNTER_OPERATION_KINDS
+    | PROCEDURE_OPERATION_KINDS
 )
 
 # Reserved identity for the durable site-wide manual-investigation latch. It is
@@ -498,6 +504,21 @@ class CommittedEncounterReceipt:
     The receipt is opaque to this module: only the separate encounter codec may
     interpret it, and the caller must re-verify it before use. Appointment and
     patient receipts are never returned here.
+    """
+
+    kind: str
+    actor: str
+    operation_key: str
+    receipt: str
+
+
+@dataclass(frozen=True)
+class CommittedProcedureReceipt:
+    """One read-only committed procedure receipt discovered in the fence.
+
+    The receipt is opaque to this module: only the separate procedure codec may
+    interpret it, and the caller must re-verify it before use. Patient,
+    appointment and encounter receipts are never returned here.
     """
 
     kind: str
@@ -885,6 +906,80 @@ class Ledger:
             raise EnumerationOverflow("committed encounter receipts exceed the bound")
         return [
             CommittedEncounterReceipt(
+                kind=row["kind"],
+                actor=row["actor"],
+                operation_key=row["operation_key"],
+                receipt=row["receipt"],
+            )
+            for row in rows
+        ]
+
+    def committed_procedure_receipts(self, *, limit, kind=None, operation_key=None):
+        """Enumerate terminal ``COMMITTED`` procedure receipts, bounded.
+
+        A separate, read-only namespace from the patient, appointment and
+        encounter enumerations: only ``procedure_complete`` rows are selected.
+        The reserved latch actor and key are excluded, as is every non-terminal
+        state. ``limit`` is a hard server-side bound; an over-full page raises
+        :class:`EnumerationOverflow` instead of silently truncating. The method
+        appends nothing and acquires no write claim.
+        """
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= MAX_RECEIPT_ENUMERATION
+        ):
+            raise InvalidOperation("enumeration limit is invalid")
+        if kind is not None:
+            kind = _require_kind(kind)
+            if kind not in PROCEDURE_OPERATION_KINDS:
+                raise InvalidOperation("kind is not a procedure kind")
+        if operation_key is not None:
+            operation_key = _require_operation_key(operation_key)
+        kinds = tuple(sorted(PROCEDURE_OPERATION_KINDS))
+        sql = (
+            "SELECT e.kind, e.actor, e.operation_key, e.receipt FROM events AS e"
+            " WHERE e.deployment_id = (SELECT deployment_id FROM meta)"
+            f" AND e.kind IN ({', '.join('?' for _ in kinds)})"
+            " AND e.state = 'COMMITTED'"
+            " AND e.actor != ?"
+            " AND e.operation_key != ?"
+            " AND e.sequence = ("
+            "   SELECT MAX(e2.sequence) FROM events AS e2"
+            "   WHERE e2.deployment_id = e.deployment_id"
+            "     AND e2.actor = e.actor"
+            "     AND e2.kind = e.kind"
+            "     AND e2.operation_key = e.operation_key"
+            " )"
+        )
+        parameters = [*kinds, LATCH_ACTOR, LATCH_OPERATION_KEY]
+        if kind is not None:
+            sql += " AND e.kind = ?"
+            parameters.append(kind)
+        if operation_key is not None:
+            sql += " AND e.operation_key = ?"
+            parameters.append(operation_key)
+        sql += " ORDER BY e.sequence LIMIT ?"
+        parameters.append(limit + 1)
+
+        directory_fd = self._open_pinned_directory()
+        try:
+            with self._connection(directory_fd) as connection:
+                try:
+                    rows = connection.execute(sql, parameters).fetchall()
+                except sqlite3.DatabaseError as exc:
+                    raise StoreUnavailable(
+                        "could not read committed procedure receipts"
+                    ) from exc
+        finally:
+            os.close(directory_fd)
+        if len(rows) > limit:
+            raise EnumerationOverflow(
+                "committed procedure receipts exceed the bound"
+            )
+        return [
+            CommittedProcedureReceipt(
                 kind=row["kind"],
                 actor=row["actor"],
                 operation_key=row["operation_key"],

@@ -129,3 +129,25 @@ def authorize_encounter_write(gateway, allowed_codes, csrf_token=None):
     if not gateway.write_deployment_approved():
         gateway.deny()
     return settings, view, role
+
+
+def authorize_procedure_write(gateway, allowed_codes, csrf_token=None):
+    """Read gate, explicit CSRF, and the separate procedure-write gate.
+
+    The procedure gate is independent of the patient, appointment and encounter
+    flags. It requires the exact approved site, the procedure flag and the same
+    private deployment marker bound to the fence store. The completion target is
+    decided per request from the server-owned procedure allowlist; no
+    configuration value is authority on its own.
+    """
+
+    settings, view, role = authorize(gateway, allowed_codes)
+    if view.user == write_fence.LATCH_ACTOR:
+        gateway.deny()
+    if not gateway.csrf_token_valid(csrf_token):
+        gateway.deny()
+    if not settings.procedure_write_enabled:
+        gateway.deny()
+    if not gateway.write_deployment_approved():
+        gateway.deny()
+    return settings, view, role

@@ -25,6 +25,7 @@ from clinic_ui.core.policy import (
     ENCOUNTER_COMPLETE_ROLE_CODES,
     ENCOUNTER_ROLE_CODES,
     PATIENT_WRITE_ROLE_CODES,
+    PROCEDURE_ROLE_CODES,
     SUPPORTED_ROLE_CODES,
 )
 from clinic_ui.endpoints import common
@@ -162,6 +163,36 @@ def _encounter_write_flags(gateway, settings, role):
         return disabled
 
 
+def _procedure_write_flags(gateway, settings, role):
+    """Return ``True`` when the procedure-completion surface is open.
+
+    Independent of the other write flags: exact approved site, boundary and
+    installed-field preflight, the procedure flag, the deployment marker, a ready
+    fence store and the caller's own native Clinical Procedure write authority.
+    The target and its price list / batch / stock state are decided per request;
+    this flag only advertises that the surface exists.
+    """
+
+    if role not in PROCEDURE_ROLE_CODES:
+        return False
+    try:
+        if gateway.native_procedure_boundary_problem() is not None:
+            return False
+        if gateway.native_procedure_install_problem() is not None:
+            return False
+        if not settings.procedure_write_enabled:
+            return False
+        if not settings.procedure_allowlist:
+            return False
+        if gateway.write_deployment_approved() is not True:
+            return False
+        if gateway.write_fence_ready() is not True:
+            return False
+        return gateway.native_procedure_can_write() is True
+    except Exception:
+        return False
+
+
 def bootstrap(gateway):
     common.begin(gateway)
 
@@ -192,6 +223,9 @@ def bootstrap(gateway):
             write_encounter_complete,
             write_encounter_amend,
         ) = _encounter_write_flags(gateway, settings, role)
+        write_procedure_complete = _procedure_write_flags(
+            gateway, settings, role
+        )
         capabilities = bootstrap_capabilities(
             write_patient_create=write_create,
             write_patient_update=write_update,
@@ -203,6 +237,7 @@ def bootstrap(gateway):
             write_encounter_draft=write_encounter_draft,
             write_encounter_complete=write_encounter_complete,
             write_encounter_amend=write_encounter_amend,
+            write_procedure_complete=write_procedure_complete,
         )
         return dto.build_bootstrap(
             session_epoch=epoch,

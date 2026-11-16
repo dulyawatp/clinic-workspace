@@ -86,6 +86,7 @@ DEPLOYMENT_GATED_WRITE_NAMES = frozenset(
         "write.encounter.amend",
         "write.medication.order",
         "write.lab.order",
+        "write.procedure.complete",
         "write.invoice.void_amend",
         "write.stock.consume",
     }
@@ -113,6 +114,7 @@ def bootstrap_capabilities(
     write_encounter_draft=False,
     write_encounter_complete=False,
     write_encounter_amend=False,
+    write_procedure_complete=False,
 ):
     """Return the default read-only map with reviewed writes enabled.
 
@@ -146,6 +148,12 @@ def bootstrap_capabilities(
         capabilities["write.encounter.complete"] = ENABLED_STATE
     if write_encounter_amend is True:
         capabilities["write.encounter.amend"] = ENABLED_STATE
+    # Completing a procedure is the stock-consumption write (SPEC:185-220): the
+    # pair below is enabled by the one procedure gate, because the stock move is
+    # never a separate client operation.
+    if write_procedure_complete is True:
+        capabilities["write.procedure.complete"] = ENABLED_STATE
+        capabilities["write.stock.consume"] = ENABLED_STATE
     return capabilities
 
 
