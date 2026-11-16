@@ -153,6 +153,27 @@ def authorize_procedure_write(gateway, allowed_codes, csrf_token=None):
     return settings, view, role
 
 
+def authorize_stock_write(gateway, allowed_codes, csrf_token=None):
+    """Read gate, explicit CSRF, and the separate stock-write gate.
+
+    The stock gate is independent of every clinical and admin flag. It requires
+    the exact approved site, the stock flag and the same private deployment
+    marker bound to the fence store. Masters, batches and native authority are
+    decided per request; no configuration value is authority on its own.
+    """
+
+    settings, view, role = authorize(gateway, allowed_codes)
+    if view.user == write_fence.LATCH_ACTOR:
+        gateway.deny()
+    if not gateway.csrf_token_valid(csrf_token):
+        gateway.deny()
+    if not settings.stock_write_enabled:
+        gateway.deny()
+    if not gateway.write_deployment_approved():
+        gateway.deny()
+    return settings, view, role
+
+
 def authorize_admin_write(gateway, allowed_codes, csrf_token=None):
     """Read gate, explicit CSRF, and the separate admin-write gate.
 

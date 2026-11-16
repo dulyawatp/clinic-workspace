@@ -113,6 +113,11 @@ PROCEDURES_KEY = "clinic_ui_synthetic_procedures"
 # per request by the admin contract and endpoint.
 ADMIN_WRITE_ENABLED_KEY = "clinic_ui_native_admin_write_enabled"
 ADMIN_WRITE_SITE_KEY = "clinic_ui_native_admin_write_site"
+# Separate, default-off stock receive/transfer/adjust gate. Independent of every
+# other write flag: each movement needs this flag and the exact approved site.
+# Masters, batches and native authority are decided per request.
+STOCK_WRITE_ENABLED_KEY = "clinic_ui_native_stock_write_enabled"
+STOCK_WRITE_SITE_KEY = "clinic_ui_native_stock_write_site"
 
 # The one and only site identity on which this local experiment may run. Exact
 # string equality against the resolved current site is required; the configured
@@ -161,6 +166,7 @@ class Settings:
     procedure_write_enabled: bool = False
     procedure_allowlist: tuple = ()
     admin_write_enabled: bool = False
+    stock_write_enabled: bool = False
 
     def as_role_map(self):
         return {code: tuple(roles) for code, roles in self.role_map}
@@ -465,6 +471,24 @@ def _admin_write_settings(getter, site):
     return True
 
 
+def _stock_write_settings(getter, site):
+    """Return ``True`` when the stock receive/transfer/adjust gate is open.
+
+    The gate needs the exact approved site and its own flag. Masters, batches,
+    quantities and native authority are decided per request by the stock
+    contract and endpoint, never from configuration alone.
+    """
+
+    if site != APPROVED_WRITE_SITE or site in DISALLOWED_WRITE_SITES:
+        return False
+    if not _enabled(getter(STOCK_WRITE_ENABLED_KEY)):
+        return False
+    configured = getter(STOCK_WRITE_SITE_KEY)
+    if not isinstance(configured, str) or configured != APPROVED_WRITE_SITE:
+        return False
+    return True
+
+
 def load_settings(getter, site):
     """Return validated settings, or ``None`` when the feature is unavailable."""
 
@@ -539,4 +563,5 @@ def load_settings(getter, site):
         procedure_write_enabled=_procedure_write_settings(getter, site),
         procedure_allowlist=procedure_allowlist,
         admin_write_enabled=_admin_write_settings(getter, site),
+        stock_write_enabled=_stock_write_settings(getter, site),
     )

@@ -89,6 +89,9 @@ DEPLOYMENT_GATED_WRITE_NAMES = frozenset(
         "write.procedure.complete",
         "write.invoice.void_amend",
         "write.stock.consume",
+        "write.stock.receive",
+        "write.stock.transfer",
+        "write.stock.adjust",
         "write.admin.user",
         "write.admin.master",
     }
@@ -117,6 +120,9 @@ def bootstrap_capabilities(
     write_encounter_complete=False,
     write_encounter_amend=False,
     write_procedure_complete=False,
+    write_stock_receive=False,
+    write_stock_transfer=False,
+    write_stock_adjust=False,
     write_admin_user=False,
     write_admin_master=False,
 ):
@@ -158,6 +164,14 @@ def bootstrap_capabilities(
     if write_procedure_complete is True:
         capabilities["write.procedure.complete"] = ENABLED_STATE
         capabilities["write.stock.consume"] = ENABLED_STATE
+    # Stock receive/transfer/adjust are three contract surfaces under one
+    # site-config gate; bootstrap passes each only after the gate passes.
+    if write_stock_receive is True:
+        capabilities["write.stock.receive"] = ENABLED_STATE
+    if write_stock_transfer is True:
+        capabilities["write.stock.transfer"] = ENABLED_STATE
+    if write_stock_adjust is True:
+        capabilities["write.stock.adjust"] = ENABLED_STATE
     # Admin users and masters are two independent contract surfaces that share
     # one site-config gate; bootstrap passes each only after that gate passes.
     if write_admin_user is True:

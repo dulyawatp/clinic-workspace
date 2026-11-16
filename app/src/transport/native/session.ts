@@ -99,6 +99,9 @@ const NATIVE_ENABLEABLE = new Set<string>([
   "write.procedure.complete",
   "write.invoice.void_amend",
   "write.stock.consume",
+  "write.stock.receive",
+  "write.stock.transfer",
+  "write.stock.adjust",
   "write.admin.user",
   "write.admin.master",
 ]);

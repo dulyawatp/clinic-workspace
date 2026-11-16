@@ -22,11 +22,13 @@ from clinic_ui.core.capabilities import bootstrap_capabilities
 from clinic_ui.core.epoch import session_epoch
 from clinic_ui.core.policy import (
     ADMIN_ROLE_CODES,
+    ADJUST_ROLE_CODES,
     APPOINTMENT_WRITE_ROLE_CODES,
     ENCOUNTER_COMPLETE_ROLE_CODES,
     ENCOUNTER_ROLE_CODES,
     PATIENT_WRITE_ROLE_CODES,
     PROCEDURE_ROLE_CODES,
+    STOCK_ROLE_CODES,
     SUPPORTED_ROLE_CODES,
 )
 from clinic_ui.endpoints import common
@@ -194,6 +196,46 @@ def _procedure_write_flags(gateway, settings, role):
         return False
 
 
+def _stock_write_flags(gateway, settings, role):
+    """Return ``(receive, transfer, adjust)`` when the stock surface is open.
+
+    Independent of every other write flag: exact approved site, boundary and
+    installed-field preflight, the stock flag, the deployment marker, a ready
+    fence store and the caller's own native authority on the document it would
+    submit. Masters, batches and quantities are decided per request; these
+    flags only advertise that the surface exists. Reconciliation is the ADM
+    surface, receive/transfer the inventory one.
+    """
+
+    disabled = (False, False, False)
+    try:
+        if gateway.native_stock_boundary_problem() is not None:
+            return disabled
+        if gateway.native_stock_install_problem() is not None:
+            return disabled
+        if not settings.stock_write_enabled:
+            return disabled
+        if gateway.write_deployment_approved() is not True:
+            return disabled
+        if gateway.write_fence_ready() is not True:
+            return disabled
+        receive_ok = (
+            role in STOCK_ROLE_CODES
+            and gateway.native_stock_can_create("Purchase Receipt") is True
+        )
+        transfer_ok = (
+            role in STOCK_ROLE_CODES
+            and gateway.native_stock_can_create("Stock Entry") is True
+        )
+        adjust_ok = (
+            role in ADJUST_ROLE_CODES
+            and gateway.native_stock_can_create("Stock Reconciliation") is True
+        )
+        return receive_ok, transfer_ok, adjust_ok
+    except Exception:
+        return disabled
+
+
 def _admin_write_flags(gateway, settings, role):
     """Return ``(user, master)`` when the admin surface is open.
 
@@ -256,6 +298,11 @@ def bootstrap(gateway):
         write_procedure_complete = _procedure_write_flags(
             gateway, settings, role
         )
+        (
+            write_stock_receive,
+            write_stock_transfer,
+            write_stock_adjust,
+        ) = _stock_write_flags(gateway, settings, role)
         write_admin_user, write_admin_master = _admin_write_flags(
             gateway, settings, role
         )
@@ -271,6 +318,9 @@ def bootstrap(gateway):
             write_encounter_complete=write_encounter_complete,
             write_encounter_amend=write_encounter_amend,
             write_procedure_complete=write_procedure_complete,
+            write_stock_receive=write_stock_receive,
+            write_stock_transfer=write_stock_transfer,
+            write_stock_adjust=write_stock_adjust,
             write_admin_user=write_admin_user,
             write_admin_master=write_admin_master,
         )

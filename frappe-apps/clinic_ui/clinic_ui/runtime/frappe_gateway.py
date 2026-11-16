@@ -37,6 +37,7 @@ from clinic_ui.core import (
     patient_write,
     procedure_contract,
     procedure_write,
+    stock_contract,
     write_fence,
 )
 from clinic_ui.runtime.traceback import UNSAFE_V1_KEYS, WRITE_ERROR_CODES
@@ -4057,3 +4058,596 @@ class Gateway:
         except write_fence.FenceError as exc:
             raise patient_write.WriteUncertain() from exc
 
+    # -- stock receive/transfer/adjust surface ---------------------------
+
+    def _stock_meta_fields(self):
+        """Resolve the installed field names through the metadata cache."""
+
+        cached = getattr(self, "_stock_fields_cache", None)
+        if cached is not None:
+            return cached
+        frappe = self.frappe
+        get_meta = getattr(getattr(frappe, "db", None), "get_meta", None)
+        if not callable(get_meta):
+            get_meta = frappe.get_meta
+        fields = {}
+        for doctype in stock_contract.INSTALLED_CANDIDATES:
+            fields[doctype] = set(get_meta(doctype).get_valid_columns())
+        self._stock_fields_cache = fields
+        return fields
+
+    def native_stock_install_problem(self):
+        """Preflight the installed DocType/field set; a gap is a refusal."""
+
+        try:
+            return stock_contract.install_problem(self._stock_meta_fields())
+        except Exception:
+            return "installed metadata unreadable"
+
+    def native_stock_boundary_problem(self):
+        """Return pinned-boundary drift for the stock family, or ``None``.
+
+        Tests supply ``frappe.stock_boundary_snapshot``; production collects the
+        pinned versions, the sha256 of the controllers this family drives or
+        creates, their MRO, the submittable flags, the wildcard/class overrides
+        on the path, the enabled Server Script count and our fence kinds. Any
+        failure is a non-empty problem so callers fail closed.
+        """
+
+        try:
+            snapshot = getattr(self.frappe, "stock_boundary_snapshot", None)
+            if snapshot is None:
+                snapshot = self._collect_stock_boundary_snapshot()
+            return stock_contract.boundary_problem(snapshot)
+        except Exception:
+            return "boundary unreadable"
+
+    def _collect_stock_boundary_snapshot(self):
+        import hashlib
+        import importlib
+
+        frappe = self.frappe
+
+        def version(module_name, module=None):
+            if module is not None:
+                return getattr(module, "__version__", None)
+            try:
+                return getattr(
+                    importlib.import_module(module_name), "__version__", None
+                )
+            except Exception:
+                return None
+
+        sources = {
+            "purchase_receipt": (
+                "stock",
+                "doctype",
+                "purchase_receipt",
+                "purchase_receipt.py",
+            ),
+            "stock_entry": (
+                "stock",
+                "doctype",
+                "stock_entry",
+                "stock_entry.py",
+            ),
+            "stock_reconciliation": (
+                "stock",
+                "doctype",
+                "stock_reconciliation",
+                "stock_reconciliation.py",
+            ),
+            "batch": ("stock", "doctype", "batch", "batch.py"),
+        }
+        source_sha256 = {}
+        for key, parts in sources.items():
+            path = frappe.get_app_path("erpnext", *parts)
+            with open(path, "rb") as handle:
+                source_sha256[key] = hashlib.sha256(handle.read()).hexdigest()
+
+        mro = {}
+        for doctype in stock_contract.GUARDED_DOCTYPES:
+            controller = type(frappe.get_doc({"doctype": doctype}))
+            mro[doctype] = tuple(
+                f"{base.__module__}.{base.__name__}" for base in controller.__mro__
+            )
+
+        hooks = frappe.get_hooks() or {}
+        doc_events = hooks.get("doc_events") or {}
+        wildcard = doc_events.get("*") or {}
+        overrides = hooks.get("override_doctype_class") or {}
+        extends = hooks.get("extend_doctype_class") or {}
+        server_scripts = frappe.get_all(
+            "Server Script", filters={"disabled": 0}, limit=1, pluck="name"
+        ) or ()
+        return {
+            "versions": {
+                "frappe": version("frappe", frappe),
+                "erpnext": version("erpnext"),
+                "healthcare": version("healthcare"),
+            },
+            "source_sha256": source_sha256,
+            "controller_mro": mro,
+            "submittable": {
+                doctype: (
+                    1 if frappe.get_meta(doctype).get("is_submittable") else 0
+                )
+                for doctype in (
+                    stock_contract.PURCHASE_RECEIPT_DOCTYPE,
+                    stock_contract.STOCK_ENTRY_DOCTYPE,
+                    stock_contract.STOCK_RECONCILIATION_DOCTYPE,
+                )
+            },
+            "enabled_server_scripts": len(server_scripts),
+            "doc_events": {
+                doctype: tuple(doc_events.get(doctype) or ())
+                for doctype in stock_contract.GUARDED_DOCTYPES
+            },
+            "wildcard_doc_events": {
+                event: tuple(wildcard.get(event) or ())
+                for event in stock_contract.REVIEWED_WILDCARD_EVENTS
+            },
+            "scheduler_stock_jobs": tuple(
+                path
+                for handlers in (hooks.get("scheduler_events") or {}).values()
+                for path in (handlers or ())
+                if any(
+                    token in str(path)
+                    for token in stock_contract.SCHEDULER_STOCK_TOKENS
+                )
+            ),
+            "class_overrides": {
+                doctype: tuple(overrides.get(doctype) or ())
+                + tuple(extends.get(doctype) or ())
+                for doctype in stock_contract.GUARDED_DOCTYPES
+            },
+            "fence_kinds": tuple(stock_contract.STOCK_KINDS),
+        }
+
+    def native_stock_can_create(self, doctype):
+        """The acting user's native create authority on one stock document."""
+
+        try:
+            return bool(
+                self.frappe.has_permission(
+                    doctype,
+                    ptype="create",
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
+    def _stock_item(self, item_code):
+        row = self.frappe.db.get_value(
+            stock_contract.ITEM_DOCTYPE,
+            item_code,
+            ["has_batch_no", "has_expiry_date", "is_stock_item", "stock_uom"],
+            as_dict=True,
+        )
+        if row is None:
+            return {"exists": False}
+        get = getattr(row, "get", lambda key, default=None: default)
+        return {
+            "exists": True,
+            "item_code": item_code,
+            "has_batch_no": bool(get("has_batch_no")),
+            "has_expiry_date": bool(get("has_expiry_date")),
+            "is_stock_item": bool(get("is_stock_item")),
+            "stock_uom": self._text_value(get("stock_uom")),
+        }
+
+    def _stock_warehouse(self, warehouse):
+        company = self.frappe.db.get_value("Warehouse", warehouse, "company")
+        return {
+            "exists": bool(company),
+            "company": self._text_value(company),
+        }
+
+    def _stock_batch(self, batch_id):
+        if not batch_id:
+            return None
+        row = self.frappe.db.get_value(
+            stock_contract.BATCH_DOCTYPE,
+            batch_id,
+            ["item", "expiry_date", "batch_qty"],
+            as_dict=True,
+        )
+        if row is None:
+            return {"batch_id": batch_id, "exists": False}
+        get = getattr(row, "get", lambda key, default=None: default)
+        return {
+            "batch_id": batch_id,
+            "exists": True,
+            "item": self._text_value(get("item")),
+            "expiry_date": self._text_value(get("expiry_date")),
+            "batch_qty": get("batch_qty"),
+        }
+
+    def _stock_bin_qty(self, item_code, warehouse):
+        if not warehouse:
+            return None
+        return self.frappe.db.get_value(
+            stock_contract.BIN_DOCTYPE,
+            {"item_code": item_code, "warehouse": warehouse},
+            "actual_qty",
+        )
+
+    def _stock_purchase_order(self, purchase_order, item_code):
+        if not purchase_order:
+            return {"po_pending_qty": None, "po_item": None}
+        row = self.frappe.db.get_value(
+            "Purchase Order Item",
+            {"parent": purchase_order, "item_code": item_code},
+            ["name", "qty", "received_qty"],
+            as_dict=True,
+        )
+        if row is None:
+            return {"po_pending_qty": None, "po_item": None}
+        get = getattr(row, "get", lambda key, default=None: default)
+        ordered = get("qty")
+        received = get("received_qty") or 0
+        if not isinstance(ordered, (int, float)):
+            return {"po_pending_qty": None, "po_item": None}
+        return {
+            "po_pending_qty": float(ordered) - float(received),
+            "po_item": self._text_value(get("name")),
+        }
+
+    def native_stock_receive_detail(self, payload):
+        """Read the pre-fence receive decision fields under native authority."""
+
+        try:
+            item = self._stock_item(payload["item_code"])
+            warehouse = self._stock_warehouse(payload["warehouse"])
+            order = self._stock_purchase_order(
+                payload.get("purchase_order"), payload["item_code"]
+            )
+            return {
+                "today": self.site_today(),
+                "company": warehouse.get("company"),
+                "item": item,
+                "warehouse": warehouse,
+                "supplier_exists": bool(
+                    self.frappe.db.exists("Supplier", payload["supplier"])
+                ),
+                "batch": self._stock_batch(payload.get("batch_id")),
+                "available_qty": self._stock_bin_qty(
+                    payload["item_code"], payload["warehouse"]
+                ),
+                "po_item": order["po_item"],
+                "po_pending_qty": order["po_pending_qty"],
+            }
+        except Exception:
+            raise patient_write.StoreUnavailable() from None
+
+    def native_stock_transfer_detail(self, payload):
+        """Read the pre-fence transfer decision fields."""
+
+        try:
+            warehouse = self._stock_warehouse(payload["source_warehouse"])
+            return {
+                "today": self.site_today(),
+                "company": warehouse.get("company"),
+                "item": self._stock_item(payload["item_code"]),
+                "warehouse": warehouse,
+                "target_warehouse": self._stock_warehouse(
+                    payload["target_warehouse"]
+                ),
+                "batch": self._stock_batch(payload.get("batch_id")),
+                "available_qty": self._stock_bin_qty(
+                    payload["item_code"], payload["source_warehouse"]
+                ),
+            }
+        except Exception:
+            raise patient_write.StoreUnavailable() from None
+
+    def native_stock_adjust_detail(self, payload):
+        """Read the pre-fence reconciliation decision fields."""
+
+        try:
+            warehouse = self._stock_warehouse(payload["warehouse"])
+            company = warehouse.get("company")
+            account = None
+            if company:
+                account = self.frappe.db.get_value(
+                    "Company", company, "stock_adjustment_account"
+                )
+            return {
+                "today": self.site_today(),
+                "company": company,
+                "stock_adjustment_account": self._text_value(account),
+                "item": self._stock_item(payload["item_code"]),
+                "warehouse": warehouse,
+                "batch": self._stock_batch(payload.get("batch_id")),
+                "available_qty": self._stock_bin_qty(
+                    payload["item_code"], payload["warehouse"]
+                ),
+            }
+        except Exception:
+            raise patient_write.StoreUnavailable() from None
+
+    def _stock_document_counts(self):
+        vouchers = (
+            stock_contract.PURCHASE_RECEIPT_DOCTYPE,
+            stock_contract.STOCK_ENTRY_DOCTYPE,
+            stock_contract.STOCK_RECONCILIATION_DOCTYPE,
+        )
+        return {
+            "stock_ledger_rows": int(
+                self.frappe.db.count(
+                    "Stock Ledger Entry",
+                    filters={"voucher_type": ("in", list(vouchers))},
+                )
+            ),
+            "gl_rows": int(
+                self.frappe.db.count(
+                    "GL Entry",
+                    filters={"voucher_type": ("in", list(vouchers))},
+                )
+            ),
+        }
+
+    def native_stock_baseline(self, kind, warehouses, item_code):
+        """Pre-fence Stock Ledger Entry, GL and Bin baselines."""
+
+        if kind not in stock_contract.STOCK_KINDS:
+            raise patient_write.WriteUncertain()
+        try:
+            counts = self._stock_document_counts()
+            bins = {
+                warehouse: self._stock_bin_qty(item_code, warehouse)
+                for warehouse in warehouses
+            }
+            return {**counts, "bins": bins}
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def _stock_now_time(self):
+        try:
+            from frappe.utils import nowtime
+
+            return nowtime()
+        except Exception:
+            return None
+
+    def _stock_create_batch(self, prepared):
+        """Create the batch master that must exist before the receipt posts."""
+
+        document = {
+            "doctype": stock_contract.BATCH_DOCTYPE,
+            "item": prepared["item_code"],
+            "batch_id": prepared["batch_no"],
+        }
+        if prepared.get("batch_expiry"):
+            document["expiry_date"] = prepared["batch_expiry"]
+        self.frappe.get_doc(document).insert()
+
+    def create_native_stock_receipt(self, prepared):
+        """One receive unit: batch master (where required), then the receipt."""
+
+        try:
+            if prepared.get("create_batch"):
+                self._stock_create_batch(prepared)
+            row = {
+                "item_code": prepared["item_code"],
+                "qty": prepared["qty"],
+                "uom": prepared["uom"],
+                "warehouse": prepared["warehouse"],
+            }
+            if prepared.get("batch_no"):
+                row["batch_no"] = prepared["batch_no"]
+                row["use_serial_batch_fields"] = 1
+            if prepared.get("purchase_order"):
+                item_row = {"purchase_order": prepared["purchase_order"]}
+                if prepared.get("po_item"):
+                    item_row["purchase_order_item"] = prepared["po_item"]
+                row.update(item_row)
+            document = {
+                "doctype": stock_contract.PURCHASE_RECEIPT_DOCTYPE,
+                "supplier": prepared["supplier"],
+                "company": prepared["company"],
+                "posting_date": prepared["posting_date"],
+                "posting_time": self._stock_now_time(),
+                "set_posting_time": 1,
+                "items": [row],
+            }
+            receipt = self.frappe.get_doc(document)
+            receipt.insert()
+            receipt.submit()
+            return self._text_value(receipt.name)
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def create_native_stock_transfer(self, prepared):
+        """One Material Transfer Stock Entry between the two warehouses."""
+
+        try:
+            row = {
+                "item_code": prepared["item_code"],
+                "qty": prepared["qty"],
+                "uom": prepared["uom"],
+                "s_warehouse": prepared["source_warehouse"],
+                "t_warehouse": prepared["target_warehouse"],
+            }
+            if prepared.get("batch_no"):
+                row["batch_no"] = prepared["batch_no"]
+                row["use_serial_batch_fields"] = 1
+            document = {
+                "doctype": stock_contract.STOCK_ENTRY_DOCTYPE,
+                "stock_entry_type": stock_contract.MATERIAL_TRANSFER_TYPE,
+                "company": prepared["company"],
+                "posting_date": prepared["posting_date"],
+                "posting_time": self._stock_now_time(),
+                "set_posting_time": 1,
+                "items": [row],
+            }
+            entry = self.frappe.get_doc(document)
+            entry.insert()
+            entry.submit()
+            return self._text_value(entry.name)
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def create_native_stock_reconciliation(self, prepared):
+        """One restricted Stock Reconciliation with the counted quantity."""
+
+        try:
+            row = {
+                "item_code": prepared["item_code"],
+                "qty": prepared["qty"],
+                "warehouse": prepared["warehouse"],
+            }
+            if prepared.get("batch_no"):
+                row["batch_no"] = prepared["batch_no"]
+                row["use_serial_batch_fields"] = 1
+            document = {
+                "doctype": stock_contract.STOCK_RECONCILIATION_DOCTYPE,
+                "company": prepared["company"],
+                "posting_date": prepared["posting_date"],
+                "posting_time": self._stock_now_time(),
+                "set_posting_time": 1,
+                "expense_account": prepared["expense_account"],
+                "items": [row],
+            }
+            reconciliation = self.frappe.get_doc(document)
+            reconciliation.insert()
+            reconciliation.submit()
+            return self._text_value(reconciliation.name)
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def _stock_docstatus(self, reference, expected):
+        doctype = expected.get("doctype")
+        if not isinstance(doctype, str) or not reference:
+            raise patient_write.WriteUncertain()
+        docstatus = self.frappe.db.get_value(doctype, reference, "docstatus")
+        if docstatus is None:
+            raise patient_write.WriteUncertain()
+        return docstatus
+
+    def _stock_side_effect_facts(self, reference, expected, baseline):
+        """Closed-world re-read: document state, SLE/GL deltas and Bin movement."""
+
+        if not isinstance(baseline, dict) or not isinstance(expected, dict):
+            raise patient_write.WriteUncertain()
+        try:
+            counts = self._stock_document_counts()
+            bins = {}
+            for warehouse in expected["bins"]:
+                before = (baseline.get("bins") or {}).get(warehouse)
+                after = self._stock_bin_qty(
+                    expected.get("item_code"), warehouse
+                )
+                after_value = (
+                    float(after) if isinstance(after, (int, float)) else 0.0
+                )
+                if expected.get("bin_mode") == "set":
+                    bins[warehouse] = after_value
+                else:
+                    before_value = (
+                        float(before)
+                        if isinstance(before, (int, float))
+                        else 0.0
+                    )
+                    bins[warehouse] = after_value - before_value
+            return {
+                "docstatus": self._stock_docstatus(reference, expected),
+                "doctype": expected["doctype"],
+                "sle_rows": counts["stock_ledger_rows"]
+                - int(baseline.get("stock_ledger_rows") or 0),
+                "gl_rows": counts["gl_rows"]
+                - int(baseline.get("gl_rows") or 0),
+                "bins": bins,
+            }
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def native_stock_receipt_facts(self, reference, expected, baseline):
+        return self._stock_side_effect_facts(reference, expected, baseline)
+
+    def native_stock_transfer_facts(self, reference, expected, baseline):
+        return self._stock_side_effect_facts(reference, expected, baseline)
+
+    def native_stock_adjust_facts(self, reference, expected, baseline):
+        return self._stock_side_effect_facts(reference, expected, baseline)
+
+    # -- stock fence, receipts and acknowledgement -----------------------
+
+    def list_committed_stock_receipts(
+        self, limit, kind=None, operation_key=None
+    ):
+        ledger = self._ledger()
+        try:
+            return ledger.committed_stock_receipts(
+                limit=limit, kind=kind, operation_key=operation_key
+            )
+        except write_fence.EnumerationOverflow as exc:
+            raise stock_contract.StockBudgetExhausted() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    def acknowledge_stock_write(
+        self, secret, actor, kind, operation_key, ack_token
+    ):
+        if kind not in write_fence.STOCK_OPERATION_KINDS:
+            return "invalid"
+        ledger = self._ledger()
+        try:
+            record = ledger.lookup(
+                actor=actor, kind=kind, operation_key=operation_key
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+        if (
+            record is None
+            or record.state != write_fence.COMMITTED
+            or not record.receipt
+        ):
+            return "invalid"
+        expected = stock_contract.ack_token(
+            secret, self.site, actor, kind, operation_key, record.receipt
+        )
+        if not hmac.compare_digest(expected, ack_token):
+            return "invalid"
+        try:
+            return ledger.acknowledge_barrier(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                ack_receipt="ack:" + expected,
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    @contextmanager
+    def stock_write_fence(self, actor, kind, operation_key, payload_digest):
+        if kind not in write_fence.STOCK_OPERATION_KINDS:
+            raise patient_write.WriteUncertain()
+        ledger = self._ledger()
+        try:
+            with ledger.fence(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                payload_digest=payload_digest,
+            ) as claim:
+                yield claim
+        except write_fence.OperationLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.SiteLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.OperationConflict as exc:
+            raise patient_write.WriteConflict() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc

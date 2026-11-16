@@ -321,6 +321,40 @@ class FakeGateway:
         self.admin_fence_claim = FakeClaim()
         self.admin_fence_error = None
 
+        # -- stock receive/transfer/adjust surface -------------------------
+        self.stock_boundary_problem = None
+        self.stock_install_problem = None
+        self.stock_create_authority = {}
+        self.stock_receive_detail = None
+        self.stock_transfer_detail = None
+        self.stock_adjust_detail = None
+        self.stock_detail_calls = []
+        self.stock_detail_sequence = []
+        self.stock_baseline_value = {
+            "stock_ledger_rows": 0,
+            "gl_rows": 0,
+            "bins": {},
+        }
+        self.stock_baseline_calls = []
+        self.stock_receipt_id = "PR-1"
+        self.stock_transfer_id = "SE-1"
+        self.stock_reconciliation_id = "SR-1"
+        self.stock_receipt_calls = []
+        self.stock_transfer_calls = []
+        self.stock_reconciliation_calls = []
+        self.stock_mutation_error = None
+        self.stock_facts = {}
+        self.stock_facts_calls = []
+        self.stock_receipt_records = []
+        self.stock_receipt_list_calls = []
+        self.stock_receipt_list_error = None
+        self.stock_ack_calls = []
+        self.stock_ack_status = "acked"
+        self.stock_ack_error = None
+        self.stock_fence_calls = []
+        self.stock_fence_claim = FakeClaim()
+        self.stock_fence_error = None
+
     def setting(self, key):
         sequence = self.setting_sequences.get(key)
         if sequence:
@@ -1127,6 +1161,127 @@ class FakeGateway:
         self.admin_fence_calls.append((actor, kind, operation_key, payload_digest))
         return FakeFence(self.admin_fence_claim, self.admin_fence_error)
 
+    # -- stock receive/transfer/adjust surface -----------------------------
+
+    def native_stock_boundary_problem(self):
+        return self.stock_boundary_problem
+
+    def native_stock_install_problem(self):
+        return self.stock_install_problem
+
+    def native_stock_can_create(self, doctype):
+        return self.stock_create_authority.get(doctype, True)
+
+    def _stock_detail(self, detail, payload):
+        self.stock_detail_calls.append(dict(payload))
+        if self.stock_detail_sequence:
+            return dict(self.stock_detail_sequence.pop(0))
+        return None if detail is None else dict(detail)
+
+    def native_stock_receive_detail(self, payload):
+        return self._stock_detail(self.stock_receive_detail, payload)
+
+    def native_stock_transfer_detail(self, payload):
+        return self._stock_detail(self.stock_transfer_detail, payload)
+
+    def native_stock_adjust_detail(self, payload):
+        return self._stock_detail(self.stock_adjust_detail, payload)
+
+    def native_stock_baseline(self, kind, warehouses, item_code):
+        self.stock_baseline_calls.append((kind, tuple(warehouses), item_code))
+        return dict(self.stock_baseline_value)
+
+    def _stock_mutation(self, calls, prepared, name):
+        if self.stock_mutation_error is not None:
+            raise self.stock_mutation_error
+        calls.append(dict(prepared))
+        return name
+
+    def create_native_stock_receipt(self, prepared):
+        return self._stock_mutation(
+            self.stock_receipt_calls, prepared, self.stock_receipt_id
+        )
+
+    def create_native_stock_transfer(self, prepared):
+        return self._stock_mutation(
+            self.stock_transfer_calls, prepared, self.stock_transfer_id
+        )
+
+    def create_native_stock_reconciliation(self, prepared):
+        return self._stock_mutation(
+            self.stock_reconciliation_calls,
+            prepared,
+            self.stock_reconciliation_id,
+        )
+
+    def _stock_side_effect_facts(
+        self, reference, expected, baseline, doctype
+    ):
+        self.stock_facts_calls.append((reference, expected, baseline))
+        if self.stock_facts:
+            return dict(self.stock_facts)
+        return {
+            "docstatus": 1,
+            "doctype": doctype,
+            "sle_rows": expected["sle_rows"],
+            "gl_rows": expected["gl_rows_max"],
+            "bins": dict(expected["bins"]),
+        }
+
+    def native_stock_receipt_facts(self, reference, expected, baseline):
+        return self._stock_side_effect_facts(
+            reference, expected, baseline, "Purchase Receipt"
+        )
+
+    def native_stock_transfer_facts(self, reference, expected, baseline):
+        return self._stock_side_effect_facts(
+            reference, expected, baseline, "Stock Entry"
+        )
+
+    def native_stock_adjust_facts(self, reference, expected, baseline):
+        return self._stock_side_effect_facts(
+            reference, expected, baseline, "Stock Reconciliation"
+        )
+
+    def list_committed_stock_receipts(self, limit, kind=None, operation_key=None):
+        self.stock_receipt_list_calls.append((limit, kind, operation_key))
+        if self.stock_receipt_list_error is not None:
+            raise self.stock_receipt_list_error
+        from clinic_ui.core import stock_contract
+
+        records = [
+            record
+            for record in self.stock_receipt_records
+            if (kind is None or record.kind == kind)
+            and (operation_key is None or record.operation_key == operation_key)
+        ]
+        if len(records) > limit:
+            raise stock_contract.StockBudgetExhausted()
+        return records
+
+    def acknowledge_stock_write(
+        self, secret, actor, kind, operation_key, ack_token
+    ):
+        self.stock_ack_calls.append((actor, kind, operation_key, ack_token))
+        if self.stock_ack_error is not None:
+            raise self.stock_ack_error
+        return self.stock_ack_status
+
+    def stock_write_fence(self, actor, kind, operation_key, payload_digest):
+        self.call_order.append("stock_fence")
+        self.stock_fence_calls.append((actor, kind, operation_key, payload_digest))
+        return FakeFence(self.stock_fence_claim, self.stock_fence_error)
+
+
+
+class FakeStockReceipt:
+    """One committed stock row as the gateway would enumerate it."""
+
+    def __init__(self, kind, actor, operation_key, receipt):
+        self.kind = kind
+        self.actor = actor
+        self.operation_key = operation_key
+        self.receipt = receipt
 
 
 def detail():

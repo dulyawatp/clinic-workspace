@@ -1789,6 +1789,9 @@ class AppointmentKindTests(FenceTestCase):
                     "procedure_complete",
                     "admin_user",
                     "admin_master",
+                    "stock_receive",
+                    "stock_transfer",
+                    "stock_adjust",
                 }
             ),
         )
