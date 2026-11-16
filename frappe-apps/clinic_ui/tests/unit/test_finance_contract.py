@@ -232,6 +232,27 @@ class BoundaryTests(unittest.TestCase):
             "wildcard event drift for validate",
         )
 
+    def test_the_installed_controller_hierarchies_are_pinned(self):
+        invoice = finance_contract.REVIEWED_MRO[finance_contract.INVOICE_DOCTYPE]
+        self.assertEqual(
+            invoice[:3],
+            (
+                "erpnext.accounts.doctype.sales_invoice.sales_invoice."
+                "ExtendedSalesInvoice",
+                "healthcare.healthcare.custom_doctype.sales_invoice."
+                "SalesInvoiceMixin",
+                "erpnext.accounts.doctype.sales_invoice.sales_invoice."
+                "SalesInvoice",
+            ),
+        )
+        self.assertIn(
+            "erpnext.controllers.status_updater.StatusUpdater", invoice
+        )
+        self.assertIn(
+            "erpnext.controllers.status_updater.StatusUpdater",
+            finance_contract.REVIEWED_MRO[finance_contract.PAYMENT_DOCTYPE],
+        )
+
     def test_version_drift_is_named(self):
         drift = dict(PINNED)
         drift["versions"] = dict(PINNED["versions"], erpnext="16.53.0")

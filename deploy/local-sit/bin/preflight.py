@@ -119,6 +119,11 @@ def selfcheck() -> int:
             "source_sha256": {"sales_invoice": "a" * 64, "payment_entry": "b" * 64},
             "pinned": {"sales_invoice": "a" * 64, "payment_entry": "b" * 64},
         },
+        "procedure": {
+            "problem": None,
+            "source_sha256": {"clinical_procedure": "d" * 64},
+            "pinned": {"clinical_procedure": "d" * 64},
+        },
         "appointment": {"problem": None},
     }
     cases = [
@@ -175,6 +180,25 @@ def selfcheck() -> int:
             ),
         ),
         ("an empty report is caught", bool(boundary_sha_problems({}))),
+        (
+            "procedure source drift is caught",
+            bool(
+                boundary_sha_problems(
+                    dict(
+                        good_report,
+                        procedure=dict(
+                            good_report["procedure"],
+                            source_sha256={"clinical_procedure": "e" * 64},
+                        ),
+                    )
+                )
+            ),
+        ),
+        (
+            "the boundary probe collects the procedure pin",
+            "'procedure', '_collect_procedure_boundary_snapshot'"
+            in boundary_shas_probe_script(),
+        ),
         ("embedded backend probes compile", probes_compile()),
     ]
     failed = [name for name, ok in cases if not ok]
@@ -282,22 +306,24 @@ def boundary_shas_probe_script() -> str:
         "gateway = Gateway()\n"
         "report = {}\n"
         "collectors = (\n"
-        "    ('stock', '_collect_stock_boundary_snapshot', stock_contract),\n"
-        "    ('purchase', '_collect_purchase_boundary_snapshot', purchase_contract),\n"
-        "    ('finance', '_collect_finance_boundary_snapshot', finance_contract),\n"
+        "    ('stock', '_collect_stock_boundary_snapshot',\n"
+        "     stock_contract.REVIEWED_SOURCE_SHA256),\n"
+        "    ('purchase', '_collect_purchase_boundary_snapshot',\n"
+        "     purchase_contract.REVIEWED_SOURCE_SHA256),\n"
+        "    ('finance', '_collect_finance_boundary_snapshot',\n"
+        "     finance_contract.REVIEWED_SOURCE_SHA256),\n"
+        "    ('procedure', '_collect_procedure_boundary_snapshot',\n"
+        "     {'clinical_procedure': procedure_contract.PROCEDURE_SOURCE_SHA256}),\n"
         ")\n"
         "for family in ('appointment', 'encounter', 'procedure', 'stock',\n"
         "               'purchase', 'finance'):\n"
         "    report[family] = {\n"
         "        'problem': getattr(gateway, 'native_%s_boundary_problem' % family)(),\n"
         "    }\n"
-        "for family, collector, contract in collectors:\n"
+        "for family, collector, pinned in collectors:\n"
         "    snapshot = getattr(gateway, collector)()\n"
         "    report[family]['source_sha256'] = snapshot.get('source_sha256')\n"
-        "    report[family]['pinned'] = dict(contract.REVIEWED_SOURCE_SHA256)\n"
-        "report['procedure']['pinned'] = {\n"
-        "    'clinical_procedure': procedure_contract.PROCEDURE_SOURCE_SHA256,\n"
-        "}\n"
+        "    report[family]['pinned'] = dict(pinned)\n"
         "print(json.dumps(report, default=str))\n"
         "PY"
     )

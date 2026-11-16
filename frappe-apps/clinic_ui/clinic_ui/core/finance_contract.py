@@ -125,10 +125,16 @@ REVIEWED_SOURCE_SHA256 = {
     ),
 }
 
+# The installed controller hierarchies (erpnext+healthcare class objects as the
+# collector snapshots them, not bare erpnext source): healthcare extends Sales
+# Invoice with ExtendedSalesInvoice/SalesInvoiceMixin, and erpnext inserts
+# StatusUpdater between TransactionBase and Document.
 REVIEWED_MRO = {
     INVOICE_DOCTYPE: (
+        "erpnext.accounts.doctype.sales_invoice.sales_invoice."
+        "ExtendedSalesInvoice",
+        "healthcare.healthcare.custom_doctype.sales_invoice.SalesInvoiceMixin",
         "erpnext.accounts.doctype.sales_invoice.sales_invoice.SalesInvoice",
-        "erpnext.controllers.sales_and_purchase_return.SalesAndPurchaseReturn",
         "erpnext.controllers.selling_controller.SellingController",
         "erpnext.controllers.stock_controller.StockController",
         "erpnext.controllers.accounts_controller.AccountsController",
@@ -142,6 +148,7 @@ REVIEWED_MRO = {
         "erpnext.accounts.doctype.payment_entry.payment_entry.PaymentEntry",
         "erpnext.controllers.accounts_controller.AccountsController",
         "erpnext.utilities.transaction_base.TransactionBase",
+        "erpnext.controllers.status_updater.StatusUpdater",
         "frappe.model.document.Document",
         "frappe.model.document._DocumentBase",
         "builtins.object",
