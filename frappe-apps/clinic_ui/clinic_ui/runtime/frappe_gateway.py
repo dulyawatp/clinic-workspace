@@ -5278,7 +5278,10 @@ class Gateway:
 
         The discount child is optional: a site without it still lands invoices
         (only the discount sub-capability is cut), so an absent DocType is
-        recorded as an empty column set instead of failing the preflight.
+        recorded as an empty column set instead of failing the preflight. The
+        parent ``deductions`` link is resolved separately: the child only rides
+        when the Sales Invoice carries a table field with that fieldname
+        pointing at the installed child doctype.
         """
 
         cached = getattr(self, "_finance_fields_cache", None)
@@ -5297,8 +5300,29 @@ class Gateway:
                     fields[doctype] = set()
                     continue
                 raise
+        fields[finance_contract.DEDUCTION_LINK_KEY] = (
+            self._finance_deduction_link_ok(get_meta)
+        )
         self._finance_fields_cache = fields
         return fields
+
+    @staticmethod
+    def _finance_deduction_link_ok(get_meta):
+        """True when the parent carries the linked child table we write."""
+
+        try:
+            meta = get_meta(finance_contract.INVOICE_DOCTYPE)
+        except Exception:
+            return False
+        for field in getattr(meta, "fields", ()) or ():
+            get = getattr(field, "get", lambda key, default=None: default)
+            if get("fieldname") != finance_contract.DEDUCTION_LINK_FIELD:
+                continue
+            if get("fieldtype") not in finance_contract.DEDUCTION_TABLE_TYPES:
+                continue
+            if get("options") == finance_contract.DEDUCTION_DOCTYPE:
+                return True
+        return False
 
     def native_finance_install_problem(self):
         """Preflight the installed DocType/field set; a gap is a refusal."""
@@ -5873,23 +5897,12 @@ class Gateway:
             if row is None:
                 raise patient_write.WriteUncertain()
             get = getattr(row, "get", lambda key, default=None: default)
-            receivable = expected.get("debit_account")
-            incomes = set(expected.get("credit_accounts") or ())
             gl_rows = self._finance_gl_rows(
                 finance_contract.INVOICE_DOCTYPE, reference
             )
-            debit_total = 0.0
-            credit_total = 0.0
-            unexpected = 0
-            for gl in gl_rows:
-                account = gl["account"]
-                if account == receivable:
-                    debit_total += float(gl["debit"] or 0.0)
-                    continue
-                if account in incomes:
-                    credit_total += float(gl["credit"] or 0.0)
-                    continue
-                unexpected += 1
+            debit_total, credit_total, unexpected = (
+                finance_contract.invoice_gl_sums(gl_rows, expected)
+            )
             counts = self._finance_counts()
             facts = {
                 "doctype": finance_contract.INVOICE_DOCTYPE,
@@ -5932,16 +5945,12 @@ class Gateway:
             if row is None:
                 raise patient_write.WriteUncertain()
             get = getattr(row, "get", lambda key, default=None: default)
-            debit_account = expected.get("paid_to_account")
-            credit_account = expected.get("paid_from_account")
             gl_rows = self._finance_gl_rows(
                 finance_contract.PAYMENT_DOCTYPE, reference
             )
-            unexpected = 0
-            for gl in gl_rows:
-                if gl["account"] in (debit_account, credit_account):
-                    continue
-                unexpected += 1
+            unexpected = finance_contract.payment_gl_unexpected(
+                gl_rows, expected
+            )
             counts = self._finance_counts()
             invoice_after = self._finance_invoice_state(expected.get("invoice"))
             before_value = self._finance_money(

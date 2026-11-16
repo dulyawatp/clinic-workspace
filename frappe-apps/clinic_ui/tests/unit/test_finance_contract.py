@@ -50,6 +50,7 @@ def meta_fields(**overrides):
         doctype: set(candidates)
         for doctype, candidates in finance_contract.INSTALLED_CANDIDATES.items()
     }
+    fields[finance_contract.DEDUCTION_LINK_KEY] = True
     fields.update(overrides)
     return fields
 
@@ -168,6 +169,17 @@ class InstallPreflightTests(unittest.TestCase):
         for field in finance_contract.DISCOUNT_CHILD_FIELDS:
             fields[finance_contract.DEDUCTION_DOCTYPE].add(field)
         self.assertIsNone(
+            finance_contract.discount_problem(fields, enabled=True)
+        )
+
+    def test_the_discount_path_needs_the_parent_link_fieldname(self):
+        fields = meta_fields()
+        fields[finance_contract.DEDUCTION_LINK_KEY] = False
+        self.assertIsNotNone(
+            finance_contract.discount_problem(fields, enabled=True)
+        )
+        fields.pop(finance_contract.DEDUCTION_LINK_KEY)
+        self.assertIsNotNone(
             finance_contract.discount_problem(fields, enabled=True)
         )
 
@@ -564,6 +576,25 @@ class ExpectedTotalsTests(unittest.TestCase):
         self.assertEqual(expected["outstanding_delta"], -20.0)
         self.assertEqual(expected["status"], "Paid")
 
+    def test_the_discount_expected_shape_is_verified_only_with_the_path(self):
+        # The child's GL behaviour is only proven on a site that installs the
+        # reviewed child under the parent link; otherwise this expectation is
+        # unverified, so skip with the installed reason instead of inventing a
+        # shape for a path the deployment does not carry.
+        reason = finance_contract.discount_problem(
+            meta_fields(), enabled=True
+        )
+        if reason is not None:
+            self.skipTest(reason)
+        payload = finance_contract.validate_invoice(
+            invoice_body(discount=5.0)
+        )
+        expected = finance_contract.expected_invoice(
+            invoice_detail(discount_available=True), payload
+        )
+        self.assertEqual(expected["gl_rows"], len(payload["items"]) + 1)
+        self.assertEqual(expected["credit_total"], expected["net_total"])
+
     def test_a_partial_payment_keeps_the_observed_status(self):
         detail = payment_detail(
             invoice={
@@ -710,6 +741,16 @@ class PreparedBodyTests(unittest.TestCase):
             finance_contract.prepared_problem("invoice_submit", prepared)
         )
 
+    def test_the_deductions_child_needs_a_cost_center(self):
+        prepared = self.prepared_invoice(
+            discount=2.0,
+            deductions=[{"account": "Sales - SITCO", "amount": 2.0}],
+        )
+        self.assertIn(
+            "cost center",
+            finance_contract.prepared_problem("invoice_submit", prepared),
+        )
+
     def test_a_clean_payment_body_has_no_problem(self):
         self.assertIsNone(
             finance_contract.prepared_problem(
@@ -795,12 +836,104 @@ class SideEffectTests(unittest.TestCase):
             "invoice_status": status,
         }
 
+    def test_the_invoice_expected_carries_the_server_resolved_accounts(self):
+        detail = invoice_detail()
+        expected = self.invoice_expected()
+        self.assertEqual(
+            expected["debit_account"], detail["receivable_account"]
+        )
+        self.assertEqual(
+            expected["credit_accounts"],
+            sorted(set(detail["income_accounts"].values())),
+        )
+
+    def test_the_payment_expected_carries_the_server_resolved_accounts(self):
+        detail = payment_detail()
+        expected = self.payment_expected()
+        self.assertEqual(
+            expected["paid_from_account"], detail["receivable_account"]
+        )
+        self.assertEqual(
+            expected["paid_to_account"], detail["mode"]["account"]
+        )
+
+    def test_invoice_gl_facts_classified_like_the_real_reader_pass(self):
+        # Derive the rows the installed controller posts (Debtors Dr / Sales
+        # Cr) from the server-resolved accounts, then classify them through the
+        # same rule the real gateway's re-read uses. Echoing EXPECTED would hide
+        # a key drift exactly like the pre-repair reader did.
+        expected = self.invoice_expected()
+        gl_rows = [
+            {
+                "account": expected["debit_account"],
+                "debit": expected["debit_total"],
+                "credit": 0.0,
+            },
+            {
+                "account": expected["credit_accounts"][0],
+                "debit": 0.0,
+                "credit": expected["credit_total"],
+            },
+        ]
+        debit_total, credit_total, unexpected = (
+            finance_contract.invoice_gl_sums(gl_rows, expected)
+        )
+        self.assertEqual(debit_total, expected["debit_total"])
+        self.assertEqual(credit_total, expected["credit_total"])
+        self.assertEqual(unexpected, 0)
+
+    def test_payment_gl_facts_classified_like_the_real_reader_pass(self):
+        expected = self.payment_expected()
+        gl_rows = [
+            {
+                "account": expected["paid_to_account"],
+                "debit": expected["allocated"],
+                "credit": 0.0,
+            },
+            {
+                "account": expected["paid_from_account"],
+                "debit": 0.0,
+                "credit": expected["allocated"],
+            },
+        ]
+        self.assertEqual(
+            finance_contract.payment_gl_unexpected(gl_rows, expected), 0
+        )
+
+    def test_a_gl_row_outside_the_expected_accounts_is_unexpected(self):
+        expected = self.invoice_expected()
+        gl_rows = [
+            {
+                "account": expected["debit_account"],
+                "debit": expected["debit_total"],
+                "credit": 0.0,
+            },
+            {
+                "account": "Suspense - SITCO",
+                "debit": 0.0,
+                "credit": expected["credit_total"],
+            },
+        ]
+        _debit, _credit, unexpected = finance_contract.invoice_gl_sums(
+            gl_rows, expected
+        )
+        self.assertEqual(unexpected, 1)
+
     def test_the_invoice_expected_list_passes(self):
         expected = self.invoice_expected()
         self.assertIsNone(
             finance_contract.side_effect_problem(
                 self.invoice_facts(expected), expected
             )
+        )
+
+    def test_a_posted_currency_drift_is_refused(self):
+        expected = self.invoice_expected()
+        facts = self.invoice_facts(expected)
+        facts["currency"] = "EUR"
+        self.assertIn(
+            "currency",
+            finance_contract.side_effect_problem(facts, expected),
         )
 
     def test_the_payment_expected_list_passes(self):

@@ -270,6 +270,12 @@ INSTALLED_CANDIDATES = {
 # discount sub-capability (recorded fallback), never the invoice write.
 OPTIONAL_DOCTYPES = (DEDUCTION_DOCTYPE,)
 DISCOUNT_CHILD_FIELDS = ("account", "cost_center", "amount")
+# The child only rides the installed parent link: the gateway resolves the
+# Sales Invoice table fieldname and its child target, and the discount path
+# refuses unless both match.
+DEDUCTION_LINK_FIELD = "deductions"
+DEDUCTION_LINK_KEY = "deduction_parent_link"
+DEDUCTION_TABLE_TYPES = ("Table", "Table MultiSelect")
 
 DISCOUNT_NOT_ENABLED_MESSAGE = "discounts are not enabled on this deployment"
 DISCOUNT_CHILD_MISSING_MESSAGE = (
@@ -420,6 +426,8 @@ def discount_problem(meta_fields, *, enabled):
         return DISCOUNT_NOT_ENABLED_MESSAGE
     if not isinstance(meta_fields, dict):
         return "installed metadata unreadable"
+    if meta_fields.get(DEDUCTION_LINK_KEY) is not True:
+        return DISCOUNT_CHILD_MISSING_MESSAGE
     installed = meta_fields.get(DEDUCTION_DOCTYPE)
     if not isinstance(installed, (set, frozenset, tuple, list)) or not installed:
         return DISCOUNT_CHILD_MISSING_MESSAGE
@@ -983,6 +991,16 @@ def expected_invoice(detail, payload):
         "docstatus": SUBMITTED_DOCSTATUS,
         "status": INVOICE_UNPAID_STATUS,
         "currency": detail.get("currency"),
+        "debit_account": detail.get("receivable_account"),
+        # The installed controller credits the line income accounts resolved
+        # from installed records (never the client payload).
+        "credit_accounts": sorted(
+            {
+                account
+                for account in (detail.get("income_accounts") or {}).values()
+                if account
+            }
+        ),
         "net_total": totals["net_total"],
         "grand_total": totals["grand_total"],
         "gl_rows": len(totals["lines"]) * GL_ROWS_PER_INVOICE_LINE
@@ -997,6 +1015,7 @@ def expected_invoice(detail, payload):
 
 def expected_payment(detail, payload):
     invoice = detail.get("invoice") or {}
+    mode = detail.get("mode") or {}
     outstanding = float(invoice.get("outstanding_amount") or 0.0)
     remaining = round(outstanding - payload["amount"], 2)
     full = remaining <= MONEY_TOLERANCE
@@ -1008,6 +1027,10 @@ def expected_payment(detail, payload):
         "ple_rows": len(payload["allocations"])
         * PAYMENT_LEDGER_ROWS_PER_ALLOCATION,
         "unexpected_gl_rows": 0,
+        # Receive: the debtor account is credited, the mode account debited.
+        # Both are resolved from installed records, never the client payload.
+        "paid_from_account": detail.get("receivable_account"),
+        "paid_to_account": mode.get("account"),
         "invoice": payload["invoice"],
         "allocated": payload["amount"],
         "outstanding_delta": -payload["amount"],
@@ -1015,6 +1038,44 @@ def expected_payment(detail, payload):
         "status": INVOICE_PAID_STATUS if full else None,
         "unchanged_status": None if full else invoice.get("status"),
     }
+
+
+def invoice_gl_sums(gl_rows, expected):
+    """Classify posted GL rows on the EXPECTED invoice's reviewed accounts.
+
+    The real gateway's closed-world re-read uses this same rule, so the
+    EXPECTED builder and the reader can never drift on the account keys.
+    """
+
+    receivable = expected.get("debit_account")
+    incomes = set(expected.get("credit_accounts") or ())
+    debit_total = 0.0
+    credit_total = 0.0
+    unexpected = 0
+    for gl in gl_rows:
+        account = gl.get("account")
+        if account and account == receivable:
+            debit_total += float(gl.get("debit") or 0.0)
+        elif account and account in incomes:
+            credit_total += float(gl.get("credit") or 0.0)
+        else:
+            unexpected += 1
+    return round(debit_total, 2), round(credit_total, 2), unexpected
+
+
+def payment_gl_unexpected(gl_rows, expected):
+    """Count payment GL rows outside the reviewed mode/receivable accounts."""
+
+    accounts = {
+        expected.get("paid_to_account"),
+        expected.get("paid_from_account"),
+    }
+    accounts.discard(None)
+    return sum(
+        1
+        for gl in gl_rows
+        if not gl.get("account") or gl.get("account") not in accounts
+    )
 
 
 def prepared_problem(kind, prepared):
@@ -1101,6 +1162,8 @@ def _prepared_invoice_problem(prepared):
             return "the deductions child is unreadable"
         if not _text(row.get("account"), MAX_TEXT_LENGTH):
             return "the deductions child has no account"
+        if not _text(row.get("cost_center"), MAX_TEXT_LENGTH):
+            return "the deductions child has no cost center"
         if not _number(row.get("amount")) or abs(
             float(row["amount"]) - float(discount)
         ) > MONEY_TOLERANCE:
@@ -1177,6 +1240,10 @@ def side_effect_problem(facts, expected):
         return "payment ledger row count differs"
 
     if expected["kind"] == INVOICE_KIND:
+        if facts.get("currency") != expected.get("currency"):
+            return (
+                "the posted invoice currency differs from the server currency"
+            )
         if facts.get("status") != expected["status"]:
             return "the invoice status differs"
         if not _money_equal(facts.get("grand_total"), expected["grand_total"]):

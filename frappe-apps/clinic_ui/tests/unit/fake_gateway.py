@@ -1603,11 +1603,65 @@ class FakeGateway:
             self.finance_payment_id,
         )
 
-    def _finance_side_effect_facts(self, reference, expected, baseline, doctype):
-        self.finance_facts_calls.append((reference, expected, baseline))
-        if self.finance_facts:
-            return dict(self.finance_facts)
-        if doctype == "Sales Invoice":
+    def _finance_facts_from_expected(self, doctype, expected):
+        """Derive facts the way the real readers classify them.
+
+        The real gateway classifies every posted GL row by account against the
+        EXPECTED's server-resolved receivable/income (invoice) or
+        paid_to/paid_from (payment) accounts. Echoing EXPECTED here would let an
+        account-key drift pass the whole suite while the real re-read marks
+        every row unexpected (the task-6 B1 class, facts direction), so the fake
+        builds the rows the controller posts and classifies them through the
+        contract's own rule.
+        """
+
+        from clinic_ui.core import finance_contract
+
+        if doctype == finance_contract.INVOICE_DOCTYPE:
+            debit_account = expected.get("debit_account")
+            credit_accounts = list(expected.get("credit_accounts") or ())
+            if not isinstance(debit_account, str) or not debit_account.strip():
+                raise AssertionError(
+                    "finance facts expected a server-resolved debit account"
+                )
+            if not credit_accounts:
+                raise AssertionError(
+                    "finance facts expected server-resolved credit accounts"
+                )
+            rows = [
+                {
+                    "account": debit_account,
+                    "debit": expected["debit_total"],
+                    "credit": 0.0,
+                }
+            ]
+            rows_left = int(expected["gl_rows"]) - 1
+            for index in range(rows_left):
+                rows.append(
+                    {
+                        "account": credit_accounts[
+                            index % len(credit_accounts)
+                        ],
+                        "debit": 0.0,
+                        "credit": (
+                            expected["credit_total"]
+                            if index == rows_left - 1
+                            else 0.0
+                        ),
+                    }
+                )
+            debit_total, credit_total, unexpected = (
+                finance_contract.invoice_gl_sums(rows, expected)
+            )
+            if (
+                unexpected != expected["unexpected_gl_rows"]
+                or debit_total != expected["debit_total"]
+                or credit_total != expected["credit_total"]
+                or len(rows) != expected["gl_rows"]
+            ):
+                raise AssertionError(
+                    "finance facts drift on the invoice GL accounts"
+                )
             return {
                 "doctype": doctype,
                 "docstatus": expected["docstatus"],
@@ -1615,18 +1669,49 @@ class FakeGateway:
                 "currency": expected["currency"],
                 "grand_total": expected["grand_total"],
                 "net_total": expected["net_total"],
-                "gl_rows": expected["gl_rows"],
-                "debit_total": expected["debit_total"],
-                "credit_total": expected["credit_total"],
+                "gl_rows": len(rows),
+                "debit_total": debit_total,
+                "credit_total": credit_total,
                 "sle_rows": expected["sle_rows"],
                 "ple_rows": expected["ple_rows"],
-                "unexpected_gl_rows": expected["unexpected_gl_rows"],
+                "unexpected_gl_rows": unexpected,
                 "outstanding_amount": expected["grand_total"],
             }
+
+        paid_to = expected.get("paid_to_account")
+        paid_from = expected.get("paid_from_account")
+        for field, account in (
+            ("paid_to", paid_to),
+            ("paid_from", paid_from),
+        ):
+            if not isinstance(account, str) or not account.strip():
+                raise AssertionError(
+                    f"finance facts expected a server-resolved {field} account"
+                )
+        rows = [
+            {
+                "account": paid_to,
+                "debit": expected["allocated"],
+                "credit": 0.0,
+            },
+            {
+                "account": paid_from,
+                "debit": 0.0,
+                "credit": expected["allocated"],
+            },
+        ]
+        if (
+            len(rows) != expected["gl_rows"]
+            or finance_contract.payment_gl_unexpected(rows, expected)
+            != expected["unexpected_gl_rows"]
+        ):
+            raise AssertionError(
+                "finance facts drift on the payment GL accounts"
+            )
         return {
             "doctype": doctype,
             "docstatus": expected["docstatus"],
-            "gl_rows": expected["gl_rows"],
+            "gl_rows": len(rows),
             "ple_rows": expected["ple_rows"],
             "unexpected_gl_rows": expected["unexpected_gl_rows"],
             "allocated": expected["allocated"],
@@ -1635,6 +1720,12 @@ class FakeGateway:
             "invoice_status": expected["status"]
             or expected.get("unchanged_status"),
         }
+
+    def _finance_side_effect_facts(self, reference, expected, baseline, doctype):
+        self.finance_facts_calls.append((reference, expected, baseline))
+        if self.finance_facts:
+            return dict(self.finance_facts)
+        return self._finance_facts_from_expected(doctype, expected)
 
     def native_finance_invoice_facts(self, reference, expected, baseline):
         return self._finance_side_effect_facts(
