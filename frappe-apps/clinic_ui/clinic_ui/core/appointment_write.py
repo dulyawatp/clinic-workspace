@@ -42,10 +42,18 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Mapping
 
-from clinic_ui.core import patient_write
+from clinic_ui.core import patient_write, write_budgets
 from clinic_ui.core.text import is_valid_text
 
-APPOINTMENT_KINDS = frozenset({"book", "reschedule", "checkin"})
+APPOINTMENT_KINDS = frozenset(
+    {
+        "book",
+        "reschedule",
+        "checkin",
+        "appointment_cancel",
+        "appointment_no_show",
+    }
+)
 
 ALIAS_PREFIX = "wsa1_"
 ACTOR_TAG_LENGTH = 32
@@ -69,13 +77,23 @@ MAX_APPOINTMENT_ID_LENGTH = 140
 MAX_RECEIPT_LENGTH = 1024
 MAX_WORKSPACE_ID_LENGTH = 192
 MAX_MODIFIED_LENGTH = 64
+# A cancel/no-show reason is free text, but it is copied verbatim into the
+# appointment's ``notes`` field, so it stays a single bounded line.
+MAX_REASON_LENGTH = 200
 
 # The approved local test budget. It is a deployment-wide property derived from
 # the durable fence receipts, not a client input and not an in-memory counter:
 # two bookings, one reschedule of a booked record and one check-in of the
 # dedicated same-day record. The separate same-day fixture needs its own
-# booking, so the two creates cover the booking and that fixture.
-BUDGETS = {"book": 2, "reschedule": 1, "checkin": 1}
+# booking, so the two creates cover the booking and that fixture. The two wave
+# kinds read their limits from the shared registry so the numbers cannot drift.
+BUDGETS = {
+    "book": 2,
+    "reschedule": 1,
+    "checkin": 1,
+    "appointment_cancel": write_budgets.budget_for("appointment_cancel"),
+    "appointment_no_show": write_budgets.budget_for("appointment_no_show"),
+}
 
 
 RECEIPT_CODEC = "appointment"
@@ -535,4 +553,50 @@ def validate_checkin(body):
         "base_modified": _base_modified(body["base_modified"]),
         "fields": {},
     }
+
+
+# -- cancel and manual no-show bodies --------------------------------------
+#
+# Both transitions name the target through the server-derived workspace alias
+# and carry the operator's reason. The patient is the workspace patient the
+# caller claims; the endpoint proves it equals the resolved appointment's
+# allowlisted patient before any fence claim. Status, notes preimage, native
+# identifiers and timestamps are server-owned and refused from the client.
+
+CANCEL_KEYS = frozenset({"patient", "appointment_id", "operation_key", "reason"})
+
+
+def _reason(value):
+    text = _require_text(value, "reason", MAX_REASON_LENGTH)
+    if len(text) > MAX_REASON_LENGTH:
+        raise AppointmentWriteError("reason is invalid")
+    return text
+
+
+def _cancel_payload(body, kind):
+    body = _require_mapping(body, CANCEL_KEYS)
+    for key in CANCEL_KEYS:
+        if key not in body:
+            raise AppointmentWriteError(f"missing field {key}")
+    return {
+        "kind": kind,
+        "operation_key": require_operation_key(body["operation_key"]),
+        "workspace_patient_id": _require_text(
+            body["patient"], "patient", MAX_WORKSPACE_ID_LENGTH
+        ),
+        "workspace_appointment_id": _workspace_id(body["appointment_id"]),
+        "reason": _reason(body["reason"]),
+    }
+
+
+def validate_cancel(body):
+    """Return the normalized cancel payload or raise ``AppointmentWriteError``."""
+
+    return _cancel_payload(body, "appointment_cancel")
+
+
+def validate_no_show(body):
+    """Return the normalized manual no-show payload."""
+
+    return _cancel_payload(body, "appointment_no_show")
 

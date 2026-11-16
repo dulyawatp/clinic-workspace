@@ -457,7 +457,13 @@ class AppointmentDetailDTOTests(unittest.TestCase):
 
     def test_write_result_shape_and_statuses(self):
         detail = dto.appointment_detail(**self.ITEM)
-        for status in ("booked", "rescheduled", "checked_in"):
+        for status in (
+            "booked",
+            "rescheduled",
+            "checked_in",
+            "cancelled",
+            "no_show",
+        ):
             with self.subTest(status=status):
                 payload = dto.appointment_write_result(
                     status, detail, "a" * 64
@@ -471,7 +477,8 @@ class AppointmentDetailDTOTests(unittest.TestCase):
 
     def test_write_result_refuses_unknown_status_or_bad_token(self):
         detail = dto.appointment_detail(**self.ITEM)
-        for args in (("cancelled", detail, "a" * 64),
+        for args in (("cancel", detail, "a" * 64),
+                     ("no-show", detail, "a" * 64),
                      ("booked", detail, "short"),
                      ("booked", detail, "A" * 64)):
             with self.subTest(args=str(args)[:24]):

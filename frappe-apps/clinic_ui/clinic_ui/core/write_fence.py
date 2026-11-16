@@ -160,8 +160,18 @@ STATES = (DISPATCHED, COMMITTED, UNKNOWN)
 PATIENT_OPERATION_KINDS = frozenset({"create", "update"})
 # Appointment kinds are additive to the same ledger. They share the site-wide
 # barrier and the single sequence, but each kind is a separate immutable key,
-# so a patient key and an appointment key with the same text never collide.
-APPOINTMENT_OPERATION_KINDS = frozenset({"book", "reschedule", "checkin"})
+# so a patient key and an appointment key with the same text never collide. The
+# two wave kinds carry their registry names (``appointment_cancel`` and
+# ``appointment_no_show``) because they are also budget keys.
+APPOINTMENT_OPERATION_KINDS = frozenset(
+    {
+        "book",
+        "reschedule",
+        "checkin",
+        "appointment_cancel",
+        "appointment_no_show",
+    }
+)
 OPERATION_KINDS = PATIENT_OPERATION_KINDS | APPOINTMENT_OPERATION_KINDS
 
 # Reserved identity for the durable site-wide manual-investigation latch. It is

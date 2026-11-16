@@ -624,12 +624,202 @@ class BoundarySnapshotTests(unittest.TestCase):
             ),
             "checkin module": lambda s: s.update({"checkin_module": "x.y"}),
             "class module": lambda s: s.update({"patient_appointment_class": "x.Y"}),
+            "cancel module": lambda s: s.update({"cancel_module": "x.y"}),
+            "cancel name": lambda s: s.update({"cancel_name": "x_y"}),
+            "cancel whitelist override": lambda s: s.update(
+                {"cancel_whitelisted_override": ("x.y",)}
+            ),
         }
         for name, mutate in mutators.items():
             with self.subTest(case=name):
                 snapshot = self.snapshot()
                 mutate(snapshot)
                 self.assertIsNotNone(contract.boundary_problem(snapshot))
+
+
+class CancelNoShowContractTests(unittest.TestCase):
+    """The designed cancel/no-show transition contract, pure and closed-world."""
+
+    def target(self, **overrides):
+        values = {
+            "status": "Scheduled",
+            "notes": None,
+            "practitioner": None,
+            "event": None,
+            "invoiced": 0,
+            "ref_sales_invoice": None,
+            "paid_amount": 0,
+            "insurance_coverage": None,
+            "service_request": None,
+            "mode_of_payment": None,
+        }
+        values.update(overrides)
+        return values
+
+    def test_pinned_transition_names_and_statuses(self):
+        self.assertEqual(contract.CANCEL_NAME, "cancel_appointment")
+        self.assertEqual(contract.CANCEL_MODULE, contract.CHECKIN_MODULE)
+        self.assertEqual(contract.CANCELLED_STATUS, "Cancelled")
+        self.assertEqual(contract.NO_SHOW_STATUS, "No Show")
+        self.assertEqual(
+            contract.CANCELLABLE_STATUSES,
+            ("Scheduled", "Open", "Confirmed", "Checked In"),
+        )
+        self.assertEqual(
+            contract.NO_SHOW_STATUSES, ("Scheduled", "Open", "Confirmed")
+        )
+
+    def test_every_cancellable_status_is_a_designed_non_terminal_target(self):
+        # Checked In preserves a terminal badge in ``set_status`` but SPEC:118-122
+        # and the SIT target (Checked In -> Cancelled) admit it as a cancel
+        # source. The terminal *destinations* stay refused.
+        for status in ("Cancelled", "Closed", "No Show", "Checked Out"):
+            with self.subTest(status=status):
+                self.assertNotIn(status, contract.CANCELLABLE_STATUSES)
+        for status in contract.NO_SHOW_STATUSES:
+            with self.subTest(status=status):
+                self.assertNotIn(status, contract.TERMINAL_STATUSES)
+
+    def test_cancel_accepts_every_non_terminal_status(self):
+        for status in ("Scheduled", "Open", "Confirmed", "Checked In"):
+            with self.subTest(status=status):
+                self.assertIsNone(
+                    contract.cancel_target_problem(self.target(status=status))
+                )
+
+    def test_cancel_refuses_terminal_and_unknown_statuses(self):
+        for status in ("Closed", "Cancelled", "No Show", "Checked Out", "", None):
+            with self.subTest(status=status):
+                self.assertIsNotNone(
+                    contract.cancel_target_problem(self.target(status=status))
+                )
+
+    def test_cancel_refuses_unreviewed_linked_record_branches(self):
+        for field in (
+            "invoiced",
+            "ref_sales_invoice",
+            "paid_amount",
+            "insurance_coverage",
+            "service_request",
+            "mode_of_payment",
+        ):
+            with self.subTest(field=field):
+                self.assertIsNotNone(
+                    contract.cancel_target_problem(self.target(**{field: "X" if field
+                        in ("ref_sales_invoice", "insurance_coverage",
+                            "service_request", "mode_of_payment") else 1}))
+                )
+
+    def test_cancel_refuses_an_over_long_notes_preimage(self):
+        self.assertIsNotNone(
+            contract.cancel_target_problem(
+                self.target(notes="x" * (contract.MAX_NOTES_LENGTH + 1))
+            )
+        )
+
+    def test_no_show_accepts_only_booked_non_terminal_statuses(self):
+        for status in ("Scheduled", "Open", "Confirmed"):
+            with self.subTest(status=status):
+                self.assertIsNone(
+                    contract.no_show_target_problem(self.target(status=status))
+                )
+        for status in (
+            "Checked In",
+            "Checked Out",
+            "Closed",
+            "Cancelled",
+            "No Show",
+            "",
+            None,
+        ):
+            with self.subTest(status=status):
+                self.assertIsNotNone(
+                    contract.no_show_target_problem(self.target(status=status))
+                )
+
+    def test_note_line_is_deterministic_and_actor_bound(self):
+        line = contract.note_line(
+            contract.NO_SHOW_KIND,
+            actor="reception@example.test",
+            reason="Patient did not arrive.",
+            recorded_at="2026-11-14 09:30:00",
+        )
+        self.assertEqual(
+            line,
+            "[2026-11-14 09:30:00] appointment_no_show by reception@example.test: "
+            "Patient did not arrive.",
+        )
+        self.assertNotEqual(
+            line,
+            contract.note_line(
+                contract.NO_SHOW_KIND,
+                actor="other@example.test",
+                reason="Patient did not arrive.",
+                recorded_at="2026-11-14 09:30:00",
+            ),
+        )
+
+    def test_note_residue_is_appended_verbatim(self):
+        line = contract.note_line(
+            contract.CANCEL_KIND,
+            actor="reception@example.test",
+            reason="Cancelled at the desk.",
+            recorded_at="2026-11-14 09:30:00",
+        )
+        self.assertEqual(contract.note_postimage(None, line), line)
+        self.assertEqual(contract.note_postimage("", line), line)
+        self.assertEqual(
+            contract.note_postimage("Existing note.", line),
+            "Existing note.\n" + line,
+        )
+
+    def test_cancel_event_is_expected_only_for_the_practitioner_branch(self):
+        self.assertFalse(contract.cancel_event_expected(self.target()))
+        self.assertFalse(
+            contract.cancel_event_expected(self.target(event="EVENT-1"))
+        )
+        self.assertTrue(
+            contract.cancel_event_expected(
+                self.target(event="EVENT-1", practitioner="PRAC-1")
+            )
+        )
+        self.assertTrue(
+            contract.cancel_event_expected(self.target(practitioner="PRAC-1"))
+        )
+
+    def test_post_condition_reads_the_returned_state(self):
+        line = contract.note_line(
+            contract.CANCEL_KIND,
+            actor="reception@example.test",
+            reason="Cancelled at the desk.",
+            recorded_at="2026-11-14 09:30:00",
+        )
+        postimage = contract.note_postimage(None, line)
+        self.assertIsNone(
+            contract.cancel_postcondition_problem(
+                self.target(status="Cancelled", notes=postimage), postimage
+            )
+        )
+        self.assertIsNotNone(
+            contract.cancel_postcondition_problem(
+                self.target(status="Cancelled", notes=None), postimage
+            )
+        )
+        self.assertIsNotNone(
+            contract.cancel_postcondition_problem(
+                self.target(status="Open", notes=postimage), postimage
+            )
+        )
+        self.assertIsNone(
+            contract.no_show_postcondition_problem(
+                self.target(status="No Show", notes=postimage), postimage
+            )
+        )
+        self.assertIsNotNone(
+            contract.no_show_postcondition_problem(
+                self.target(status="Scheduled", notes=postimage), postimage
+            )
+        )
 
 
 if __name__ == "__main__":

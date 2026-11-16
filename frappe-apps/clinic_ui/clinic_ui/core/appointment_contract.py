@@ -44,6 +44,56 @@ PINNED_NAMING_SERIES = "HLC-APP-.YYYY.-"
 RESCHEDULE_STATUSES = ("Scheduled", "Open", "Confirmed")
 CHECKIN_STATUSES = ("Open", "Confirmed")
 
+# The cancel transition (design ruling 4). The installed controller is
+# healthcare v16.6.1; ``cancel_appointment(appointment_id)`` is the reviewed
+# module-level entry point at patient_appointment.py:652 that handles the
+# linked records (insurance coverage, Service Request, Sales Invoice, fee
+# validity, calendar Event). It does not set the status itself: the installed
+# ``update_status`` wrapper sets ``Cancelled`` and then calls it. This contract
+# drives the pinned ``cancel_appointment`` side-effect handler and writes the
+# terminal status through the controller's own ``save()`` path, whose
+# ``set_status`` preserves terminal values (patient_appointment.py:133-150).
+# Name, module and source sha are pinned in the boundary snapshot below.
+CANCEL_KIND = "appointment_cancel"
+NO_SHOW_KIND = "appointment_no_show"
+CANCEL_MODULE = CHECKIN_MODULE
+CANCEL_NAME = "cancel_appointment"
+CANCELLED_STATUS = "Cancelled"
+NO_SHOW_STATUS = "No Show"
+# Terminal statuses exactly as the installed ``set_status`` treats them
+# (patient_appointment.py:137): the controller early-returns for these.
+TERMINAL_STATUSES = (
+    "Checked In",
+    "Checked Out",
+    "Closed",
+    "Cancelled",
+    "No Show",
+)
+# SPEC:118-122 ("any non-terminal appointment") plus the SIT cancel target
+# (Checked In -> Cancelled). A cancel never matches a status badge: the status
+# is written only by the designed transition and read back as a post-condition.
+CANCELLABLE_STATUSES = ("Scheduled", "Open", "Confirmed", "Checked In")
+# Manual no-show (CSV:58) applies to a booked, not-yet-seen appointment.
+NO_SHOW_STATUSES = ("Scheduled", "Open", "Confirmed")
+# Branches of ``cancel_appointment`` whose outcome this contract does not
+# deep-verify. A target that populates any of them is refused PRE-fence (the
+# linked-invoice ruling: refuse when linked-invoice handling fails closed),
+# leaving only the fee-validity and calendar branches, which are attested from
+# the returned state.
+CANCEL_REFUSED_LINKS = (
+    "invoiced",
+    "ref_sales_invoice",
+    "paid_amount",
+    "insurance_coverage",
+    "service_request",
+    "mode_of_payment",
+)
+NOTE_LABEL_CANCEL = CANCEL_KIND
+NOTE_LABEL_NO_SHOW = NO_SHOW_KIND
+MAX_REASON_LENGTH = 200
+MAX_NOTES_LENGTH = 1000
+_NOTE_LABELS = {CANCEL_KIND: NOTE_LABEL_CANCEL, NO_SHOW_KIND: NOTE_LABEL_NO_SHOW}
+
 # Patient fields read to verify the controller's fetch_from values.
 PATIENT_SOURCE_FIELDS = (
     "patient_name",
@@ -293,6 +343,9 @@ _REVIEWED_BOUNDARY = {
     "patient_appointment_class": CHECKIN_MODULE,
     "checkin_module": CHECKIN_MODULE,
     "checkin_name": CHECKIN_NAME,
+    "cancel_module": CANCEL_MODULE,
+    "cancel_name": CANCEL_NAME,
+    "cancel_whitelisted_override": (),
     "doc_events_patient_appointment": (),
     "wildcard_before_insert": (),
     "wildcard_before_validate": (),
@@ -770,6 +823,101 @@ def checkin_target_eligible(
     return appointment_date == today and patient == dedicated_patient
 
 
+def _populated(value):
+    return value not in _EMPTY_VALUE
+
+
+def _notes_preimage_problem(values):
+    notes = _value(values, "notes")
+    if notes is None:
+        return None
+    if not isinstance(notes, str):
+        return "notes is unreadable"
+    if len(notes) > MAX_NOTES_LENGTH:
+        return "notes is too long"
+    return None
+
+
+def cancel_target_problem(values):
+    """Refuse a cancel target before any fence claim.
+
+    The status must be non-terminal (``Cancelled`` itself, ``Closed``,
+    ``Checked Out`` and ``No Show`` are refused). Any populated branch that the
+    pinned ``cancel_appointment`` handles through a linked document is refused
+    here as well: its outcome is not deep-verified by this contract, and a
+    cancel must never latch the site on an unreviewed side effect.
+    """
+
+    status = _value(values, "status")
+    if status not in CANCELLABLE_STATUSES:
+        return "target appointment is not cancellable"
+    for field in CANCEL_REFUSED_LINKS:
+        if _populated(_value(values, field)):
+            return f"linked {field} handling is not reviewed"
+    return _notes_preimage_problem(values)
+
+
+def no_show_target_problem(values):
+    """Refuse a manual no-show target before any fence claim."""
+
+    status = _value(values, "status")
+    if status not in NO_SHOW_STATUSES:
+        return "target appointment is not no-show eligible"
+    return _notes_preimage_problem(values)
+
+
+def note_line(kind, *, actor, reason, recorded_at):
+    """Return the pinned, verbatim note line for one transition.
+
+    The appointment has no dedicated reason field (the only available field is
+    ``notes``), so the pinned format records the transition, the acting user,
+    the reason and the site's current timestamp. It is compared verbatim after
+    the native save.
+    """
+
+    label = _NOTE_LABELS[kind]
+    return f"[{recorded_at}] {label} by {actor}: {reason}"
+
+
+def note_postimage(preimage, line):
+    """Append one pinned line to the exact locked ``notes`` preimage."""
+
+    text = preimage if isinstance(preimage, str) else ""
+    return f"{text}\n{line}" if text else line
+
+
+def cancel_event_expected(values):
+    """True only for the branch where the pinned method cancels the event.
+
+    ``cancel_appointment`` returns before every side effect when the target has
+    no practitioner (patient_appointment.py:655-656); a department booking has
+    no practitioner, so its calendar event is attested as untouched rather than
+    deep-verified.
+    """
+
+    return bool(_value(values, "practitioner")) or False
+
+
+def cancel_postcondition_problem(values, expected_notes):
+    """Check the returned state after the pinned cancel transition."""
+
+    if _value(values, "status") != CANCELLED_STATUS:
+        return "status is not Cancelled"
+    if _value(values, "notes") != expected_notes:
+        return "cancel note was not recorded verbatim"
+    return None
+
+
+def no_show_postcondition_problem(values, expected_notes):
+    """Check the returned state after the native no-show save."""
+
+    if _value(values, "status") != NO_SHOW_STATUS:
+        return "status is not No Show"
+    if _value(values, "notes") != expected_notes:
+        return "no-show note was not recorded verbatim"
+    return None
+
+
 def _normalized_sequence(value):
     return tuple(value or ())
 
@@ -791,6 +939,8 @@ def boundary_problem(snapshot):
         "patient_appointment_class",
         "checkin_module",
         "checkin_name",
+        "cancel_module",
+        "cancel_name",
         "enabled_server_scripts",
         "enabled_notifications",
         "enabled_webhooks",
@@ -812,6 +962,7 @@ def boundary_problem(snapshot):
         "wildcard_on_change",
         "override_doctype_class",
         "checkin_whitelisted_override",
+        "cancel_whitelisted_override",
         "scheduler_all",
         "scheduler_daily",
         "extend_doctype_class",

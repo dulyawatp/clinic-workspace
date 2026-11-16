@@ -67,7 +67,13 @@ APPOINTMENT_READ_KEYS = APPOINTMENT_DETAIL_KEYS | {
     "can_reschedule",
     "can_checkin",
 }
-APPOINTMENT_WRITE_STATUSES = ("booked", "rescheduled", "checked_in")
+APPOINTMENT_WRITE_STATUSES = (
+    "booked",
+    "rescheduled",
+    "checked_in",
+    "cancelled",
+    "no_show",
+)
 APPOINTMENT_TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
 APPOINTMENT_STATUS = re.compile(r"^[A-Za-z][A-Za-z0-9 _-]{0,63}$")
 
@@ -377,12 +383,12 @@ def appointment_read(detail, *, can_reschedule=False, can_checkin=False):
 
 
 def appointment_write_result(status, detail, ack_token):
-    """Build the booking/reschedule/check-in success payload.
+    """Build the booking/reschedule/check-in/cancel/no-show success payload.
 
-    ``status`` is exactly ``booked``, ``rescheduled`` or ``checked_in``. The
-    nested appointment is the versioned detail shape and ``ackToken`` is the
-    opaque acknowledgement token the client must return before another write is
-    admitted. No native identifier is included.
+    ``status`` is exactly ``booked``, ``rescheduled``, ``checked_in``,
+    ``cancelled`` or ``no_show``. The nested appointment is the versioned detail
+    shape and ``ackToken`` is the opaque acknowledgement token the client must
+    return before another write is admitted. No native identifier is included.
     """
 
     if status not in APPOINTMENT_WRITE_STATUSES:

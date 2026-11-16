@@ -28,11 +28,27 @@ NATIVE_ID = "APPT-0001"
 
 
 class KindTests(unittest.TestCase):
-    def test_accepts_only_the_three_appointment_kinds(self):
-        for kind in ("book", "reschedule", "checkin"):
+    def test_accepts_only_the_approved_appointment_kinds(self):
+        for kind in (
+            "book",
+            "reschedule",
+            "checkin",
+            "appointment_cancel",
+            "appointment_no_show",
+        ):
             with self.subTest(kind=kind):
                 self.assertEqual(appointment_write.require_kind(kind), kind)
-        for kind in ("create", "update", "cancel", "Book", "", None, 1):
+        for kind in (
+            "create",
+            "update",
+            "cancel",
+            "no_show",
+            "Book",
+            "appointment-cancel",
+            "",
+            None,
+            1,
+        ):
             with self.subTest(kind=kind):
                 with self.assertRaises(AppointmentWriteError):
                     appointment_write.require_kind(kind)
@@ -40,7 +56,15 @@ class KindTests(unittest.TestCase):
     def test_appointment_kinds_do_not_overlap_patient_kinds(self):
         self.assertEqual(
             appointment_write.APPOINTMENT_KINDS,
-            frozenset({"book", "reschedule", "checkin"}),
+            frozenset(
+                {
+                    "book",
+                    "reschedule",
+                    "checkin",
+                    "appointment_cancel",
+                    "appointment_no_show",
+                }
+            ),
         )
         self.assertEqual(
             set(appointment_write.APPOINTMENT_KINDS) & patient_write.RECEIPT_KINDS,
@@ -299,14 +323,29 @@ class BudgetTests(unittest.TestCase):
     def test_budgets_are_the_approved_durable_limits(self):
         self.assertEqual(
             appointment_write.BUDGETS,
-            {"book": 2, "reschedule": 1, "checkin": 1},
+            {
+                "book": 2,
+                "reschedule": 1,
+                "checkin": 1,
+                "appointment_cancel": 2,
+                "appointment_no_show": 1,
+            },
         )
         for kind, limit in appointment_write.BUDGETS.items():
             with self.subTest(kind=kind):
                 self.assertEqual(appointment_write.budget(kind), limit)
 
+    def test_new_kind_budgets_come_from_the_shared_registry(self):
+        from clinic_ui.core import write_budgets
+
+        for kind in ("appointment_cancel", "appointment_no_show"):
+            with self.subTest(kind=kind):
+                self.assertEqual(
+                    appointment_write.budget(kind), write_budgets.budget_for(kind)
+                )
+
     def test_patient_and_unknown_kinds_have_no_budget(self):
-        for kind in ("create", "update", "", None, 1):
+        for kind in ("create", "update", "cancel", "", None, 1):
             with self.subTest(kind=kind):
                 with self.assertRaises(AppointmentWriteError):
                     appointment_write.budget(kind)
@@ -334,6 +373,101 @@ CHECKIN_BODY = {
     "workspace_appointment_id": "wsa1_" + "a" * 32 + "_" + "b" * 16 + "_" + KEY,
     "base_modified": "2026-11-14 09:30:00.123456",
 }
+
+CANCEL_BODY = {
+    "patient": "WS-1",
+    "appointment_id": "wsa1_" + "a" * 32 + "_" + "b" * 16 + "_" + KEY,
+    "operation_key": KEY,
+    "reason": "Patient called to cancel the visit.",
+}
+
+
+class CancelBodyTests(unittest.TestCase):
+    def test_accepts_the_strict_cancel_surface(self):
+        self.assertEqual(
+            appointment_write.validate_cancel(dict(CANCEL_BODY)),
+            {
+                "kind": "appointment_cancel",
+                "operation_key": KEY,
+                "workspace_patient_id": "WS-1",
+                "workspace_appointment_id": CANCEL_BODY["appointment_id"],
+                "reason": "Patient called to cancel the visit.",
+            },
+        )
+
+    def test_no_show_body_shares_the_same_strict_surface(self):
+        payload = appointment_write.validate_no_show(dict(CANCEL_BODY))
+        self.assertEqual(payload["kind"], "appointment_no_show")
+        self.assertEqual(payload["reason"], CANCEL_BODY["reason"])
+        self.assertEqual(
+            set(payload),
+            {
+                "kind",
+                "operation_key",
+                "workspace_patient_id",
+                "workspace_appointment_id",
+                "reason",
+            },
+        )
+
+    def test_reason_is_required_and_bounded(self):
+        for reason in (
+            None,
+            "",
+            "   ",
+            "x" * (appointment_write.MAX_REASON_LENGTH + 1),
+            "line\nbreak",
+            " tab\t",
+            "ส่งต่อ\n",
+            1,
+        ):
+            with self.subTest(reason=str(reason)[:24]):
+                for validator in (
+                    appointment_write.validate_cancel,
+                    appointment_write.validate_no_show,
+                ):
+                    with self.assertRaises(AppointmentWriteError):
+                        validator(dict(CANCEL_BODY, reason=reason))
+
+    def test_missing_reason_key_is_refused(self):
+        body = {k: v for k, v in CANCEL_BODY.items() if k != "reason"}
+        with self.assertRaises(AppointmentWriteError):
+            appointment_write.validate_cancel(body)
+
+    def test_appointment_id_must_be_a_server_derived_alias(self):
+        for value in (
+            "APPT-1",
+            "NATIVE-APPT-1",
+            "wsa1_short",
+            "",
+            None,
+        ):
+            with self.subTest(value=str(value)[:16]):
+                with self.assertRaises(AppointmentWriteError):
+                    appointment_write.validate_cancel(
+                        dict(CANCEL_BODY, appointment_id=value)
+                    )
+
+    def test_server_owned_and_unknown_fields_are_refused(self):
+        for key in (
+            "status",
+            "notes",
+            "native_appointment_id",
+            "native_patient_id",
+            "base_modified",
+            "workspace_appointment_id",
+        ):
+            with self.subTest(key=key):
+                with self.assertRaises(AppointmentWriteError):
+                    appointment_write.validate_cancel(
+                        dict(CANCEL_BODY, **{key: "x"})
+                    )
+
+    def test_reserved_operation_keys_are_refused(self):
+        with self.assertRaises(AppointmentWriteError):
+            appointment_write.validate_cancel(
+                dict(CANCEL_BODY, operation_key="clinic-ui-manual-investigation-latch")
+            )
 
 
 class BookBodyTests(unittest.TestCase):

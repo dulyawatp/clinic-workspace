@@ -1762,11 +1762,29 @@ class AppointmentKindTests(FenceTestCase):
         )
         self.assertEqual(
             write_fence.APPOINTMENT_OPERATION_KINDS,
-            frozenset({"book", "reschedule", "checkin"}),
+            frozenset(
+                {
+                    "book",
+                    "reschedule",
+                    "checkin",
+                    "appointment_cancel",
+                    "appointment_no_show",
+                }
+            ),
         )
         self.assertEqual(
             write_fence.OPERATION_KINDS,
-            frozenset({"create", "update", "book", "reschedule", "checkin"}),
+            frozenset(
+                {
+                    "create",
+                    "update",
+                    "book",
+                    "reschedule",
+                    "checkin",
+                    "appointment_cancel",
+                    "appointment_no_show",
+                }
+            ),
         )
 
     def test_each_appointment_kind_claims_and_commits(self):
