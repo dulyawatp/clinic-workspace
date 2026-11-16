@@ -62,6 +62,43 @@ PRACTITIONER_LINK_USER = "sit.doc@example.invalid"
 failures: list[str] = []
 
 
+def admin_install_probe_script() -> str:
+    """Backend probe: the contract's own admin install preflight, read-only.
+
+    This calls the adapter the gate actually uses, so a field-map drift is caught
+    here instead of by a browser discovering 403s after the window opens
+    (review round 2).
+    """
+
+    return (
+        "cd sites && ../env/bin/python - <<'PY'\n"
+        "import json\n"
+        "import frappe\n"
+        f"frappe.init(site={SITE!r}, sites_path='.')\n"
+        "frappe.connect()\n"
+        "from clinic_ui.runtime.frappe_gateway import Gateway\n"
+        "print(json.dumps({\n"
+        "    'problem': Gateway().native_admin_install_problem(),\n"
+        "}))\n"
+        "PY"
+    )
+
+
+def admin_install_problems(report):
+    """Return the named problems for one admin install-preflight report."""
+
+    if not isinstance(report, dict):
+        return ["admin install probe unreadable"]
+    if "problem" not in report:
+        return ["admin install probe reported no problem field"]
+    problem = report["problem"]
+    if problem is None:
+        return []
+    if not isinstance(problem, str) or not problem.strip():
+        return ["admin install probe returned an unreadable problem"]
+    return [f"admin install preflight: {problem}"]
+
+
 def masters_order_problems(inventory):
     """Return named dependency-order problems for the master inventory.
 
@@ -366,6 +403,30 @@ def selfcheck() -> int:
             "'uom': 'UOM'" in masters_probe_script()
             and "'supplier_group': 'Supplier Group'" in masters_probe_script(),
         ),
+        (
+            "the admin install probe calls the contract preflight",
+            "native_admin_install_problem"
+            in admin_install_probe_script()
+            and "admin-install" in SITE_COMMANDS,
+        ),
+        (
+            "a passing admin install report has no problem",
+            not admin_install_problems({"problem": None}),
+        ),
+        (
+            "a failing admin install report is refused",
+            bool(
+                admin_install_problems(
+                    {"problem": "missing field Item Price.rate"}
+                )
+            ),
+        ),
+        (
+            "an unreadable admin install report is refused",
+            bool(admin_install_problems(None))
+            and bool(admin_install_problems({}))
+            and bool(admin_install_problems({"problem": ""})),
+        ),
         ("embedded backend probes compile", probes_compile()),
     ]
     failed = [name for name, ok in cases if not ok]
@@ -548,6 +609,30 @@ def probes_compile() -> bool:
         return False
 
 
+def run_admin_install() -> int:
+    """Read-only: assert the admin family's install preflight passes on site."""
+
+    probe = in_backend(admin_install_probe_script())
+    if probe.returncode != 0:
+        print("REFUSE admin-install: backend probe failed")
+        print(probe.stderr.strip()[-400:])
+        return 1
+    report = json.loads(probe.stdout)
+    problems = admin_install_problems(report)
+    problem = report.get("problem") if isinstance(report, dict) else None
+    print(
+        "INFO admin install preflight: pass"
+        if problem is None
+        else f"INFO admin install preflight: {problem}"
+    )
+    for entry in problems:
+        print(f"REFUSE {entry}")
+    if problems:
+        return 1
+    print("PREFLIGHT OK: the admin install preflight passes on this image")
+    return 0
+
+
 def run_masters() -> int:
     """Print the installed master inventory and refuse an impossible order."""
 
@@ -648,6 +733,7 @@ def run_boundary_shas() -> int:
 
 SITE_COMMANDS = {
     "masters": run_masters,
+    "admin-install": run_admin_install,
     "finance-counts": run_finance_counts,
     "boundary-shas": run_boundary_shas,
 }
@@ -667,7 +753,7 @@ def main(argv: list[str] | None = None) -> int:
     if "--selfcheck" in arguments:
         return selfcheck()
     if arguments and arguments[0] == "--help":
-        print("usage: preflight.py [--selfcheck | masters | finance-counts | boundary-shas]")
+        print("usage: preflight.py [--selfcheck | masters | admin-install | finance-counts | boundary-shas]")
         print("no argument: refuse ownership collisions for the marley-sit project")
         return 0
     for name, run in SITE_COMMANDS.items():
