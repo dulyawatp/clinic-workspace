@@ -3134,6 +3134,13 @@ class Gateway:
 
         Meta fieldnames, not ``get_valid_columns()``: the latter excludes Table
         fields in frappe 16.54.0, and ``Clinical Procedure.items`` is one.
+
+        The installed ``default_fields`` (``name``, ``owner``, ``creation``,
+        ``modified``, ``modified_by``, ``docstatus``, ``idx``) are ordinary
+        columns, not ``DocField`` rows, so they are unioned in explicitly:
+        ``Stock Entry.docstatus`` lives only there and the submittability check
+        requires it. The closed-world check stays strict for every other field —
+        only frappe's own default columns are admitted by name.
         """
 
         cached = getattr(self, "_procedure_fields_cache", None)
@@ -3145,8 +3152,12 @@ class Gateway:
             get_meta = frappe.get_meta
         fields = {}
         for doctype in procedure_contract.REQUIRED_FIELDS:
+            meta = get_meta(doctype)
+            default_fields = getattr(meta, "default_fields", None) or ()
             fields[doctype] = {
-                field.fieldname for field in get_meta(doctype).fields
+                field.fieldname for field in meta.fields
+            } | {
+                name for name in default_fields if isinstance(name, str)
             }
         self._procedure_fields_cache = fields
         return fields

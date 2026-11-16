@@ -3047,6 +3047,7 @@ class AmendmentStub(types.SimpleNamespace):
         )
         self.db = AmendmentDB()
         self.meta_fields = {}
+        self.default_fields = set()
         self.valid_columns = {}
         self.permissions = set()
         self.docs = {}
@@ -3057,7 +3058,10 @@ class AmendmentStub(types.SimpleNamespace):
     def get_meta(self, doctype):
         names = self.meta_fields.get(doctype, ())
         return types.SimpleNamespace(
-            fields=[types.SimpleNamespace(fieldname=name) for name in names]
+            fields=[types.SimpleNamespace(fieldname=name) for name in names],
+            # Real frappe Meta: the default columns (name/owner/creation/
+            # modified/modified_by/docstatus/idx) are NOT DocField rows.
+            default_fields=list(self.default_fields),
         )
 
     def get_meta_columns(self, doctype):
@@ -3143,6 +3147,82 @@ class AmendmentMetaFieldTests(GatewayTestCase):
         self.assertEqual(
             self.gateway(stub).native_admin_install_problem(),
             "missing field UOM.uom_name",
+        )
+
+
+class ProcedureDefaultFieldTests(GatewayTestCase):
+    """Real frappe: ``docstatus`` is a default column, not a DocField.
+
+    The pre-D1-resolution implementation read ``get_meta(doctype).fields`` only,
+    which is what this stub models, so it reports
+    ``missing field Stock Entry.docstatus`` and denies the whole procedure family
+    on a real site. The gateway resolver also unions the installed
+    ``default_fields``, so it passes without weakening the closed-world check.
+    """
+
+    DEFAULT_FIELDS = (
+        "name",
+        "owner",
+        "creation",
+        "modified",
+        "modified_by",
+        "docstatus",
+        "idx",
+    )
+
+    def stub_with_real_meta(self):
+        from clinic_ui.core import procedure_contract
+
+        stub = AmendmentStub()
+        stub.default_fields = set(self.DEFAULT_FIELDS)
+        for doctype, fields in procedure_contract.REQUIRED_FIELDS.items():
+            names = {candidates[0] for candidates in fields.values()}
+            stub.meta_fields[doctype] = sorted(
+                names - set(self.DEFAULT_FIELDS)
+            )
+        return stub
+
+    def test_the_meta_only_resolution_is_the_defect(self):
+        from clinic_ui.core import procedure_contract
+
+        stub = self.stub_with_real_meta()
+        meta_only = {
+            doctype: set(stub.meta_fields[doctype])
+            for doctype in procedure_contract.REQUIRED_FIELDS
+        }
+
+        self.assertEqual(
+            procedure_contract.install_problem(meta_only),
+            "missing field Stock Entry.docstatus",
+        )
+        self.assertNotIn(
+            "docstatus", meta_only["Stock Entry"]
+        )
+
+    def test_the_gateway_preflight_admits_the_default_column(self):
+        stub = self.stub_with_real_meta()
+        gateway = self.gateway(stub)
+
+        self.assertIsNone(gateway.native_procedure_install_problem())
+        self.assertIn(
+            "docstatus", gateway._procedure_meta_fields()["Stock Entry"]
+        )
+        # The Table field is still admitted through the DocField rows.
+        self.assertIn(
+            "items", gateway._procedure_meta_fields()["Clinical Procedure"]
+        )
+
+    def test_a_default_column_does_not_admit_an_unknown_field(self):
+        stub = self.stub_with_real_meta()
+        stub.meta_fields["Stock Entry"] = [
+            name
+            for name in stub.meta_fields["Stock Entry"]
+            if name != "stock_entry_type"
+        ]
+
+        self.assertEqual(
+            self.gateway(stub).native_procedure_install_problem(),
+            "missing field Stock Entry.stock_entry_type",
         )
 
 
