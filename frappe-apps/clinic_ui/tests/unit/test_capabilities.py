@@ -195,6 +195,10 @@ class BootstrapCapabilityTests(unittest.TestCase):
             "write.appointment.cancel",
             "write.appointment.no_show",
             "write.appointment.checkin",
+            "write.encounter.draft",
+            "write.encounter.complete",
+            "write.medication.order",
+            "write.lab.order",
             *NEW_WRITE_NAMES,
         }
         for name in CAPABILITY_NAMES:

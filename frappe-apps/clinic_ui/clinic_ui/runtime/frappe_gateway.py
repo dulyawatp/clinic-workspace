@@ -30,6 +30,8 @@ from clinic_ui.core import (
     appointment_write,
     config,
     deployment_marker,
+    encounter_contract,
+    encounter_write,
     fence_store,
     patient_write,
     write_fence,
@@ -184,6 +186,63 @@ NO_STORE_HEADER = "Cache-Control"
 NO_STORE_VALUE = "no-store"
 DENIAL_MESSAGE = "Not permitted"
 ANONYMOUS_STATUS = 401
+
+ENCOUNTER_DOCTYPE = encounter_contract.ENCOUNTER_DOCTYPE
+CLINICAL_NOTE_DOCTYPE = encounter_contract.CLINICAL_NOTE_DOCTYPE
+VITAL_SIGNS_DOCTYPE = encounter_contract.VITAL_SIGNS_DOCTYPE
+SERVICE_REQUEST_DOCTYPE = encounter_contract.SERVICE_REQUEST_DOCTYPE
+ENCOUNTER_READ_FIELDS = ("patient", "docstatus", "status", "appointment")
+ENCOUNTER_CHILD_TABLES = {
+    "complaint": "Complaint Detail",
+    "diagnosis": "Patient Encounter Diagnosis",
+    "drug_prescription": "Drug Prescription",
+    "lab_test_prescription": "Lab Prescription",
+    "procedure_prescription": "Procedure Prescription",
+}
+
+
+@dataclass(frozen=True)
+class EncounterLockedState:
+    """Freshly locked and verified encounter values passed to the endpoint."""
+
+    doc: object
+    patient: str | None
+    docstatus: object
+    status: str | None
+    appointment: str | None
+    appointment_status: str | None
+    modified: str | None
+    complaint: bool
+    diagnosis_count: int
+    medication_codes: tuple
+    lab_count: int
+    procedure_count: int
+    clinical_note: str | None
+    clinical_note_modified: str | None
+    assessment: str | None = None
+    plan: str | None = None
+    followup: str | None = None
+
+    def as_dict(self):
+        return {
+            "patient": self.patient,
+            "docstatus": self.docstatus,
+            "status": self.status,
+            "appointment": self.appointment,
+            "appointment_status": self.appointment_status,
+            "modified": self.modified,
+            "complaint": self.complaint,
+            "diagnosis_count": self.diagnosis_count,
+            "medication_codes": self.medication_codes,
+            "lab_count": self.lab_count,
+            "procedure_count": self.procedure_count,
+            "clinical_note": self.clinical_note,
+            "clinical_note_modified": self.clinical_note_modified,
+            "assessment": self.assessment,
+            "plan": self.plan,
+            "followup": self.followup,
+            "allergy_reviewed": False,
+        }
 
 
 class Gateway:
@@ -2292,3 +2351,592 @@ class Gateway:
             raise patient_write.StoreUnavailable() from exc
         except write_fence.FenceError as exc:
             raise patient_write.WriteUncertain() from exc
+
+    # -- encounter write path --------------------------------------------
+
+    def native_encounter_boundary_problem(self):
+        """Return pinned-boundary drift for the encounter path, or ``None``.
+
+        Tests supply ``frappe.encounter_boundary_snapshot``; production collects
+        the pinned versions, the submittable flag, wildcard ``doc_events`` on the
+        three written doctypes and the enabled Server Script count. Any failure
+        is a non-empty problem so callers fail closed.
+        """
+
+        try:
+            snapshot = getattr(self.frappe, "encounter_boundary_snapshot", None)
+            if snapshot is None:
+                snapshot = self._collect_encounter_boundary_snapshot()
+            return encounter_contract.boundary_problem(snapshot)
+        except Exception:
+            return "boundary unreadable"
+
+    def _collect_encounter_boundary_snapshot(self):
+        import importlib
+
+        frappe = self.frappe
+
+        def version(module_name, module=None):
+            if module is not None:
+                return getattr(module, "__version__", None)
+            return getattr(importlib.import_module(module_name), "__version__", None)
+
+        meta = frappe.get_meta(ENCOUNTER_DOCTYPE)
+        hooks = frappe.get_hooks() or {}
+        doc_events = hooks.get("doc_events") or {}
+        server_scripts = frappe.get_all(
+            "Server Script", filters={"disabled": 0}, limit=1, pluck="name"
+        ) or ()
+        return {
+            "versions": {
+                "frappe": version("frappe", frappe),
+                "erpnext": version("erpnext"),
+                "healthcare": version("healthcare"),
+            },
+            "encounter_submittable": 1 if meta.get("is_submittable") else 0,
+            "enabled_server_scripts": len(server_scripts),
+            "doc_events": {
+                doctype: tuple(doc_events.get(doctype) or ())
+                for doctype in (
+                    ENCOUNTER_DOCTYPE,
+                    CLINICAL_NOTE_DOCTYPE,
+                    VITAL_SIGNS_DOCTYPE,
+                )
+            },
+        }
+
+    def _encounter_meta_fields(self):
+        """Resolve the installed field names through the metadata cache."""
+
+        cached = getattr(self, "_encounter_fields_cache", None)
+        if cached is not None:
+            return cached
+        frappe = self.frappe
+        get_meta = getattr(getattr(frappe, "db", None), "get_meta", None)
+        if not callable(get_meta):
+            get_meta = frappe.get_meta
+        fields = {}
+        doctypes = set(encounter_contract.REQUIRED_FIELDS) | {VITAL_SIGNS_DOCTYPE}
+        for doctype in doctypes:
+            meta = get_meta(doctype)
+            fields[doctype] = set(meta.get_valid_columns())
+        self._encounter_fields_cache = fields
+        return fields
+
+    def native_encounter_install_problem(self):
+        """Preflight the installed DocType/field set; a gap is a refusal."""
+
+        try:
+            return encounter_contract.install_problem(self._encounter_meta_fields())
+        except Exception:
+            return "installed metadata unreadable"
+
+    def _encounter_field(self, doctype, logical, candidates=None):
+        return encounter_contract.resolve_field(
+            self._encounter_meta_fields(), doctype, logical, candidates
+        )
+
+    def native_encounter_can_create(self):
+        try:
+            return bool(
+                self.frappe.has_permission(
+                    ENCOUNTER_DOCTYPE,
+                    ptype="create",
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
+    def native_encounter_can_write(self, native_encounter_id=None):
+        try:
+            return bool(
+                self.frappe.has_permission(
+                    ENCOUNTER_DOCTYPE,
+                    ptype="write",
+                    doc=native_encounter_id,
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
+    def native_clinical_note_can_create(self):
+        try:
+            return bool(
+                self.frappe.has_permission(
+                    CLINICAL_NOTE_DOCTYPE,
+                    ptype="create",
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
+    def healthcare_encounter_side_effects_unsafe(self):
+        """True when Healthcare Settings would add effects to the cascade.
+
+        The family gate checks exactly the enumerated keys: appointment
+        confirmation/reminder messages, the payment popup, free follow-up
+        validity (which an encounter submit can trigger) and a default calendar.
+        A read failure is unsafe.
+        """
+
+        try:
+            for field in encounter_contract.ENCOUNTER_UNSAFE_SETTINGS:
+                if self.frappe.db.get_single_value("Healthcare Settings", field):
+                    return True
+            for field in encounter_contract.ENCOUNTER_UNSAFE_SETTING_LINKS:
+                if self.frappe.db.get_single_value("Healthcare Settings", field):
+                    return True
+            return False
+        except Exception:
+            return True
+
+    def native_submitted_service_request_count(self):
+        """Baseline count used to prove the exactly-once cascade delta."""
+
+        try:
+            return int(
+                self.frappe.db.count(SERVICE_REQUEST_DOCTYPE, {"docstatus": 1})
+            )
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def native_encounter_cascade_detail(self, native_encounter_id, baseline):
+        """Closed-world re-read after submit: statuses plus the SR delta."""
+
+        try:
+            doc = self.frappe.get_doc(
+                ENCOUNTER_DOCTYPE, native_encounter_id, for_update=True
+            )
+            appointment_status = None
+            appointment = self._text_value(getattr(doc, "appointment", None))
+            if appointment:
+                appointment_status = self._text_value(
+                    self.frappe.db.get_value(
+                        APPOINTMENT_DOCTYPE, appointment, "status"
+                    )
+                )
+            submitted = int(
+                self.frappe.db.count(SERVICE_REQUEST_DOCTYPE, {"docstatus": 1})
+            )
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        return {
+            "docstatus": getattr(doc, "docstatus", None),
+            "status": self._text_value(getattr(doc, "status", None)),
+            "appointment_status": appointment_status,
+            "submitted_service_requests": submitted - baseline,
+        }
+
+    def native_encounter_detail(self, native_encounter_id):
+        """The success detail fields under the same read authority."""
+
+        if self.native_encounter_can_write(native_encounter_id) is not True:
+            return None
+        try:
+            row = self.frappe.db.get_value(
+                ENCOUNTER_DOCTYPE,
+                native_encounter_id,
+                ["patient", "docstatus", "status", "modified"],
+                as_dict=True,
+            )
+        except Exception:
+            return None
+        if row is None:
+            return None
+        get = row.get if hasattr(row, "get") else lambda key, default=None: getattr(
+            row, key, default
+        )
+        return {
+            "patient": self._text_value(get("patient")),
+            "docstatus": get("docstatus"),
+            "status": self._text_value(get("status")) or "Draft",
+            "modified": self._text_value(get("modified")),
+        }
+
+    def _encounter_state_values(self, doc):
+        """Build the contract detail from a locked encounter document."""
+
+        native = doc.name
+        appointment = self._text_value(getattr(doc, "appointment", None))
+        appointment_status = None
+        if appointment:
+            appointment_status = self._text_value(
+                self.frappe.db.get_value(APPOINTMENT_DOCTYPE, appointment, "status")
+            )
+        complaint_field = self._encounter_field("Complaint Detail", "complaint")
+        complaint = False
+        if complaint_field:
+            complaint = bool(
+                self.frappe.db.count(
+                    "Complaint Detail",
+                    {"parent": native, complaint_field: ("!=", "")},
+                )
+            )
+        diagnosis_count = int(
+            self.frappe.db.count(
+                "Patient Encounter Diagnosis", {"parent": native}
+            )
+        )
+        lab_count = int(
+            self.frappe.db.count("Lab Prescription", {"parent": native})
+        )
+        procedure_count = int(
+            self.frappe.db.count("Procedure Prescription", {"parent": native})
+        )
+        drug_code_field = self._encounter_field("Drug Prescription", "drug_code")
+        medication_codes = ()
+        if drug_code_field:
+            medication_codes = tuple(
+                self.frappe.get_all(
+                    "Drug Prescription",
+                    filters={"parent": native},
+                    pluck=drug_code_field,
+                )
+                or ()
+            )
+        clinical_note = None
+        clinical_note_modified = None
+        assessment = plan = followup = None
+        notes = self.frappe.get_all(
+            CLINICAL_NOTE_DOCTYPE,
+            filters={
+                "reference_doctype": ENCOUNTER_DOCTYPE,
+                "reference_docname": native,
+            },
+            fields=["name", "modified", "note"],
+            order_by="creation desc",
+            limit=1,
+        ) or ()
+        if notes:
+            row = notes[0]
+            note = row.get("note") if hasattr(row, "get") else None
+            clinical_note = self._text_value(
+                row.get("name") if hasattr(row, "get") else None
+            )
+            clinical_note_modified = self._text_value(
+                str(row.get("modified")) if hasattr(row, "get") else None
+            )
+            sections = encounter_contract.parse_note_text(note)
+            assessment = sections["assessment"] or None
+            plan = sections["plan"] or None
+            followup = sections["followup"] or None
+        return {
+            "patient": self._text_value(getattr(doc, "patient", None)),
+            "docstatus": getattr(doc, "docstatus", None),
+            "status": self._text_value(getattr(doc, "status", None)),
+            "appointment": appointment,
+            "appointment_status": appointment_status,
+            "modified": self._text_value(getattr(doc, "modified", None)),
+            "complaint": complaint,
+            "diagnosis_count": diagnosis_count,
+            "medication_codes": medication_codes,
+            "lab_count": lab_count,
+            "procedure_count": procedure_count,
+            "clinical_note": clinical_note,
+            "clinical_note_modified": clinical_note_modified,
+            "assessment": assessment,
+            "plan": plan,
+            "followup": followup,
+        }
+
+    def lock_encounter_target(self, native_encounter_id, base_modified=None):
+        """Lock the encounter row and read the contract decision fields."""
+
+        try:
+            doc = self.frappe.get_doc(
+                ENCOUNTER_DOCTYPE, native_encounter_id, for_update=True
+            )
+            values = self._encounter_state_values(doc)
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        return EncounterLockedState(doc=doc, **values)
+
+    def native_encounter_action_detail(self, native_encounter_id):
+        """Read the pre-fence decision fields under native authority."""
+
+        if self.native_encounter_can_write(native_encounter_id) is not True:
+            return None
+        try:
+            doc = self.frappe.get_doc(ENCOUNTER_DOCTYPE, native_encounter_id)
+            return self._encounter_state_values(doc)
+        except Exception:
+            return None
+
+    def _write_encounter_children(self, doc, payload):
+        """Replace the reviewed child rows with the normalized payload."""
+
+        fields = payload["fields"]
+        complaint_field = self._encounter_field("Complaint Detail", "complaint")
+        if fields.get("complaint") is not None and complaint_field:
+            doc.set("symptoms", [])
+            doc.append("symptoms", {complaint_field: fields["complaint"]})
+        diagnosis_field = self._encounter_field(
+            "Patient Encounter Diagnosis", "diagnosis"
+        )
+        if fields.get("diagnoses") and diagnosis_field:
+            doc.set("diagnosis", [])
+            for row in fields["diagnoses"]:
+                doc.append("diagnosis", {diagnosis_field: row["diagnosis"]})
+        drug_code = self._encounter_field("Drug Prescription", "drug_code")
+        if fields.get("medications") and drug_code:
+            doc.set("drug_prescription", [])
+            for row in fields["medications"]:
+                values = {drug_code: row["drug_code"]}
+                for logical in ("dosage", "period"):
+                    installed = self._encounter_field("Drug Prescription", logical)
+                    if installed and row.get(logical):
+                        values[installed] = row[logical]
+                doc.append("drug_prescription", values)
+        lab_code = self._encounter_field("Lab Prescription", "lab_test_code")
+        if fields.get("lab_tests") and lab_code:
+            doc.set("lab_test_prescription", [])
+            for row in fields["lab_tests"]:
+                doc.append("lab_test_prescription", {lab_code: row["lab_test_code"]})
+        procedure = self._encounter_field(
+            "Procedure Prescription", "procedure"
+        )
+        if fields.get("procedures") and procedure:
+            doc.set("procedure_prescription", [])
+            for row in fields["procedures"]:
+                doc.append("procedure_prescription", {procedure: row["procedure"]})
+
+    def _write_encounter_vitals(self, native_encounter_id, patient, vitals):
+        if not vitals:
+            return
+        values = {"patient": patient}
+        for logical, raw in vitals.items():
+            installed = self._encounter_field(VITAL_SIGNS_DOCTYPE, logical)
+            if installed:
+                values[installed] = raw
+        try:
+            doc = self.frappe.new_doc(VITAL_SIGNS_DOCTYPE)
+            for key, value in values.items():
+                setattr(doc, key, value)
+            doc.insert()
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def _write_encounter_note(self, native_encounter_id, patient, note):
+        text = encounter_contract.build_note_text(note)
+        if not text:
+            return
+        practitioner = self.setting(config.ENCOUNTER_PRACTITIONER_KEY)
+        try:
+            doc = self.frappe.new_doc(CLINICAL_NOTE_DOCTYPE)
+            doc.patient = patient
+            doc.practitioner = practitioner
+            doc.note = text
+            doc.reference_doctype = ENCOUNTER_DOCTYPE
+            doc.reference_docname = native_encounter_id
+            doc.insert()
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def create_native_encounter_draft(self, payload):
+        """Insert the draft encounter (docstatus 0) and its separate documents."""
+
+        patient = payload["_native_patient_id"]
+        appointment = payload["_native_appointment_id"]
+        try:
+            doc = self.frappe.new_doc(ENCOUNTER_DOCTYPE)
+            doc.patient = patient
+            doc.practitioner = self.setting(config.ENCOUNTER_PRACTITIONER_KEY)
+            doc.company = self.setting(config.ENCOUNTER_COMPANY_KEY)
+            doc.appointment = appointment
+            doc.encounter_date = self.frappe.utils.nowdate()
+            doc.encounter_time = self.frappe.utils.nowtime()
+            self._write_encounter_children(doc, payload)
+            doc.insert()
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        self._write_encounter_vitals(doc.name, patient, payload["fields"]["vitals"])
+        self._write_encounter_note(doc.name, patient, payload["fields"]["note"])
+        return doc.name
+
+    def save_native_encounter_draft(self, state, payload):
+        """Update the locked draft, its child rows and its separate documents."""
+
+        doc = state.doc
+        if getattr(doc, "docstatus", None) != encounter_contract.DRAFT_DOCSTATUS:
+            raise encounter_write.EncounterTargetNotEligible()
+        try:
+            self._write_encounter_children(doc, payload)
+            doc.save()
+        except encounter_write.EncounterTargetNotEligible:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        self._write_encounter_vitals(
+            doc.name, state.patient, payload["fields"]["vitals"]
+        )
+        self._write_encounter_note(
+            doc.name, state.patient, payload["fields"]["note"]
+        )
+        return doc.name
+
+    def submit_native_encounter(self, state):
+        """Submit the locked draft through the native controller."""
+
+        if getattr(state.doc, "docstatus", None) != encounter_contract.DRAFT_DOCSTATUS:
+            raise encounter_write.EncounterTargetNotEligible()
+        try:
+            state.doc.submit()
+        except encounter_write.EncounterTargetNotEligible:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def create_native_clinical_note_addendum(self, state, note_text, actor):
+        """Insert a NEW Clinical Note addendum; the original stays untouched."""
+
+        if not isinstance(state.clinical_note, str) or not state.clinical_note:
+            raise encounter_write.EncounterTargetNotEligible()
+        try:
+            doc = self.frappe.new_doc(CLINICAL_NOTE_DOCTYPE)
+            doc.patient = state.patient
+            doc.practitioner = self.setting(config.ENCOUNTER_PRACTITIONER_KEY)
+            doc.note = note_text
+            doc.reference_doctype = ENCOUNTER_DOCTYPE
+            doc.reference_docname = state.doc.name
+            doc.insert()
+        except encounter_write.EncounterTargetNotEligible:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        return doc.name
+
+    def native_encounter_amend_facts(
+        self,
+        native_encounter_id,
+        addendum_id,
+        expected_note,
+        original_note,
+        original_note_modified,
+    ):
+        """Re-read the addendum and the untouched original after the insert."""
+
+        try:
+            addendum_note = self.frappe.db.get_value(
+                CLINICAL_NOTE_DOCTYPE, addendum_id, "note"
+            )
+            encounter_modified = self.frappe.db.get_value(
+                ENCOUNTER_DOCTYPE, native_encounter_id, "modified"
+            )
+            clinical_note_modified = self.frappe.db.get_value(
+                CLINICAL_NOTE_DOCTYPE, original_note, "modified"
+            )
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        return {
+            "addendum_created": addendum_id is not None,
+            "addendum_note": self._text_value(addendum_note),
+            "encounter_modified": self._text_value(encounter_modified),
+            "clinical_note_modified": self._text_value(
+                str(clinical_note_modified) if clinical_note_modified else None
+            ),
+            "original_note_modified": self._text_value(
+                str(original_note_modified) if original_note_modified else None
+            ),
+        }
+
+    # -- encounter fence, receipts and acknowledgement -------------------
+
+    def lookup_encounter_receipt(self, actor, kind, operation_key):
+        if kind not in write_fence.ENCOUNTER_OPERATION_KINDS:
+            raise patient_write.WriteUncertain()
+        ledger = self._ledger()
+        try:
+            record = ledger.lookup(actor=actor, kind=kind, operation_key=operation_key)
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+        if record is None:
+            return None
+        if record.state == write_fence.COMMITTED:
+            return record.receipt
+        raise patient_write.WriteLocked()
+
+    def list_committed_encounter_receipts(
+        self, limit, kind=None, operation_key=None
+    ):
+        ledger = self._ledger()
+        try:
+            return ledger.committed_encounter_receipts(
+                limit=limit, kind=kind, operation_key=operation_key
+            )
+        except write_fence.EnumerationOverflow as exc:
+            raise encounter_write.EncounterBudgetExhausted() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    def acknowledge_encounter_write(
+        self, secret, actor, kind, operation_key, ack_token
+    ):
+        if kind not in write_fence.ENCOUNTER_OPERATION_KINDS:
+            return "invalid"
+        ledger = self._ledger()
+        try:
+            record = ledger.lookup(actor=actor, kind=kind, operation_key=operation_key)
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+        if (
+            record is None
+            or record.state != write_fence.COMMITTED
+            or not record.receipt
+        ):
+            return "invalid"
+        expected = encounter_write.ack_token(
+            secret, self.site, actor, kind, operation_key, record.receipt
+        )
+        if not hmac.compare_digest(expected, ack_token):
+            return "invalid"
+        try:
+            return ledger.acknowledge_barrier(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                ack_receipt="ack:" + expected,
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    @contextmanager
+    def encounter_write_fence(self, actor, kind, operation_key, payload_digest):
+        if kind not in write_fence.ENCOUNTER_OPERATION_KINDS:
+            raise patient_write.WriteUncertain()
+        ledger = self._ledger()
+        try:
+            with ledger.fence(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                payload_digest=payload_digest,
+            ) as claim:
+                yield claim
+        except write_fence.OperationLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.SiteLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.OperationConflict as exc:
+            raise patient_write.WriteConflict() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    def receipt_native_encounter_id(self, receipt):
+        """Decode the just-committed receipt back to the native encounter id."""
+
+        return encounter_write.decode_receipt(receipt).native_encounter_id

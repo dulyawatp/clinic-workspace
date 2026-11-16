@@ -54,6 +54,15 @@ Keys
     Workspace patient id of the dedicated same-day fixture. The check-in target
     itself is discovered from a committed booking receipt for that patient on the
     site's current date; this value is not authorization.
+``clinic_ui_native_encounter_write_enabled``
+    Separate, default-off capability flag for the Patient Encounter draft,
+    complete and amend family. Not implied by the patient or appointment flags.
+``clinic_ui_native_encounter_write_site``
+    The one approved site for encounter writes, exactly ``marley-sit.local``.
+``clinic_ui_encounter_practitioner`` / ``clinic_ui_encounter_company``
+    Server-owned linked targets set on a new draft. Neither is ever supplied by
+    the client; each must be a valid identifier and is re-checked against the
+    current user's native document read permission at request time.
 """
 
 from dataclasses import dataclass
@@ -82,6 +91,13 @@ APPOINTMENT_TYPE_KEY = "clinic_ui_appointment_type"
 # The check-in target itself is discovered from a committed booking receipt; this
 # only says which synthetic patient the dedicated record belongs to.
 APPOINTMENT_CHECKIN_PATIENT_KEY = "clinic_ui_appointment_checkin_patient"
+# Separate, default-off encounter-write gate. Independent of the patient and
+# appointment flags: draft, complete and amend each need this flag, the exact
+# approved site and the server-owned practitioner/company targets below.
+ENCOUNTER_WRITE_ENABLED_KEY = "clinic_ui_native_encounter_write_enabled"
+ENCOUNTER_WRITE_SITE_KEY = "clinic_ui_native_encounter_write_site"
+ENCOUNTER_PRACTITIONER_KEY = "clinic_ui_encounter_practitioner"
+ENCOUNTER_COMPANY_KEY = "clinic_ui_encounter_company"
 
 # The one and only site identity on which this local experiment may run. Exact
 # string equality against the resolved current site is required; the configured
@@ -121,6 +137,9 @@ class Settings:
     appointment_type: str | None = None
     appointment_company: str | None = None
     appointment_checkin_patient: str | None = None
+    encounter_write_enabled: bool = False
+    encounter_practitioner: str | None = None
+    encounter_company: str | None = None
 
     def as_role_map(self):
         return {code: tuple(roles) for code, roles in self.role_map}
@@ -302,6 +321,30 @@ def _appointment_write_settings(getter, site, allowlist):
     )
 
 
+def _encounter_write_settings(getter, site):
+    """Return ``(enabled, practitioner, company)`` for the encounter family.
+
+    The encounter gate needs the exact approved site, its own flag and both
+    server-owned targets. Any malformed value leaves ``enabled`` false and
+    returns no targets; the read surfaces are unaffected.
+    """
+
+    disabled = (False, None, None)
+    if site != APPROVED_WRITE_SITE or site in DISALLOWED_WRITE_SITES:
+        return disabled
+    if not _enabled(getter(ENCOUNTER_WRITE_ENABLED_KEY)):
+        return disabled
+    configured = getter(ENCOUNTER_WRITE_SITE_KEY)
+    if not isinstance(configured, str) or configured != APPROVED_WRITE_SITE:
+        return disabled
+    practitioner = normalize_identifier(getter(ENCOUNTER_PRACTITIONER_KEY))
+    company = normalize_identifier(getter(ENCOUNTER_COMPANY_KEY))
+    for value in (practitioner, company):
+        if not is_valid_identifier(value) or len(value) > MAX_ROLE_NAME_LENGTH:
+            return disabled
+    return True, practitioner.strip(), company.strip()
+
+
 def load_settings(getter, site):
     """Return validated settings, or ``None`` when the feature is unavailable."""
 
@@ -345,6 +388,12 @@ def load_settings(getter, site):
         appointment_checkin_patient,
     ) = _appointment_write_settings(getter, site, allowlist)
 
+    (
+        encounter_write_enabled,
+        encounter_practitioner,
+        encounter_company,
+    ) = _encounter_write_settings(getter, site)
+
     return Settings(
         role_map=role_map,
         allowlist=allowlist,
@@ -356,4 +405,7 @@ def load_settings(getter, site):
         appointment_type=appointment_type,
         appointment_company=appointment_company,
         appointment_checkin_patient=appointment_checkin_patient,
+        encounter_write_enabled=encounter_write_enabled,
+        encounter_practitioner=encounter_practitioner,
+        encounter_company=encounter_company,
     )

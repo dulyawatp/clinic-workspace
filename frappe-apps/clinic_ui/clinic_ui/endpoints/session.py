@@ -22,6 +22,8 @@ from clinic_ui.core.capabilities import bootstrap_capabilities
 from clinic_ui.core.epoch import session_epoch
 from clinic_ui.core.policy import (
     APPOINTMENT_WRITE_ROLE_CODES,
+    ENCOUNTER_COMPLETE_ROLE_CODES,
+    ENCOUNTER_ROLE_CODES,
     PATIENT_WRITE_ROLE_CODES,
     SUPPORTED_ROLE_CODES,
 )
@@ -111,6 +113,55 @@ def _appointment_write_flags(gateway, settings, role):
         return disabled
 
 
+def _encounter_write_flags(gateway, settings, role):
+    """Return ``(draft, complete, amend)`` after the encounter write gate.
+
+    Draft (and the medication/lab ordering that rides it) admits DOC and NUR;
+    completion and amendment are DOC-only. The gate is independent of the other
+    write flags: exact approved site, encounter flag, deployment marker, ready
+    fence store, safe Healthcare Settings, installed-field preflight, no
+    boundary drift and the caller's own native authority.
+    """
+
+    disabled = (False, False, False)
+    if role not in ENCOUNTER_ROLE_CODES:
+        return disabled
+    try:
+        if gateway.native_encounter_boundary_problem() is not None:
+            return disabled
+        if gateway.native_encounter_install_problem() is not None:
+            return disabled
+        if not settings.encounter_write_enabled:
+            return disabled
+        if settings.encounter_practitioner is None:
+            return disabled
+        if settings.encounter_company is None:
+            return disabled
+        if gateway.write_deployment_approved() is not True:
+            return disabled
+        if gateway.write_fence_ready() is not True:
+            return disabled
+        if gateway.healthcare_encounter_side_effects_unsafe() is not False:
+            return disabled
+        if gateway.native_patient_can_read is None:
+            return disabled
+        for doctype, doc in (
+            ("Healthcare Practitioner", settings.encounter_practitioner),
+            ("Company", settings.encounter_company),
+        ):
+            if gateway.native_doctype_can_read(doctype, doc) is not True:
+                return disabled
+        draft_ok = gateway.native_encounter_can_create() is True
+        complete_ok = (
+            role in ENCOUNTER_COMPLETE_ROLE_CODES
+            and gateway.native_encounter_can_write() is True
+            and gateway.native_clinical_note_can_create() is True
+        )
+        return draft_ok, complete_ok, complete_ok
+    except Exception:
+        return disabled
+
+
 def bootstrap(gateway):
     common.begin(gateway)
 
@@ -136,6 +187,11 @@ def bootstrap(gateway):
             write_appointment_no_show,
             write_appointment_checkin,
         ) = _appointment_write_flags(gateway, settings, role)
+        (
+            write_encounter_draft,
+            write_encounter_complete,
+            write_encounter_amend,
+        ) = _encounter_write_flags(gateway, settings, role)
         capabilities = bootstrap_capabilities(
             write_patient_create=write_create,
             write_patient_update=write_update,
@@ -144,6 +200,9 @@ def bootstrap(gateway):
             write_appointment_cancel=write_appointment_cancel,
             write_appointment_no_show=write_appointment_no_show,
             write_appointment_checkin=write_appointment_checkin,
+            write_encounter_draft=write_encounter_draft,
+            write_encounter_complete=write_encounter_complete,
+            write_encounter_amend=write_encounter_amend,
         )
         return dto.build_bootstrap(
             session_epoch=epoch,

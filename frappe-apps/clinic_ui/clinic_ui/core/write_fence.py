@@ -172,7 +172,21 @@ APPOINTMENT_OPERATION_KINDS = frozenset(
         "appointment_no_show",
     }
 )
-OPERATION_KINDS = PATIENT_OPERATION_KINDS | APPOINTMENT_OPERATION_KINDS
+# Encounter kinds are additive on the same ledger. They carry their registry
+# names (``encounter_draft``/``encounter_complete``/``encounter_amend``) because
+# they are also budget keys and durable receipt kinds.
+ENCOUNTER_OPERATION_KINDS = frozenset(
+    {
+        "encounter_draft",
+        "encounter_complete",
+        "encounter_amend",
+    }
+)
+OPERATION_KINDS = (
+    PATIENT_OPERATION_KINDS
+    | APPOINTMENT_OPERATION_KINDS
+    | ENCOUNTER_OPERATION_KINDS
+)
 
 # Reserved identity for the durable site-wide manual-investigation latch. It is
 # not a client operation key: no client value can equal it because the endpoint
@@ -469,6 +483,21 @@ class CommittedAppointmentReceipt:
     appointment codec may interpret it, and the caller must re-verify it before
     use. Patient receipts are never returned here and appointment receipts are
     never returned by :meth:`Ledger.committed_create_receipts`.
+    """
+
+    kind: str
+    actor: str
+    operation_key: str
+    receipt: str
+
+
+@dataclass(frozen=True)
+class CommittedEncounterReceipt:
+    """One read-only committed encounter receipt discovered in the fence.
+
+    The receipt is opaque to this module: only the separate encounter codec may
+    interpret it, and the caller must re-verify it before use. Appointment and
+    patient receipts are never returned here.
     """
 
     kind: str
@@ -781,6 +810,81 @@ class Ledger:
             )
         return [
             CommittedAppointmentReceipt(
+                kind=row["kind"],
+                actor=row["actor"],
+                operation_key=row["operation_key"],
+                receipt=row["receipt"],
+            )
+            for row in rows
+        ]
+
+    def committed_encounter_receipts(self, *, limit, kind=None, operation_key=None):
+        """Enumerate terminal ``COMMITTED`` encounter receipts, bounded.
+
+        A separate, read-only namespace from the patient and appointment
+        enumerations: only the encounter kinds are selected. The reserved latch
+        actor (manual latch and every write barrier) and the reserved latch key
+        are excluded, as is every non-terminal state. ``kind`` optionally
+        narrows the read to one encounter kind and ``operation_key`` to one key.
+
+        ``limit`` is a hard server-side bound; an over-full page raises
+        :class:`EnumerationOverflow` instead of silently truncating. The method
+        appends nothing and acquires no write claim.
+        """
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= MAX_RECEIPT_ENUMERATION
+        ):
+            raise InvalidOperation("enumeration limit is invalid")
+        if kind is not None:
+            kind = _require_kind(kind)
+            if kind not in ENCOUNTER_OPERATION_KINDS:
+                raise InvalidOperation("kind is not an encounter kind")
+        if operation_key is not None:
+            operation_key = _require_operation_key(operation_key)
+        kinds = tuple(sorted(ENCOUNTER_OPERATION_KINDS))
+        sql = (
+            "SELECT e.kind, e.actor, e.operation_key, e.receipt FROM events AS e"
+            " WHERE e.deployment_id = (SELECT deployment_id FROM meta)"
+            f" AND e.kind IN ({', '.join('?' for _ in kinds)})"
+            " AND e.state = 'COMMITTED'"
+            " AND e.actor != ?"
+            " AND e.operation_key != ?"
+            " AND e.sequence = ("
+            "   SELECT MAX(e2.sequence) FROM events AS e2"
+            "   WHERE e2.deployment_id = e.deployment_id"
+            "     AND e2.actor = e.actor"
+            "     AND e2.kind = e.kind"
+            "     AND e2.operation_key = e.operation_key"
+            " )"
+        )
+        parameters = [*kinds, LATCH_ACTOR, LATCH_OPERATION_KEY]
+        if kind is not None:
+            sql += " AND e.kind = ?"
+            parameters.append(kind)
+        if operation_key is not None:
+            sql += " AND e.operation_key = ?"
+            parameters.append(operation_key)
+        sql += " ORDER BY e.sequence LIMIT ?"
+        parameters.append(limit + 1)
+
+        directory_fd = self._open_pinned_directory()
+        try:
+            with self._connection(directory_fd) as connection:
+                try:
+                    rows = connection.execute(sql, parameters).fetchall()
+                except sqlite3.DatabaseError as exc:
+                    raise StoreUnavailable(
+                        "could not read committed encounter receipts"
+                    ) from exc
+        finally:
+            os.close(directory_fd)
+        if len(rows) > limit:
+            raise EnumerationOverflow("committed encounter receipts exceed the bound")
+        return [
+            CommittedEncounterReceipt(
                 kind=row["kind"],
                 actor=row["actor"],
                 operation_key=row["operation_key"],

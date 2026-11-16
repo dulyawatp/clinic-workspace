@@ -74,6 +74,19 @@ APPOINTMENT_WRITE_STATUSES = (
     "cancelled",
     "no_show",
 )
+# Encounter write results carry the workspace encounter alias, never a native
+# Patient Encounter docname. The nested detail is exactly these keys.
+ENCOUNTER_DETAIL_KEYS = frozenset(
+    {
+        "encounter_id",
+        "workspace_patient_id",
+        "state",
+        "status",
+        "modified",
+    }
+)
+ENCOUNTER_WRITE_STATUSES = ("draft_saved", "completed", "amended")
+ENCOUNTER_STATES = ("draft", "completed")
 APPOINTMENT_TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
 APPOINTMENT_STATUS = re.compile(r"^[A-Za-z][A-Za-z0-9 _-]{0,63}$")
 
@@ -111,6 +124,8 @@ __all__ = [
     "build_appointments",
     "build_bootstrap",
     "build_directory",
+    "encounter_detail",
+    "encounter_write_result",
     "is_valid_text",
     "patient_detail",
     "patient_item",
@@ -398,3 +413,59 @@ def appointment_write_result(status, detail, ack_token):
     if not isinstance(detail, dict) or set(detail) != APPOINTMENT_DETAIL_KEYS:
         raise ValueError("invalid appointment detail")
     return {"status": status, "appointment": dict(detail), "ackToken": ack_token}
+
+
+def encounter_detail(
+    *, encounter_id, workspace_patient_id, state, status, modified
+):
+    """Build the encounter write detail or raise ``ValueError``.
+
+    ``encounter_id`` is the server-derived workspace alias. ``state`` is the
+    designed ``draft``/``completed`` phase and ``status`` the native status text
+    read back after the operation. No native docname is included.
+    """
+
+    if not is_valid_text(encounter_id, 192):
+        raise ValueError("invalid encounter id")
+    if not is_valid_text(workspace_patient_id, 192):
+        raise ValueError("invalid workspace patient id")
+    if state not in ENCOUNTER_STATES:
+        raise ValueError("invalid encounter state")
+    if not is_valid_text(status, 64):
+        raise ValueError("invalid encounter status")
+    if not is_valid_text(modified, 64) or parse_modified(modified) is None:
+        raise ValueError("invalid encounter version")
+    return {
+        "encounter_id": encounter_id,
+        "workspace_patient_id": workspace_patient_id,
+        "state": state,
+        "status": status,
+        "modified": modified,
+    }
+
+
+def encounter_write_result(status, detail, ack_token, *, addendum=None):
+    """Build the draft/complete/amend success payload.
+
+    ``addendum`` is the workspace-facing addendum reference for an amendment
+    only; it is ``None`` for every other kind and is never a native docname.
+    """
+
+    if status not in ENCOUNTER_WRITE_STATUSES:
+        raise ValueError("invalid encounter write status")
+    if not is_valid_ack_token(ack_token):
+        raise ValueError("invalid acknowledgement token")
+    if not isinstance(detail, dict) or set(detail) != ENCOUNTER_DETAIL_KEYS:
+        raise ValueError("invalid encounter detail")
+    payload = {
+        "status": status,
+        "encounter": dict(detail),
+        "ackToken": ack_token,
+    }
+    if status == "amended":
+        if not is_valid_text(addendum, 192):
+            raise ValueError("invalid addendum")
+        payload["addendum"] = addendum
+    elif addendum is not None:
+        raise ValueError("unexpected addendum")
+    return payload

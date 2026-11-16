@@ -1783,8 +1783,22 @@ class AppointmentKindTests(FenceTestCase):
                     "checkin",
                     "appointment_cancel",
                     "appointment_no_show",
+                    "encounter_draft",
+                    "encounter_complete",
+                    "encounter_amend",
                 }
             ),
+        )
+
+    def test_encounter_kinds_are_additive(self):
+        self.assertEqual(
+            write_fence.ENCOUNTER_OPERATION_KINDS,
+            frozenset(
+                {"encounter_draft", "encounter_complete", "encounter_amend"}
+            ),
+        )
+        self.assertEqual(
+            write_fence.PATIENT_OPERATION_KINDS, frozenset({"create", "update"})
         )
 
     def test_each_appointment_kind_claims_and_commits(self):

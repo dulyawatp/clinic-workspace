@@ -108,3 +108,24 @@ def authorize_appointment_write(gateway, allowed_codes, csrf_token=None):
     if not gateway.write_deployment_approved():
         gateway.deny()
     return settings, view, role
+
+
+def authorize_encounter_write(gateway, allowed_codes, csrf_token=None):
+    """Read gate, explicit CSRF, and the separate encounter-write gate.
+
+    The encounter gate is independent of the patient and appointment flags. It
+    requires the exact approved site, the encounter flag and the same private
+    deployment marker bound to the fence store. Target configuration is never
+    authority: every request still performs its own native permission checks.
+    """
+
+    settings, view, role = authorize(gateway, allowed_codes)
+    if view.user == write_fence.LATCH_ACTOR:
+        gateway.deny()
+    if not gateway.csrf_token_valid(csrf_token):
+        gateway.deny()
+    if not settings.encounter_write_enabled:
+        gateway.deny()
+    if not gateway.write_deployment_approved():
+        gateway.deny()
+    return settings, view, role

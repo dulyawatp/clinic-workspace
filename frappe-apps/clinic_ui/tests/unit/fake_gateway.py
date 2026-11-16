@@ -42,6 +42,13 @@ class FakeLockedState:
         for key, value in values.items():
             setattr(self, key, value)
 
+    def as_dict(self):
+        return {
+            key: value
+            for key, value in vars(self).items()
+            if not key.startswith("_")
+        }
+
 
 class FakeClaim:
     def __init__(self):
@@ -208,6 +215,45 @@ class FakeGateway:
         self.insert_expected_calls = []
         self.setting_sequences = {}
         self.call_order = []
+
+        # -- encounter write surface --------------------------------------
+        self.encounter_boundary_problem = None
+        self.encounter_install_problem = None
+        self.encounter_can_create = True
+        self.encounter_can_write = True
+        self.clinical_note_can_create = True
+        self.encounter_side_effects_unsafe = False
+        self.encounter_details = {}
+        self.encounter_action_detail_calls = []
+        self.encounter_locked = {}
+        self.encounter_lock_calls = []
+        self.encounter_lock_error = None
+        self.created_encounter_id = "NATIVE-ENC-NEW"
+        self.create_encounter_calls = []
+        self.create_encounter_error = None
+        self.save_encounter_calls = []
+        self.save_encounter_error = None
+        self.submit_encounter_calls = []
+        self.submit_encounter_error = None
+        self.service_request_baseline = 0
+        self.submitted_service_requests = 0
+        self.cascade_detail = {}
+        self.encounter_detail_map = {}
+        self.addendum_id = "NATIVE-NOTE-ADDENDUM"
+        self.addendum_calls = []
+        self.addendum_error = None
+        self.amend_facts = {}
+        self.amend_facts_calls = []
+        self.encounter_receipts = {}
+        self.encounter_receipt_records = []
+        self.encounter_receipt_calls = []
+        self.encounter_receipt_list_error = None
+        self.encounter_ack_calls = []
+        self.encounter_ack_status = "acked"
+        self.encounter_ack_error = None
+        self.encounter_fence_calls = []
+        self.encounter_fence_claim = FakeClaim()
+        self.encounter_fence_error = None
 
     def setting(self, key):
         sequence = self.setting_sequences.get(key)
@@ -606,6 +652,170 @@ class FakeGateway:
 
 
 
+    # -- local encounter write path -------------------------------------
+
+    def native_encounter_boundary_problem(self):
+        return self.encounter_boundary_problem
+
+    def native_encounter_install_problem(self):
+        return self.encounter_install_problem
+
+    def native_encounter_can_create(self):
+        return self.encounter_can_create
+
+    def native_encounter_can_write(self, native_encounter_id=None):
+        return self.encounter_can_write
+
+    def native_clinical_note_can_create(self):
+        return self.clinical_note_can_create
+
+    def healthcare_encounter_side_effects_unsafe(self):
+        return self.encounter_side_effects_unsafe
+
+    def native_submitted_service_request_count(self):
+        return self.service_request_baseline
+
+    def native_encounter_action_detail(self, native_encounter_id):
+        self.encounter_action_detail_calls.append(native_encounter_id)
+        value = self.encounter_details.get(native_encounter_id)
+        return dict(value) if value is not None else None
+
+    def lock_encounter_target(self, native_encounter_id, base_modified=None):
+        self.encounter_lock_calls.append((native_encounter_id, base_modified))
+        if self.encounter_lock_error is not None:
+            raise self.encounter_lock_error
+        values = dict(self.encounter_details.get(native_encounter_id, {}))
+        values.update(self.encounter_locked.get(native_encounter_id, {}))
+        values.setdefault("doc", None)
+        return FakeLockedState(**values)
+
+    def create_native_encounter_draft(self, payload):
+        self.create_encounter_calls.append(dict(payload))
+        if self.create_encounter_error is not None:
+            raise self.create_encounter_error
+        return self.created_encounter_id
+
+    def save_native_encounter_draft(self, state, payload):
+        self.save_encounter_calls.append((state, dict(payload)))
+        if self.save_encounter_error is not None:
+            raise self.save_encounter_error
+        return getattr(state, "native_id", self.created_encounter_id)
+
+    def submit_native_encounter(self, state):
+        self.submit_encounter_calls.append(state)
+        if self.submit_encounter_error is not None:
+            raise self.submit_encounter_error
+
+    def native_encounter_cascade_detail(self, native_encounter_id, baseline):
+        if self.cascade_detail:
+            return dict(self.cascade_detail)
+        return {
+            "docstatus": 1,
+            "status": "Completed",
+            "appointment_status": "Closed",
+            "submitted_service_requests": self.submitted_service_requests,
+        }
+
+    def native_encounter_detail(self, native_encounter_id):
+        value = self.encounter_detail_map.get(native_encounter_id)
+        if value is not None:
+            return dict(value)
+        return {
+            "patient": "PAT-1",
+            "docstatus": 0,
+            "status": "Draft",
+            "modified": "2026-11-14 09:30:00.123456",
+        }
+
+    def create_native_clinical_note_addendum(self, state, note_text, actor):
+        self.addendum_calls.append((state, note_text, actor))
+        if self.addendum_error is not None:
+            raise self.addendum_error
+        return self.addendum_id
+
+    def native_encounter_amend_facts(
+        self,
+        native_encounter_id,
+        addendum_id,
+        expected_note,
+        original_note,
+        original_note_modified,
+    ):
+        self.amend_facts_calls.append(
+            (
+                native_encounter_id,
+                addendum_id,
+                expected_note,
+                original_note,
+                original_note_modified,
+            )
+        )
+        values = {
+            "addendum_created": True,
+            "addendum_note": expected_note,
+            "encounter_modified": "2026-11-14 09:30:00.123456",
+            "clinical_note_modified": original_note_modified,
+        }
+        values.update(self.amend_facts)
+        return values
+
+    def lookup_encounter_receipt(self, actor, kind, operation_key):
+        value = self.encounter_receipts.get((actor, kind, operation_key))
+        if isinstance(value, Exception):
+            raise value
+        if value is not None:
+            return value
+        for record in self.encounter_receipt_records:
+            if (
+                record.actor == actor
+                and record.kind == kind
+                and record.operation_key == operation_key
+            ):
+                return record.receipt
+        return None
+
+    def list_committed_encounter_receipts(
+        self, limit, kind=None, operation_key=None
+    ):
+        self.encounter_receipt_calls.append((limit, kind, operation_key))
+        if self.encounter_receipt_list_error is not None:
+            raise self.encounter_receipt_list_error
+        from clinic_ui.core import encounter_write
+
+        records = [
+            record
+            for record in self.encounter_receipt_records
+            if (kind is None or record.kind == kind)
+            and (operation_key is None or record.operation_key == operation_key)
+        ]
+        if len(records) > limit:
+            raise encounter_write.EncounterBudgetExhausted()
+        return records
+
+    def acknowledge_encounter_write(
+        self, secret, actor, kind, operation_key, ack_token
+    ):
+        self.encounter_ack_calls.append((actor, kind, operation_key, ack_token))
+        if self.encounter_ack_error is not None:
+            raise self.encounter_ack_error
+        return self.encounter_ack_status
+
+    def encounter_write_fence(self, actor, kind, operation_key, payload_digest):
+        self.call_order.append("encounter_fence")
+        self.encounter_fence_calls.append(
+            (actor, kind, operation_key, payload_digest)
+        )
+        return FakeFence(
+            self.encounter_fence_claim, self.encounter_fence_error
+        )
+
+    def receipt_native_encounter_id(self, receipt):
+        from clinic_ui.core import encounter_write
+
+        return encounter_write.decode_receipt(receipt).native_encounter_id
+
+
+
 def detail():
     return {
         "patient_name": "Patient One",
@@ -661,3 +871,12 @@ def settings(**overrides):
     }
     values.update(overrides)
     return values
+
+class FakeEncounterReceipt:
+    """One committed encounter row as the gateway would enumerate it."""
+
+    def __init__(self, kind, actor, operation_key, receipt):
+        self.kind = kind
+        self.actor = actor
+        self.operation_key = operation_key
+        self.receipt = receipt

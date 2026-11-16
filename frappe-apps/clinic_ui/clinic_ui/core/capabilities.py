@@ -81,7 +81,11 @@ APPOINTMENT_WRITE_NAMES = frozenset(
 # publishes them read-only until that gate is wired.
 DEPLOYMENT_GATED_WRITE_NAMES = frozenset(
     {
+        "write.encounter.draft",
+        "write.encounter.complete",
         "write.encounter.amend",
+        "write.medication.order",
+        "write.lab.order",
         "write.invoice.void_amend",
         "write.stock.consume",
     }
@@ -106,6 +110,9 @@ def bootstrap_capabilities(
     write_appointment_cancel=False,
     write_appointment_no_show=False,
     write_appointment_checkin=False,
+    write_encounter_draft=False,
+    write_encounter_complete=False,
+    write_encounter_amend=False,
 ):
     """Return the default read-only map with reviewed writes enabled.
 
@@ -129,6 +136,16 @@ def bootstrap_capabilities(
         capabilities["write.appointment.no_show"] = ENABLED_STATE
     if write_appointment_checkin is True:
         capabilities["write.appointment.checkin"] = ENABLED_STATE
+    # Medication ordering and native lab ordering ride the encounter draft
+    # payload; there is no separate endpoint, so they share its gate.
+    if write_encounter_draft is True:
+        capabilities["write.encounter.draft"] = ENABLED_STATE
+        capabilities["write.medication.order"] = ENABLED_STATE
+        capabilities["write.lab.order"] = ENABLED_STATE
+    if write_encounter_complete is True:
+        capabilities["write.encounter.complete"] = ENABLED_STATE
+    if write_encounter_amend is True:
+        capabilities["write.encounter.amend"] = ENABLED_STATE
     return capabilities
 
 
