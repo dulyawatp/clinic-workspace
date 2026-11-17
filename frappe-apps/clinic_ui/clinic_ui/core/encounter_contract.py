@@ -30,6 +30,9 @@ ENCOUNTER_DOCTYPE = "Patient Encounter"
 CLINICAL_NOTE_DOCTYPE = "Clinical Note"
 VITAL_SIGNS_DOCTYPE = "Vital Signs"
 SERVICE_REQUEST_DOCTYPE = "Service Request"
+# The installed complaint child of ``Patient Encounter.symptoms``. The older
+# ``Complaint Detail`` DocType is not installed with healthcare v16.6.1.
+SYMPTOM_CHILD_DOCTYPE = "Patient Encounter Symptom"
 
 ENCOUNTER_DRAFT_KIND = "encounter_draft"
 ENCOUNTER_COMPLETE_KIND = "encounter_complete"
@@ -63,6 +66,7 @@ REQUIRED_FIELDS = {
         "practitioner": ("practitioner",),
         "encounter_date": ("encounter_date",),
         "appointment": ("appointment",),
+        "appointment_type": ("appointment_type",),
         "symptoms": ("symptoms",),
         "diagnosis": ("diagnosis",),
         "drug_prescription": ("drug_prescription",),
@@ -73,8 +77,9 @@ REQUIRED_FIELDS = {
         "patient": ("patient",),
         "practitioner": ("practitioner",),
         "note": ("note",),
-        "reference_doctype": ("reference_doctype",),
-        "reference_docname": ("reference_docname",),
+        # The reference pair is a matched set, checked as a unit by
+        # ``note_reference_problem``: resolving the two names independently would
+        # admit a half-installed or half-legacy mix that links nothing.
     },
     VITAL_SIGNS_DOCTYPE: {
         "patient": ("patient",),
@@ -83,7 +88,7 @@ REQUIRED_FIELDS = {
         "patient": ("patient",),
         "status": ("status",),
     },
-    "Complaint Detail": {
+    SYMPTOM_CHILD_DOCTYPE: {
         "complaint": ("complaint",),
     },
     "Patient Encounter Diagnosis": {
@@ -112,6 +117,38 @@ VITAL_FIELDS = {
     "height": ("height",),
     "weight": ("weight",),
 }
+
+# The installed child-table shape of the encounter's logical sections. A scalar
+# column carrying the same name would satisfy a name-only preflight and then fail
+# at insert, so the child DocType is pinned in the preflight as well.
+TABLE_FIELD_TYPES = ("Table", "Table MultiSelect")
+TABLE_FIELDS = {
+    ENCOUNTER_DOCTYPE: {
+        "symptoms": SYMPTOM_CHILD_DOCTYPE,
+        "diagnosis": "Patient Encounter Diagnosis",
+        "drug_prescription": "Drug Prescription",
+        "lab_test_prescription": "Lab Prescription",
+        "procedure_prescription": "Procedure Prescription",
+    },
+}
+
+# The Clinical Note reference pair, newest first. A note links to the encounter
+# through a ``Link`` to ``DocType`` plus a ``Dynamic Link`` that points back at
+# that very field. The pair is installed as a unit; the two names are never
+# resolved independently.
+NOTE_REFERENCE_PAIRS = (
+    ("reference_doc", "reference_name"),
+    ("reference_doctype", "reference_docname"),
+)
+NOTE_REFERENCE_DOCTYPE_FIELD_TYPE = "Link"
+NOTE_REFERENCE_DOCTYPE_OPTIONS = "DocType"
+NOTE_REFERENCE_NAME_FIELD_TYPE = "Dynamic Link"
+
+# Medication rows are outside the reviewed contract. The installed
+# ``Drug Prescription.dosage_form`` is required and the payload cannot supply it,
+# so a medication-bearing draft would fail after dispatch. It is refused before
+# the fence until a reviewed medication contract exists.
+MEDICATION_UNSUPPORTED = "medication rows are outside the reviewed encounter contract"
 
 # The required-before-complete set (CSV:70), in the order the operator sees it,
 # with the per-field problem text. The values are read from the persisted
@@ -174,31 +211,102 @@ class EncounterContractError(ValueError):
     """An encounter contract input or value is outside the accepted shape."""
 
 
+def _installed_names(meta_fields, doctype):
+    """The installed field names for one DocType, or ``None`` when unknown."""
+
+    if not isinstance(meta_fields, dict):
+        return None
+    installed = meta_fields.get(doctype)
+    if not isinstance(installed, (set, frozenset, tuple, list, dict)):
+        return None
+    return set(installed)
+
+
+def _field_shape(installed, fieldname):
+    """``(fieldtype, options)`` for one installed field, or ``None``.
+
+    ``None`` also covers the name-only metadata form and frappe's default
+    columns, which carry no ``DocField`` row: the shape simply cannot be proven
+    there, and the name check is what applies.
+    """
+
+    if not isinstance(installed, dict):
+        return None
+    shape = installed.get(fieldname)
+    if isinstance(shape, (tuple, list)) and len(shape) == 2:
+        return (shape[0], shape[1])
+    return None
+
+
 def install_problem(meta_fields):
     """Return the first missing installed field, or ``None`` when complete.
 
-    ``meta_fields`` maps a DocType name to the set of installed field names
-    (``frappe.get_meta(doctype).get_valid_columns()`` in the adapter). An
-    absent DocType or a logical field with no installed candidate is a
-    pre-fence refusal, not a guess.
+    ``meta_fields`` maps a DocType name to what the adapter resolved from the
+    site's own metadata: a mapping of installed fieldname to
+    ``(fieldtype, options)`` (``frappe.get_meta(doctype).fields``, which includes
+    Table fields; ``get_valid_columns()`` does not). A plain set/list of names is
+    still accepted, but then only the names are proven — the table shape check
+    below needs the typed form. An absent DocType or a logical field with no
+    installed candidate is a pre-fence refusal, not a guess.
     """
 
     if not isinstance(meta_fields, dict):
         return "installed metadata unreadable"
     for doctype, fields in REQUIRED_FIELDS.items():
         installed = meta_fields.get(doctype)
-        if not isinstance(installed, (set, frozenset, tuple, list)):
+        if not isinstance(installed, (set, frozenset, tuple, list, dict)):
             return f"missing DocType {doctype}"
         installed = set(installed)
         for logical, candidates in fields.items():
             if not any(candidate in installed for candidate in candidates):
                 return f"missing field {doctype}.{logical}"
+    problem = note_reference_problem(meta_fields)
+    if problem is not None:
+        return problem
+    problem = table_shape_problem(meta_fields)
+    if problem is not None:
+        return problem
     for logical, candidates in VITAL_FIELDS.items():
         installed = meta_fields.get(VITAL_SIGNS_DOCTYPE)
-        if not isinstance(installed, (set, frozenset, tuple, list)):
+        if not isinstance(installed, (set, frozenset, tuple, list, dict)):
             return f"missing DocType {VITAL_SIGNS_DOCTYPE}"
         if not any(candidate in set(installed) for candidate in candidates):
             return f"missing field {VITAL_SIGNS_DOCTYPE}.{logical}"
+    return None
+
+
+def table_shape_problem(meta_fields):
+    """Refuse a required child table that is not the installed table field.
+
+    Only the typed metadata form carries the fieldtype and options; a name-only
+    set cannot prove the shape and is left to the name check in
+    :func:`install_problem`.
+    """
+
+    if not isinstance(meta_fields, dict):
+        return "installed metadata unreadable"
+    for doctype, fields in TABLE_FIELDS.items():
+        installed = meta_fields.get(doctype)
+        if not isinstance(installed, dict):
+            continue
+        for logical, child in fields.items():
+            candidates = (REQUIRED_FIELDS.get(doctype) or {}).get(logical) or ()
+            name = next(
+                (candidate for candidate in candidates if candidate in installed),
+                None,
+            )
+            if name is None:
+                continue
+            shape = installed.get(name)
+            if not isinstance(shape, (tuple, list)) or len(shape) != 2:
+                continue
+            fieldtype, options = shape
+            if fieldtype not in TABLE_FIELD_TYPES:
+                return f"field {doctype}.{logical} is not a table field"
+            if options != child:
+                return (
+                    f"field {doctype}.{logical} child table is not {child}"
+                )
     return None
 
 
@@ -210,12 +318,124 @@ def resolve_field(meta_fields, doctype, logical, candidates=None):
     if not candidates:
         return None
     installed = meta_fields.get(doctype) if isinstance(meta_fields, dict) else None
-    if not isinstance(installed, (set, frozenset, tuple, list)):
+    if not isinstance(installed, (set, frozenset, tuple, list, dict)):
         return None
     installed = set(installed)
     for candidate in candidates:
         if candidate in installed:
             return candidate
+    return None
+
+
+def note_reference_problem(meta_fields):
+    """Refuse a Clinical Note that has no readable reference pair.
+
+    The pair must be one of the reviewed matched pairs *and*, when the typed
+    metadata is available, must be shaped as installed: a ``Link`` to ``DocType``
+    plus a ``Dynamic Link`` whose options is that same field. A mixed pair, a
+    scalar field carrying the name, or a dynamic link pointing at a different
+    field would write a link nobody can read back.
+    """
+
+    if not isinstance(meta_fields, dict):
+        return "installed metadata unreadable"
+    installed = _installed_names(meta_fields, CLINICAL_NOTE_DOCTYPE)
+    if installed is None:
+        return f"missing DocType {CLINICAL_NOTE_DOCTYPE}"
+    pair = _note_reference_pair(meta_fields)
+    if pair is None:
+        for doctype_field, name_field in NOTE_REFERENCE_PAIRS:
+            if doctype_field in installed or name_field in installed:
+                missing = (
+                    doctype_field if doctype_field not in installed else name_field
+                )
+                return f"missing field {CLINICAL_NOTE_DOCTYPE}.{missing}"
+        return f"missing field {CLINICAL_NOTE_DOCTYPE}.{NOTE_REFERENCE_PAIRS[0][0]}"
+    doctype_field, name_field = pair
+    raw = meta_fields.get(CLINICAL_NOTE_DOCTYPE)
+    doctype_shape = _field_shape(raw, doctype_field)
+    if doctype_shape is not None:
+        fieldtype, options = doctype_shape
+        if (
+            fieldtype != NOTE_REFERENCE_DOCTYPE_FIELD_TYPE
+            or options != NOTE_REFERENCE_DOCTYPE_OPTIONS
+        ):
+            return (
+                f"field {CLINICAL_NOTE_DOCTYPE}.{doctype_field} "
+                "is not a DocType link"
+            )
+    name_shape = _field_shape(raw, name_field)
+    if name_shape is not None:
+        fieldtype, options = name_shape
+        if (
+            fieldtype != NOTE_REFERENCE_NAME_FIELD_TYPE
+            or options != doctype_field
+        ):
+            return (
+                f"field {CLINICAL_NOTE_DOCTYPE}.{name_field} "
+                f"is not a dynamic link to {doctype_field}"
+            )
+    return None
+
+
+def _note_reference_pair(meta_fields):
+    """The first reviewed pair whose two names are both installed."""
+
+    installed = _installed_names(meta_fields, CLINICAL_NOTE_DOCTYPE)
+    if installed is None:
+        return None
+    for doctype_field, name_field in NOTE_REFERENCE_PAIRS:
+        if doctype_field in installed and name_field in installed:
+            return (doctype_field, name_field)
+    return None
+
+
+def note_reference_fields(meta_fields):
+    """Return the installed ``(reference doctype, reference name)`` pair.
+
+    ``(None, None)`` when the pair is absent, mixed or wrongly shaped, so the
+    caller writes no link and reads no note instead of guessing.
+    """
+
+    if note_reference_problem(meta_fields) is not None:
+        return (None, None)
+    pair = _note_reference_pair(meta_fields)
+    if pair is None:
+        return (None, None)
+    return pair
+
+
+def medication_problem(fields):
+    """Refuse any medication-bearing draft before the fence.
+
+    ``validate_save_draft`` has already normalised the section, so a mapping or a
+    subclass cannot slip through: anything that is not an empty sequence is a
+    medication request.
+    """
+
+    medications = fields.get("medications")
+    if medications is None:
+        return None
+    if isinstance(medications, (list, tuple)) and not medications:
+        return None
+    return MEDICATION_UNSUPPORTED
+
+
+def persisted_medication_problem(values):
+    """Refuse a target that already holds medication rows.
+
+    The incoming payload is not the only way medication rows exist: a native user
+    can add them directly to the draft. The reviewed contract cannot rewrite such
+    a row (the installed ``dosage_form`` is required and unsupplied) and must not
+    delete what a human entered, so the row *count* — blank drug codes included —
+    refuses the target before dispatch. An unreadable count fails closed.
+    """
+
+    count = values.get("medication_count")
+    if not _non_negative_count(count):
+        return "medication row count is unreadable"
+    if count:
+        return "target encounter has existing medication rows"
     return None
 
 
@@ -240,6 +460,23 @@ def boundary_problem(snapshot):
     for doctype in (ENCOUNTER_DOCTYPE, CLINICAL_NOTE_DOCTYPE, VITAL_SIGNS_DOCTYPE):
         if tuple(doc_events.get(doctype) or ()):
             return f"unreviewed doc_events for {doctype}"
+    return None
+
+
+def create_target_problem(values):
+    """Refuse a draft create before any fence claim.
+
+    The installed ``Patient Encounter.appointment_type`` is required and is never
+    a client value: it is derived from the linked booking. A missing link or a
+    booking without an appointment type is refused here so the insert cannot fail
+    inside the fence and latch the site.
+    """
+
+    if not values.get("appointment"):
+        return "draft create has no linked appointment"
+    appointment_type = values.get("appointment_type")
+    if not isinstance(appointment_type, str) or not appointment_type.strip():
+        return "linked appointment has no appointment type"
     return None
 
 

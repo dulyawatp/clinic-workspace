@@ -159,11 +159,14 @@ def bootstrap_capabilities(
         capabilities["write.appointment.no_show"] = ENABLED_STATE
     if write_appointment_checkin is True:
         capabilities["write.appointment.checkin"] = ENABLED_STATE
-    # Medication ordering and native lab ordering ride the encounter draft
-    # payload; there is no separate endpoint, so they share its gate.
+    # Native lab ordering rides the encounter draft payload; there is no
+    # separate endpoint, so it shares that gate. Medication ordering does NOT:
+    # the draft contract refuses any non-empty ``medications`` section before the
+    # fence until a reviewed medication contract exists (the installed
+    # ``Drug Prescription.dosage_form`` is required and unsupplied), so the
+    # published map keeps ``write.medication.order`` read_only.
     if write_encounter_draft is True:
         capabilities["write.encounter.draft"] = ENABLED_STATE
-        capabilities["write.medication.order"] = ENABLED_STATE
         capabilities["write.lab.order"] = ENABLED_STATE
     if write_encounter_complete is True:
         capabilities["write.encounter.complete"] = ENABLED_STATE

@@ -61,6 +61,17 @@ class FakeDB:
         self.commits = 0
         self.rollbacks = 0
         self.single_values = {}
+        # Rows keyed by (doctype, parent) for the uncached ``get_all`` read.
+        self.all_rows = {}
+        self.get_all_calls = []
+        self.get_all_error = None
+
+    def get_all(self, doctype, filters=None, fields=None, pluck=None, **kwargs):
+        filters = dict(filters or {})
+        self.get_all_calls.append((doctype, filters, pluck))
+        if self.get_all_error is not None:
+            raise self.get_all_error
+        return list(self.all_rows.get((doctype, filters.get("parent")), []))
 
     def get_value(
         self,
@@ -257,6 +268,8 @@ class FakeFrappe(types.SimpleNamespace):
         return self.docs[(doctype, name)]
 
     def get_roles(self, user=None):
+        self.get_roles_calls = getattr(self, "get_roles_calls", [])
+        self.get_roles_calls.append(user)
         return list(self.roles)
 
     def has_permission(self, doctype, ptype="read", doc=None, user=None):
@@ -334,6 +347,65 @@ class AnonymousResponseAdapterTests(GatewayTestCase):
         self.assertFalse(view.enabled)
         self.assertEqual(view.roles, ())
         self.assertEqual(stub.db.calls, [])
+
+
+class FreshUserRolesAdapterTests(GatewayTestCase):
+    """The fresh role read is a plain Has Role table read.
+
+    It never calls ``frappe.get_roles`` (whose answer the pinned v16 memoises in
+    ``frappe.cache`` under ``roles/<user>``) and never writes or purges a cache,
+    so it cannot mask or manufacture a role. Only the exact parent/parenttype
+    rows are read, with the pinned automatic-role exclusion.
+    """
+
+    USER = "doctor@example.test"
+    FILTERS = {
+        "parenttype": "User",
+        "parent": "doctor@example.test",
+        "role": ["not in", ["Guest", "All", "Desk User", "Administrator"]],
+    }
+
+    def test_reads_the_users_has_role_rows_uncached(self):
+        stub = FakeFrappe()
+        stub.local.cache = {"roles": {self.USER: ["Physician"]}}
+        stub.db.all_rows[("Has Role", self.USER)] = ["Physician", "Nurse"]
+
+        roles = self.gateway(stub).fresh_user_roles(self.USER)
+
+        self.assertEqual(roles, ("Physician", "Nurse"))
+        self.assertEqual(
+            stub.db.get_all_calls, [("Has Role", self.FILTERS, "role")]
+        )
+        # No framework role read and no cache write or purge.
+        self.assertEqual(getattr(stub, "get_roles_calls", []), [])
+        self.assertEqual(stub.local.cache, {"roles": {self.USER: ["Physician"]}})
+
+    def test_no_rows_is_an_empty_tuple_not_an_error(self):
+        stub = FakeFrappe()
+
+        self.assertEqual(self.gateway(stub).fresh_user_roles(self.USER), ())
+
+    def test_a_failed_read_returns_none(self):
+        stub = FakeFrappe()
+        stub.db.get_all_error = RuntimeError("connection lost")
+
+        self.assertIsNone(self.gateway(stub).fresh_user_roles(self.USER))
+
+    def test_an_invalid_identity_returns_none_without_a_query(self):
+        stub = FakeFrappe()
+        for user in ("", "   ", None, 7):
+            with self.subTest(user=user):
+                self.assertIsNone(self.gateway(stub).fresh_user_roles(user))
+        self.assertEqual(stub.db.get_all_calls, [])
+
+    def test_a_malformed_row_returns_none(self):
+        for rows in (["Physician", None], ["Physician", ""]):
+            with self.subTest(rows=rows):
+                stub = FakeFrappe()
+                stub.db.all_rows[("Has Role", self.USER)] = rows
+                self.assertIsNone(
+                    self.gateway(stub).fresh_user_roles(self.USER)
+                )
 
 
 class NativePatientViewAdapterTests(GatewayTestCase):
@@ -4331,6 +4403,648 @@ class GatewayAdditiveSurfaceTests(unittest.TestCase):
                 self.assertTrue(
                     callable(getattr(frappe_gateway.Gateway, name, None))
                 )
+
+class EncounterShapeMeta:
+    """The installed ``Patient Encounter`` family metadata.
+
+    ``fields`` is what ``frappe.get_meta(doctype).fields`` carries (DocFields
+    only, with the installed fieldtype and options). ``get_valid_columns()``
+    returns the scalar database columns, which is the defect: it drops every
+    Table field, so ``symptoms`` can never satisfy a column-only preflight.
+    """
+
+    def __init__(self, shapes, default_fields=(), restricted=False):
+        self.shapes = dict(shapes)
+        self.restricted = restricted
+        self.fields = [
+            types.SimpleNamespace(
+                fieldname=name, fieldtype=shape[0], options=shape[1]
+            )
+            for name, shape in self.shapes.items()
+        ]
+        self.default_fields = list(default_fields)
+        self.field_calls = []
+
+    def get_valid_columns(self):
+        return {
+            name
+            for name, (fieldtype, _options) in self.shapes.items()
+            if fieldtype not in ("Table", "Table MultiSelect")
+        }
+
+    def get_permlevel_access(self, permission_type="read", parenttype=None, *, user=None):
+        return [0]
+
+    def get_masked_fields(self, parenttype=None):
+        return []
+
+    def get_field(self, fieldname):
+        self.field_calls.append(fieldname)
+        if self.restricted:
+            return None
+        shape = self.shapes.get(fieldname)
+        if shape is None:
+            return None
+        return types.SimpleNamespace(
+            permlevel=0,
+            fieldname=fieldname,
+            fieldtype=shape[0] or "Data",
+            options=shape[1],
+        )
+
+
+class EncounterDB:
+    """Read side of the encounter adapter: values, counts, note filters."""
+
+    def __init__(self):
+        self.values = {}
+        self.counts = {}
+        self.all_rows = {}
+        self.all_calls = []
+        self.rollbacks = 0
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def get_value(self, doctype, name, fieldname=None, as_dict=False, **kwargs):
+        if isinstance(fieldname, (list, tuple)):
+            row = {
+                field: self.values.get((doctype, name, field))
+                for field in fieldname
+            }
+            return row if as_dict else tuple(row[field] for field in fieldname)
+        return self.values.get((doctype, name, fieldname))
+
+    def count(self, doctype, filters=None):
+        return self.counts.get(doctype, 0)
+
+    def get_all(self, doctype, filters=None, fields=None, pluck=None, **kwargs):
+        self.all_calls.append((doctype, dict(filters or {})))
+        rows = list(self.all_rows.get(doctype, []))
+        if pluck is not None:
+            return [row.get(pluck) for row in rows]
+        return rows
+
+
+class EncounterDoc:
+    def __init__(self, doctype, name=None):
+        self.doctype = doctype
+        self.name = name
+        self.inserted = False
+        self.children = []
+
+    def append(self, fieldname, values):
+        self.children.append((fieldname, dict(values)))
+
+    def set(self, fieldname, value):
+        setattr(self, fieldname, value)
+
+    def insert(self):
+        self.inserted = True
+        if self.name is None:
+            self.name = f"{self.doctype.upper()}-NEW-1"
+
+    def save(self):
+        self.saved = True
+
+    def submit(self):
+        self.docstatus = 1
+
+
+class EncounterStub(types.SimpleNamespace):
+    """Fake Frappe module carrying the installed encounter metadata."""
+
+    DEFAULT_FIELDS = ("name", "owner", "creation", "modified", "modified_by", "docstatus", "idx")
+
+    def __init__(self, shapes=None):
+        super().__init__()
+        self.shapes = shapes or encounter_shapes()
+        self.metadata = {}
+        self.session = types.SimpleNamespace(user="doctor@example.test", sid="sid")
+        self.local = types.SimpleNamespace(site="marley.test", session={}, flags=types.SimpleNamespace())
+        self.db = EncounterDB()
+        self.new_docs = []
+        self.docs = {}
+        self.get_doc_calls = []
+        self.permissions = set()
+        self.restricted_meta_fields = False
+        self.utils = types.SimpleNamespace(
+            nowdate=lambda: "2026-11-17", nowtime=lambda: "09:30:00"
+        )
+
+    def get_meta(self, doctype):
+        if doctype not in self.metadata:
+            shapes = self.shapes.get(doctype)
+            if shapes is None:
+                raise KeyError(doctype)
+            self.metadata[doctype] = EncounterShapeMeta(
+                shapes,
+                default_fields=self.DEFAULT_FIELDS,
+                restricted=doctype == "Patient Appointment"
+                and self.restricted_meta_fields,
+            )
+        return self.metadata[doctype]
+
+    def get_all(self, doctype, **kwargs):
+        return self.db.get_all(doctype, **kwargs)
+
+    def new_doc(self, doctype):
+        doc = EncounterDoc(doctype)
+        self.new_docs.append(doc)
+        return doc
+
+    def get_doc(self, doctype, name, **kwargs):
+        self.get_doc_calls.append((doctype, name, dict(kwargs)))
+        return self.docs.get((doctype, name))
+
+    def has_permission(self, doctype, ptype="read", doc=None, user=None):
+        return (doctype, ptype) in self.permissions
+
+
+def encounter_shapes():
+    """Upstream healthcare v16.6.1 metadata, fieldname -> (fieldtype, options)."""
+
+    return {
+        "Patient Encounter": {
+            "patient": ("Link", "Patient"),
+            "practitioner": ("Link", "Healthcare Practitioner"),
+            "encounter_date": ("Date", None),
+            "encounter_time": ("Time", None),
+            "appointment": ("Link", "Patient Appointment"),
+            "appointment_type": ("Link", "Appointment Type"),
+            "company": ("Link", "Company"),
+            "symptoms": ("Table MultiSelect", "Patient Encounter Symptom"),
+            "diagnosis": ("Table MultiSelect", "Patient Encounter Diagnosis"),
+            "drug_prescription": ("Table", "Drug Prescription"),
+            "lab_test_prescription": ("Table", "Lab Prescription"),
+            "procedure_prescription": ("Table", "Procedure Prescription"),
+            "status": ("Select", "\nOpen\nOrdered\nCompleted\nCancelled"),
+        },
+        "Clinical Note": {
+            "patient": ("Link", "Patient"),
+            "practitioner": ("Link", "Healthcare Practitioner"),
+            "note": ("Text Editor", None),
+            "reference_doc": ("Link", "DocType"),
+            "reference_name": ("Dynamic Link", "reference_doc"),
+        },
+        "Vital Signs": {
+            "patient": ("Link", "Patient"),
+            "temperature": ("Float", None),
+            "pulse": ("Int", None),
+            "respiratory_rate": ("Int", None),
+            "bp_systolic": ("Int", None),
+            "bp_diastolic": ("Int", None),
+            "height": ("Float", None),
+            "weight": ("Float", None),
+        },
+        "Service Request": {"patient": ("Link", "Patient"), "status": ("Select", None)},
+        "Patient Encounter Symptom": {"complaint": ("Link", "Complaint")},
+        "Patient Encounter Diagnosis": {"diagnosis": ("Link", "Diagnosis")},
+        "Drug Prescription": {
+            "drug_code": ("Link", "Item"),
+            "dosage": ("Link", "Prescription Dosage"),
+            "period": ("Link", "Prescription Duration"),
+        },
+        "Lab Prescription": {"lab_test_code": ("Link", "Lab Test Template")},
+        "Procedure Prescription": {
+            "procedure": ("Link", "Clinical Procedure Template")
+        },
+        # Fields the linked-appointment read needs (cancel/no-show checks).
+        "Patient Appointment": {
+            "patient": ("Link", "Patient"),
+            "appointment_date": ("Date", None),
+            "appointment_time": ("Time", None),
+            "status": ("Select", None),
+            "appointment_type": ("Link", "Appointment Type"),
+        },
+    }
+
+
+class EncounterInstalledMetadataTests(GatewayTestCase):
+    """D2: the encounter preflight reads installed metadata, not DB columns.
+
+    On the deployed image ``Patient Encounter.symptoms`` is a Table MultiSelect
+    and ``Clinical Note`` links through ``reference_doc``/``reference_name``.
+    ``get_valid_columns()`` drops both Table fields, so the column-only
+    resolution denies the whole encounter family and the note writes set two
+    attributes that are not installed.
+    """
+
+    def stub(self):
+        return EncounterStub()
+
+    def test_the_column_only_resolution_is_the_defect(self):
+        stub = self.stub()
+        columns = {
+            doctype: stub.get_meta(doctype).get_valid_columns()
+            for doctype in encounter_contract.REQUIRED_FIELDS
+        }
+
+        self.assertEqual(
+            encounter_contract.install_problem(columns),
+            "missing field Patient Encounter.symptoms",
+        )
+
+    def test_the_gateway_preflight_reads_the_installed_shapes(self):
+        gateway = self.gateway(self.stub())
+
+        self.assertIsNone(gateway.native_encounter_install_problem())
+        fields = gateway._encounter_meta_fields()["Patient Encounter"]
+        self.assertEqual(
+            fields["symptoms"], ("Table MultiSelect", "Patient Encounter Symptom")
+        )
+        self.assertEqual(
+            fields["drug_prescription"], ("Table", "Drug Prescription")
+        )
+        # The default columns are unioned in: ``modified`` has no DocField row.
+        self.assertIn("modified", fields)
+
+    def test_a_scalar_field_with_the_table_name_still_refuses(self):
+        shapes = encounter_shapes()
+        shapes["Patient Encounter"]["symptoms"] = ("Data", None)
+
+        self.assertEqual(
+            self.gateway(EncounterStub(shapes)).native_encounter_install_problem(),
+            "field Patient Encounter.symptoms is not a table field",
+        )
+
+    def test_a_mistyped_note_reference_field_refuses_the_family(self):
+        shapes = encounter_shapes()
+        shapes["Clinical Note"]["reference_name"] = ("Data", None)
+
+        self.assertEqual(
+            self.gateway(EncounterStub(shapes)).native_encounter_install_problem(),
+            "field Clinical Note.reference_name is not a dynamic link to "
+            "reference_doc",
+        )
+
+    def test_a_uniformed_note_pair_refuses_the_family(self):
+        shapes = encounter_shapes()
+        shapes["Clinical Note"]["reference_name"] = (
+            "Dynamic Link",
+            "reference_doctype",
+        )
+
+        self.assertEqual(
+            self.gateway(EncounterStub(shapes)).native_encounter_install_problem(),
+            "field Clinical Note.reference_name is not a dynamic link to "
+            "reference_doc",
+        )
+
+    def test_the_note_read_filters_on_the_installed_reference_pair(self):
+        stub = self.stub()
+        stub.db.all_rows["Clinical Note"] = [
+            {"name": "HLC-NOTE-1", "modified": "2026-11-17 08:00:00", "note": "Assessment: Acne"}
+        ]
+        doc = types.SimpleNamespace(
+            name="HLC-ENC-1",
+            patient="PAT-1",
+            docstatus=0,
+            status="Draft",
+            appointment="APPT-1",
+            modified="2026-11-17 09:00:00",
+        )
+
+        values = self.gateway(stub)._encounter_state_values(doc)
+
+        note_calls = [call for call in stub.db.all_calls if call[0] == "Clinical Note"]
+        self.assertEqual(
+            note_calls,
+            [("Clinical Note", {"reference_doc": "Patient Encounter", "reference_name": "HLC-ENC-1"})],
+        )
+        self.assertEqual(values["clinical_note"], "HLC-NOTE-1")
+        self.assertEqual(values["assessment"], "Acne")
+
+    def test_the_symptom_count_reads_the_installed_child_table(self):
+        stub = self.stub()
+        doc = types.SimpleNamespace(
+            name="HLC-ENC-1",
+            patient="PAT-1",
+            docstatus=0,
+            status="Draft",
+            appointment="APPT-1",
+            modified="2026-11-17 09:00:00",
+        )
+        counts = []
+        stub.db.count = lambda doctype, filters=None: counts.append(doctype) or 0
+
+        self.gateway(stub)._encounter_state_values(doc)
+
+        self.assertIn("Patient Encounter Symptom", counts)
+        self.assertNotIn("Complaint Detail", counts)
+
+    def test_the_note_write_sets_the_installed_reference_pair(self):
+        stub = self.stub()
+        gateway = self.gateway(stub)
+
+        with mock.patch.object(gateway, "setting", return_value="PRAC-1"):
+            gateway._write_encounter_note(
+                "HLC-ENC-1", "PAT-1", {"assessment": "Acne"}
+            )
+
+        note = stub.new_docs[0]
+        self.assertTrue(note.inserted)
+        self.assertEqual(note.reference_doc, "Patient Encounter")
+        self.assertEqual(note.reference_name, "HLC-ENC-1")
+        self.assertFalse(hasattr(note, "reference_doctype"))
+        self.assertIn("Assessment: Acne", note.note)
+
+    def test_the_draft_derives_the_appointment_type_and_symptom_child(self):
+        stub = self.stub()
+        gateway = self.gateway(stub)
+        payload = {
+            "_native_patient_id": "PAT-1",
+            "_native_appointment_id": "APPT-1",
+            "_appointment_type": "APPT-TYPE-1",
+            "fields": {
+                "complaint": "Itchy rash",
+                "diagnoses": [],
+                "medications": [],
+                "lab_tests": [],
+                "procedures": [],
+                "vitals": {},
+                "note": None,
+            },
+        }
+
+        with mock.patch.object(gateway, "setting", return_value="PRAC-1"):
+            created = gateway.create_native_encounter_draft(payload)
+
+        doc = stub.new_docs[0]
+        self.assertEqual(created, doc.name)
+        self.assertEqual(doc.appointment_type, "APPT-TYPE-1")
+        self.assertEqual(
+            doc.children, [("symptoms", {"complaint": "Itchy rash"})]
+        )
+
+    def test_the_state_read_counts_the_persisted_medication_rows(self):
+        """A blank drug code is still a row: the count decides, not the codes."""
+
+        stub = self.stub()
+        stub.db.counts["Drug Prescription"] = 2
+        stub.db.all_rows["Drug Prescription"] = [{"drug_code": ""}, {"drug_code": None}]
+        doc = types.SimpleNamespace(
+            name="HLC-ENC-1",
+            patient="PAT-1",
+            docstatus=0,
+            status="Draft",
+            appointment="APPT-1",
+            modified="2026-11-17 09:00:00",
+        )
+
+        values = self.gateway(stub)._encounter_state_values(doc)
+
+        self.assertEqual(values["medication_count"], 2)
+        self.assertEqual(values["medication_codes"], ("", None))
+
+    def test_the_linked_booking_is_locked_for_update(self):
+        """``FOR UPDATE`` is what makes the committed row the one revalidated."""
+
+        stub = self.stub()
+        stub.permissions.add(("Patient Appointment", "write"))
+        stub.docs[("Patient Appointment", "APPT-1")] = types.SimpleNamespace(
+            patient="PAT-1", status="Checked In", appointment_type="APPT-TYPE-1"
+        )
+        gateway = self.gateway(stub)
+
+        locked = gateway.lock_linked_appointment("APPT-1")
+
+        self.assertEqual(
+            locked,
+            {
+                "patient": "PAT-1",
+                "status": "Checked In",
+                "appointment_type": "APPT-TYPE-1",
+            },
+        )
+        self.assertEqual(
+            stub.get_doc_calls, [("Patient Appointment", "APPT-1", {"for_update": True})]
+        )
+        # The caller's snapshot restart is the only rollback on this path.
+        self.assertEqual(stub.db.rollbacks, 0)
+
+    def test_a_denied_booking_lock_returns_none(self):
+        stub = self.stub()
+        stub.docs[("Patient Appointment", "APPT-1")] = types.SimpleNamespace(
+            patient="PAT-1", status="Open", appointment_type="APPT-TYPE-1"
+        )
+
+        self.assertIsNone(self.gateway(stub).lock_linked_appointment("APPT-1"))
+
+    def test_a_missing_booking_lock_returns_none(self):
+        stub = self.stub()
+        stub.permissions.add(("Patient Appointment", "write"))
+
+        self.assertIsNone(self.gateway(stub).lock_linked_appointment("APPT-1"))
+
+    def test_a_restricted_booking_field_returns_none(self):
+        stub = self.stub()
+        stub.permissions.add(("Patient Appointment", "write"))
+        stub.docs[("Patient Appointment", "APPT-1")] = types.SimpleNamespace(
+            patient="PAT-1", status="Open", appointment_type="APPT-TYPE-1"
+        )
+        stub.restricted_meta_fields = True
+
+        self.assertIsNone(self.gateway(stub).lock_linked_appointment("APPT-1"))
+
+    def test_the_completion_lock_needs_only_read_on_the_booking(self):
+        """HEAD completes with encounter rights; Appointment.write is not one."""
+
+        stub = self.stub()
+        stub.permissions.add(("Patient Appointment", "read"))
+        stub.docs[("Patient Appointment", "APPT-1")] = types.SimpleNamespace(
+            patient="PAT-1", status="Checked In", appointment_type="APPT-TYPE-1"
+        )
+        gateway = self.gateway(stub)
+
+        locked = gateway.lock_linked_appointment_for_read("APPT-1")
+
+        self.assertEqual(
+            locked,
+            {
+                "patient": "PAT-1",
+                "status": "Checked In",
+                "appointment_type": "APPT-TYPE-1",
+            },
+        )
+        self.assertEqual(
+            stub.get_doc_calls, [("Patient Appointment", "APPT-1", {"for_update": True})]
+        )
+
+    def test_the_completion_lock_still_needs_read_on_the_booking(self):
+        stub = self.stub()
+        stub.docs[("Patient Appointment", "APPT-1")] = types.SimpleNamespace(
+            patient="PAT-1", status="Open", appointment_type="APPT-TYPE-1"
+        )
+
+        self.assertIsNone(
+            self.gateway(stub).lock_linked_appointment_for_read("APPT-1")
+        )
+
+    def test_the_linked_appointment_type_is_read_for_the_create_decision(self):
+        stub = self.stub()
+        stub.permissions.add(("Patient Appointment", "read"))
+        stub.db.values[("Patient Appointment", "APPT-1", "patient")] = "PAT-1"
+        stub.db.values[("Patient Appointment", "APPT-1", "appointment_date")] = "2026-11-17"
+        stub.db.values[("Patient Appointment", "APPT-1", "appointment_time")] = "09:30:00"
+        stub.db.values[("Patient Appointment", "APPT-1", "status")] = "Open"
+        stub.db.values[("Patient Appointment", "APPT-1", "appointment_type")] = "APPT-TYPE-1"
+        gateway = self.gateway(stub)
+
+        self.assertEqual(
+            gateway.native_appointment_encounter_type("APPT-1"), "APPT-TYPE-1"
+        )
+        del stub.db.values[("Patient Appointment", "APPT-1", "appointment_type")]
+        self.assertIsNone(gateway.native_appointment_encounter_type("APPT-1"))
+
+
+class EncounterWriteLeaseAdapterTests(GatewayTestCase):
+    """The encounter lease appends nothing until the caller dispatches.
+
+    These use the production ledger in a temporary site private directory so the
+    adapter, the lease and the durable records are all real.
+    """
+
+    KIND = "encounter_draft"
+    KEY = "enc-draft-key-0001-0123"
+    DIGEST = "ab" * 32
+
+    def setUp(self):
+        self._temp = TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        fence_store.initialize_store(
+            private / fence_store.STORE_DIRNAME,
+            private / fence_store.ANCHOR_FILENAME,
+        )
+        self.ledger = fence_store.open_store(
+            private / fence_store.STORE_DIRNAME,
+            private / fence_store.ANCHOR_FILENAME,
+        )
+
+    def lease_gateway(self):
+        return self.gateway(FakeFrappe(site_path=self.root))
+
+    def test_a_refusal_before_dispatch_appends_nothing(self):
+        gateway = self.lease_gateway()
+
+        with gateway.encounter_write_lease(
+            actor="doctor@example.test",
+            kind=self.KIND,
+            operation_key=self.KEY,
+            payload_digest=self.DIGEST,
+        ):
+            pass
+
+        self.assertIsNone(
+            self.ledger.lookup(
+                actor="doctor@example.test", kind=self.KIND, operation_key=self.KEY
+            )
+        )
+
+    def test_dispatch_claims_the_key_once_and_a_duplicate_is_write_locked(self):
+        gateway = self.lease_gateway()
+
+        with gateway.encounter_write_lease(
+            actor="doctor@example.test",
+            kind=self.KIND,
+            operation_key=self.KEY,
+            payload_digest=self.DIGEST,
+        ) as lease:
+            claim = lease.dispatch()
+            self.assertEqual(claim.state, write_fence.DISPATCHED)
+            claim.commit("receipt-1")
+
+        self.assertEqual(
+            self.ledger.lookup(
+                actor="doctor@example.test", kind=self.KIND, operation_key=self.KEY
+            ).state,
+            write_fence.COMMITTED,
+        )
+
+        with self.assertRaises(patient_write.WriteLocked):
+            with gateway.encounter_write_lease(
+                actor="doctor@example.test",
+                kind=self.KIND,
+                operation_key=self.KEY,
+                payload_digest=self.DIGEST,
+            ) as lease:
+                lease.dispatch()
+
+    def test_a_digest_mismatch_is_a_write_conflict(self):
+        gateway = self.lease_gateway()
+
+        with gateway.encounter_write_lease(
+            actor="doctor@example.test",
+            kind=self.KIND,
+            operation_key=self.KEY,
+            payload_digest=self.DIGEST,
+        ) as lease:
+            lease.dispatch().commit("receipt-1")
+
+        with self.assertRaises(patient_write.WriteConflict):
+            with gateway.encounter_write_lease(
+                actor="doctor@example.test",
+                kind=self.KIND,
+                operation_key=self.KEY,
+                payload_digest="cd" * 32,
+            ) as lease:
+                lease.dispatch()
+
+    def test_a_lease_is_single_use(self):
+        gateway = self.lease_gateway()
+
+        with self.assertRaises(patient_write.WriteUncertain):
+            with gateway.encounter_write_lease(
+                actor="doctor@example.test",
+                kind=self.KIND,
+                operation_key=self.KEY,
+                payload_digest=self.DIGEST,
+            ) as lease:
+                lease.dispatch()
+                lease.dispatch()
+
+    def test_refresh_site_config_rereads_the_site_config_file(self):
+        with TemporaryDirectory() as root:
+            site_config = Path(root) / "site_config.json"
+            site_config.write_text(
+                json.dumps({"clinic_ui_native_encounter_write_enabled": 1}),
+                encoding="utf-8",
+            )
+            gateway = self.gateway(FakeFrappe(site_path=root))
+            self.assertEqual(
+                gateway.setting("clinic_ui_native_encounter_write_enabled"), 1
+            )
+
+            site_config.write_text(
+                json.dumps({"clinic_ui_native_encounter_write_enabled": 0}),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                gateway.setting("clinic_ui_native_encounter_write_enabled"), 1
+            )
+
+            gateway.refresh_site_config()
+
+            self.assertEqual(
+                gateway.setting("clinic_ui_native_encounter_write_enabled"), 0
+            )
+
+    def test_refresh_site_config_denies_when_the_file_becomes_unreadable(self):
+        with TemporaryDirectory() as root:
+            site_config = Path(root) / "site_config.json"
+            site_config.write_text(
+                json.dumps({"clinic_ui_native_encounter_write_enabled": 1}),
+                encoding="utf-8",
+            )
+            gateway = self.gateway(FakeFrappe(site_path=root))
+            site_config.write_text("{not json", encoding="utf-8")
+
+            gateway.refresh_site_config()
+
+            self.assertIsNone(gateway.setting("clinic_ui_native_encounter_write_enabled"))
 
 
 if __name__ == "__main__":

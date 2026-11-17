@@ -30,11 +30,14 @@ export type Capability =
   | "write.appointment.book"
   | "write.appointment.reschedule"
   | "write.appointment.cancel"
+  | "write.appointment.no_show"
   | "write.appointment.checkin"
   | "write.encounter.draft"
   | "write.encounter.complete"
+  | "write.encounter.amend"
   | "write.medication.order"
   | "write.procedure.complete"
+  | "write.procedure.create"
   | "write.lab.order"
   | "write.lab.review"
   | "write.photo.consent"
@@ -44,9 +47,11 @@ export type Capability =
   | "write.stock.receive"
   | "write.stock.transfer"
   | "write.stock.adjust"
+  | "write.stock.consume"
   | "write.purchase_order.draft"
   | "write.purchase_order.submit"
   | "write.invoice.submit"
+  | "write.invoice.void_amend"
   | "write.payment.receive"
   | "write.payment.refund"
   | "write.admin.user"
@@ -77,11 +82,14 @@ export const CAPABILITY_NAMES = [
   "write.appointment.book",
   "write.appointment.reschedule",
   "write.appointment.cancel",
+  "write.appointment.no_show",
   "write.appointment.checkin",
   "write.encounter.draft",
   "write.encounter.complete",
+  "write.encounter.amend",
   "write.medication.order",
   "write.procedure.complete",
+  "write.procedure.create",
   "write.lab.order",
   "write.lab.review",
   "write.photo.consent",
@@ -91,9 +99,11 @@ export const CAPABILITY_NAMES = [
   "write.stock.receive",
   "write.stock.transfer",
   "write.stock.adjust",
+  "write.stock.consume",
   "write.purchase_order.draft",
   "write.purchase_order.submit",
   "write.invoice.submit",
+  "write.invoice.void_amend",
   "write.payment.receive",
   "write.payment.refund",
   "write.admin.user",

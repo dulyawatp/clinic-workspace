@@ -16,17 +16,54 @@ Order is fixed and test-asserted:
    be `Open`/`Checked In` for the completion cascade, the required-before-complete
    field set must be present with a per-field problem, and the durable budget
    must remain,
-7. the persistent site-wide fence, then the native row lock and the same
-   pre-fence decisions again against current rows,
-8. the designed native operation (draft save, submit with the expected cascade,
-   or a new Clinical Note addendum), a closed-world re-read, one explicit commit
-   and the terminal receipt,
+7. the volatile decision, taken under a held fence lease: the site snapshot is
+   restarted, the target rows are locked ``FOR UPDATE`` for the rest of this
+   transaction, and the decisions above are taken again against the locked rows
+   (the encounter, then its linked booking when both exist, and the persisted
+   medication rows). The authorization, CSRF, deployment, configuration and role
+   gates are re-read here too. The durable budget is re-read here too,
+8. ``Lease.dispatch``: the single call that appends ``DISPATCHED``, taken
+   immediately before the designed native operation (draft save, submit with the
+   expected cascade, or a new Clinical Note addendum). The lease and the row
+   locks stay held across the write, one explicit commit and the terminal
+   receipt,
 9. the one-shot acknowledgement token.
 
-Every designed refusal in 3-6 happens **before** the fence claim. A refusal
-inside a held fence would terminate the operation ``UNKNOWN`` and latch the whole
-site. A post-dispatch failure is uncertain: the key stays locked and the response
-is ``409 {"code": "WRITE_LOCKED"}`` with no retry.
+``Ledger.lease`` appends nothing until ``dispatch``, so a refusal taken under the
+held lease (an authorization, CSRF, deployment or settings change, a booking or
+medication race, an exhausted budget or a lease/dispatch failure) writes no
+event, drops the row locks it took, and lets the next operation run. Once
+``dispatch`` has appended the claim there is no refusal left: an exception there
+means a native write may be in flight, which is exactly when the key must stay
+``DISPATCHED`` (the operation becomes ``UNKNOWN``/locked, the response is
+``409 {"code": "WRITE_LOCKED"}`` with no retry).
+
+Authority changes made outside this process are not serialisable: the gate is
+re-read under the held lease, which narrows the window to the gap between that
+re-read and the native call, it does not close it. Two parts of that re-read are
+platform-dependent and are stated here rather than implied:
+
+* the site configuration is genuinely reloaded (``refresh_site_config``), but the
+  role set comes from ``frappe.get_roles``, which the pinned Frappe caches per
+  request. The adapter deliberately does not purge or reimplement that cache: no
+  reviewed fresh path exists for it, and a guessed invalidation would be an
+  authorization change, not a fix. The cached role is therefore only the role
+  the request may use, and a deny-only guard re-reads the ``Has Role`` rows
+  directly under the lease and refuses unless they resolve to that same role.
+  The guard cannot grant: a fresh DB role the cached gate did not authorise is
+  a refusal, and a role map satisfiable only by an automatic framework role
+  (``All``, ``Desk User``, ``Guest``, ``Administrator``) is refused because the
+  table cannot establish it. It reads no raw SQL and touches no session id.
+* an epoch-secret rotation under the lease is refused before the dispatch
+  (``configured epoch secret changed``). The alias, digest and acknowledgement
+  token are all derived from that secret, so a rotation cannot be reconciled
+  safely: the response would carry a token the production acknowledgement path
+  rejects, leaving the barrier ``DISPATCHED`` and the site locked.
+
+The fresh-role read narrows the authority window; it does not make revocation
+atomic. A ``Has Role`` change committed after that read and before the native
+call still lands, and the native DocPerm check (with its own framework cache) is
+a separate authority this guard neither replaces nor re-implements.
 """
 
 from clinic_ui.core import (
@@ -34,6 +71,7 @@ from clinic_ui.core import (
     encounter_contract,
     encounter_write,
     patient_write,
+    policy,
 )
 from clinic_ui.core.policy import (
     ENCOUNTER_AMEND_ROLE_CODES,
@@ -256,6 +294,29 @@ FINAL_DOCSTATUS = encounter_contract.FINAL_DOCSTATUS
 DRAFT_DOCSTATUS = encounter_contract.DRAFT_DOCSTATUS
 
 
+def _require_fresh_role(gateway, settings, view, role):
+    """Refuse unless the stored role rows still grant the gated role.
+
+    ``_shared_gate`` re-reads ``frappe.get_roles``, which the pinned Frappe
+    serves from its request/Redis cache, so a role revoked since the session was
+    read can still pass. This reads the ``Has Role`` rows directly and refuses
+    unless they resolve to exactly the role the gate already authorised. It is
+    deny-only: it never re-resolves a different role and never grants one. An
+    unreadable table read and a role map that can only be satisfied by an
+    automatic framework role both refuse.
+    """
+
+    try:
+        fresh_roles = gateway.fresh_user_roles(view.user)
+    except Exception:
+        fresh_roles = None
+    problem = policy.fresh_role_problem(
+        fresh_roles, settings.as_role_map(), role
+    )
+    if problem is not None:
+        gateway.deny()
+
+
 def _shared_gate(gateway, csrf_token):
     settings, view, role = common.authorize_encounter_write(
         gateway, ENCOUNTER_ROLE_CODES, csrf_token
@@ -300,118 +361,231 @@ def native_patient_id_for(settings, workspace_patient_id):
     return appointments.native_patient_for(settings, workspace_patient_id)
 
 
-def _draft_fence_body(
+def _release_read_locks(gateway):
+    """Release the pre-dispatch row locks after a refusal.
+
+    Nothing has been written at this point, so a rollback only drops the locks
+    the volatile decision took. A failure here is not a write uncertainty: the
+    transaction stays read-only and ends without a commit.
+    """
+
+    try:
+        gateway.rollback()
+    except Exception:
+        return
+
+
+def _dispatch(lease, gateway):
+    """Take the claim immediately before the native write.
+
+    The lease holds the fence and the transaction holds the row locks at this
+    point, so a refused dispatch must drop the locks before it leaves.
+    """
+
+    try:
+        return lease.dispatch()
+    except BaseException:
+        _release_read_locks(gateway)
+        raise
+
+
+def _draft_volatile_decision(
     gateway,
-    settings,
-    view,
     payload,
     native_patient_id,
     *,
-    alias,
+    view,
     is_create,
     native_appointment_id,
     kind,
     csrf_token,
+    expected_secret,
+    cross_actor,
 ):
-    """Run one draft save inside the held fence and return its receipt."""
+    """Decide the draft save under row locks, before the dispatch.
 
-    with gateway.encounter_write_fence(
-        view.user, kind, payload["operation_key"], payload["_digest"]
-    ) as claim:
-        try:
-            _require_budget(gateway, kind)
-            gateway.reset_native_read_snapshot()
-            fence_settings, fence_view, fence_role = _shared_gate(
-                gateway, csrf_token
-            )
-            if fence_view.user != view.user:
-                raise patient_write.WriteUncertain()
-            if encounter_contract.section_problem(
-                fence_role, payload["fields"]
-            ) is not None:
-                raise patient_write.UnsafeSideEffect("section role changed")
+    ``Lease.dispatch`` is what appends ``DISPATCHED``, so every decision a
+    concurrent native writer (or an operator changing authority) can invalidate
+    is taken here: the site configuration is reloaded and the full gate is
+    re-read against a restarted snapshot, the target rows are locked with
+    ``FOR UPDATE`` for the rest of this transaction, and the native authority the
+    write needs is re-checked on the locked rows. The dispatch is only taken once
+    nothing can refuse. Nothing may roll back after the locks are taken unless
+    the dispatch itself refuses.
+
+    ``expected_secret`` is the epoch secret this request's alias, digest and ack
+    token are built from. A rotation under the lease cannot be reconciled: the
+    response token would be unverifiable by the production acknowledgement path
+    and the barrier would stay ``DISPATCHED``, so the difference is refused
+    before the dispatch instead.
+
+    ``cross_actor`` records that the target was resolved under the nurse-only
+    cross-actor rule. If the in-lease role is no longer ``NUR`` that privilege no
+    longer applies, so the operation refuses rather than writing another actor's
+    draft as a doctor.
+
+    Returns the locked encounter state to save (``None`` for a create).
+    """
+
+    # The configuration gate must see the file as it is now, and the reads below
+    # must see committed rows: resetting first is what makes the second gate and
+    # the locks honest instead of replaying this request's earlier snapshot.
+    gateway.refresh_site_config()
+    gateway.reset_native_read_snapshot()
+    fence_settings, fence_view, fence_role = _shared_gate(gateway, csrf_token)
+    if fence_view.user != view.user:
+        raise patient_write.WriteUncertain()
+    _require_fresh_role(gateway, fence_settings, fence_view, fence_role)
+    if fence_settings.epoch_secret != expected_secret:
+        raise patient_write.UnsafeSideEffect("configured epoch secret changed")
+    if cross_actor and fence_role != "NUR":
+        raise patient_write.UnsafeSideEffect("nurse cross-actor privilege changed")
+    if (
+        encounter_contract.section_problem(fence_role, payload["fields"])
+        is not None
+    ):
+        raise patient_write.UnsafeSideEffect("section role changed")
+    if encounter_contract.build_note_text(
+        payload["fields"].get("note")
+    ) and gateway.native_clinical_note_can_create() is not True:
+        raise patient_write.UnsafeSideEffect(
+            "clinical note create authority changed"
+        )
+    if (
+        native_patient_id_for(fence_settings, payload["workspace_patient_id"])
+        != native_patient_id
+    ):
+        raise patient_write.UnsafeSideEffect("configured patient changed")
+    if gateway.healthcare_encounter_side_effects_unsafe() is not False:
+        gateway.deny()
+
+    try:
+        if is_create:
+            try:
+                booking = appointments.own_booking(
+                    gateway,
+                    fence_settings,
+                    fence_view.user,
+                    payload["appointment"],
+                )
+            except patient_write.WriteLocked:
+                raise encounter_write.EncounterTargetNotEligible() from None
             if (
-                native_patient_id_for(
-                    fence_settings, payload["workspace_patient_id"]
-                )
-                != native_patient_id
+                booking is None
+                or booking.native_appointment_id != native_appointment_id
             ):
-                raise patient_write.UnsafeSideEffect("configured patient changed")
-            if is_create:
-                try:
-                    booking = appointments.own_booking(
-                        gateway,
-                        fence_settings,
-                        fence_view.user,
-                        payload["appointment"],
-                    )
-                except patient_write.WriteLocked:
-                    raise encounter_write.EncounterTargetNotEligible() from None
-                if (
-                    booking is None
-                    or booking.native_appointment_id != native_appointment_id
-                ):
-                    raise patient_write.UnsafeSideEffect(
-                        "linked booking changed"
-                    )
-                fresh = gateway.native_appointment_action_detail(
-                    native_appointment_id
+                raise patient_write.UnsafeSideEffect("linked booking changed")
+            # The row lock, not a plain read: the fence serialises this
+            # contract's own operations only, and another native writer can edit
+            # the booking at any moment.
+            locked = gateway.lock_linked_appointment(native_appointment_id)
+            if locked is None:
+                raise patient_write.UnsafeSideEffect(
+                    "linked booking is not readable under the lock"
                 )
-                if fresh is None or fresh.get("patient") != native_patient_id:
-                    raise patient_write.UnsafeSideEffect("linked booking changed")
-                if (
-                    fresh.get("status")
-                    not in encounter_contract.CASCADE_SOURCE_STATUSES
-                ):
-                    raise encounter_write.EncounterTargetNotEligible()
-                if (
-                    gateway.native_appointment_can_write(native_appointment_id)
-                    is not True
-                ):
-                    gateway.deny()
-            else:
-                state = gateway.lock_encounter_target(
-                    payload["_native_encounter_id"], payload["base_modified"]
+            if locked.get("patient") != native_patient_id:
+                raise patient_write.UnsafeSideEffect("linked booking changed")
+            if (
+                locked.get("status")
+                not in encounter_contract.CASCADE_SOURCE_STATUSES
+            ):
+                raise encounter_write.EncounterTargetNotEligible()
+            # The type is captured pre-fence and revalidated on the locked row.
+            # An unset capture is refused too, so ``None == None`` is not a way
+            # past this check.
+            captured_type = payload.get("_appointment_type")
+            if not captured_type or (
+                locked.get("appointment_type") != captured_type
+            ):
+                raise patient_write.UnsafeSideEffect(
+                    "linked booking appointment type changed"
                 )
-                values = _values(state)
-                if values["patient"] != native_patient_id:
-                    raise patient_write.UnsafeSideEffect("target patient changed")
-                if values["modified"] != payload["base_modified"]:
-                    raise patient_write.WriteConflict()
-                if encounter_contract.draft_target_problem(values) is not None:
-                    raise encounter_write.EncounterTargetNotEligible()
-                if gateway.native_patient_can_read(native_patient_id) is not True:
-                    gateway.deny()
-                gateway.save_native_encounter_draft(state, payload)
-                native_id = payload["_native_encounter_id"]
-            if is_create:
-                native_id = gateway.create_native_encounter_draft(payload)
-            receipt = _finish_fence(
-                gateway, claim, kind, alias, native_id
-            )
-        except encounter_write.EncounterTargetNotEligible:
-            _rollback_or_raise(gateway)
-            raise
-        except encounter_write.EncounterBudgetExhausted:
-            _rollback_or_raise(gateway)
-            raise
-        except (
-            patient_write.WriteLocked,
-            patient_write.WriteConflict,
-            patient_write.StoreUnavailable,
-            patient_write.WriteUncertain,
-            patient_write.UnsafeSideEffect,
-        ):
-            _rollback_or_raise(gateway)
-            raise
-        except Exception:
-            _mark_unknown(
-                claim, "native Patient Encounter draft outcome not established"
-            )
-            _rollback_or_raise(gateway)
-            raise patient_write.WriteUncertain() from None
-    return receipt
+            # Native authority is re-read under the lease: a create right revoked
+            # after the first gate must refuse before the dispatch, not inside the
+            # write.
+            if gateway.native_appointment_can_write(native_appointment_id) is not True:
+                gateway.deny()
+            if gateway.native_encounter_can_create() is not True:
+                gateway.deny()
+            if gateway.native_patient_can_read(native_patient_id) is not True:
+                gateway.deny()
+            _require_budget(gateway, kind)
+            return None
 
+        state = gateway.lock_encounter_target(
+            payload["_native_encounter_id"], payload["base_modified"]
+        )
+        values = _values(state)
+        if values["patient"] != native_patient_id:
+            raise patient_write.UnsafeSideEffect("target patient changed")
+        if values["modified"] != payload["base_modified"]:
+            raise patient_write.WriteConflict()
+        if encounter_contract.draft_target_problem(values) is not None:
+            raise encounter_write.EncounterTargetNotEligible()
+        if encounter_contract.persisted_medication_problem(values) is not None:
+            raise encounter_write.EncounterTargetNotEligible()
+        if gateway.native_encounter_can_write(payload["_native_encounter_id"]) is not True:
+            gateway.deny()
+        if gateway.native_patient_can_read(native_patient_id) is not True:
+            gateway.deny()
+        _require_budget(gateway, kind)
+    except BaseException:
+        _release_read_locks(gateway)
+        raise
+    return state
+
+
+def _draft_native_write(
+    gateway,
+    payload,
+    *,
+    alias,
+    is_create,
+    kind,
+    locked_state,
+    claim,
+):
+    """Run the already-dispatched draft write under the held lease.
+
+    Every refusal has happened before the dispatch, so an exception here means a
+    native write may be in flight — exactly when the key must stay DISPATCHED.
+    """
+
+    try:
+        if is_create:
+            native_id = gateway.create_native_encounter_draft(payload)
+        else:
+            gateway.save_native_encounter_draft(locked_state, payload)
+            native_id = payload["_native_encounter_id"]
+        receipt = _finish_fence(gateway, claim, kind, alias, native_id)
+    except encounter_write.EncounterTargetNotEligible:
+        _rollback_or_raise(gateway)
+        raise
+    except encounter_write.EncounterBudgetExhausted:
+        _rollback_or_raise(gateway)
+        raise
+    except (
+        patient_write.WriteLocked,
+        patient_write.WriteConflict,
+        patient_write.StoreUnavailable,
+        patient_write.WriteUncertain,
+        patient_write.UnsafeSideEffect,
+    ):
+        _rollback_or_raise(gateway)
+        raise
+    except Exception:
+        _mark_unknown(
+            claim, "native Patient Encounter draft outcome not established"
+        )
+        _rollback_or_raise(gateway)
+        raise patient_write.WriteUncertain() from None
+    except BaseException:
+        # An interrupt is not an established outcome: attempt the native rollback
+        # while the lease is still held, then let it propagate. The durable key
+        # stays DISPATCHED — no auto-unlock, no retry, no terminal rewrite.
+        _release_read_locks(gateway)
+        raise
+    return receipt
 
 def save_draft(gateway, body, csrf_token=None):
     """Create or update a draft encounter (roles DOC; NUR vitals only)."""
@@ -426,6 +600,24 @@ def save_draft(gateway, body, csrf_token=None):
     if problem is not None:
         gateway.deny()
 
+    # Medication rows stay outside the reviewed contract: the installed
+    # ``Drug Prescription.dosage_form`` is required and the payload cannot supply
+    # it. Refusing here keeps a dispatch that would fail inside the fence from
+    # latching the site. Emptying the section is not a way in either: the
+    # normaliser has already produced a sequence, and anything non-empty refuses.
+    if (
+        encounter_contract.medication_problem(payload["fields"])
+        is not None
+    ):
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    # A requested note is a separate Clinical Note insert after the encounter
+    # write. Without the actor's own Clinical Note create authority that insert
+    # would fail inside the fence and latch the site, so the refusal is here.
+    if encounter_contract.build_note_text(payload["fields"].get("note")):
+        if gateway.native_clinical_note_can_create() is not True:
+            gateway.deny()
+
     actor = view.user
     native_patient_id = _resolve_patient_or_deny(
         gateway, settings, payload["workspace_patient_id"]
@@ -436,6 +628,7 @@ def save_draft(gateway, body, csrf_token=None):
     native_encounter_id = None
     native_appointment_id = None
     appointment_detail = None
+    appointment_type = None
 
     if is_create:
         try:
@@ -459,6 +652,21 @@ def save_draft(gateway, body, csrf_token=None):
             return _locked_response(gateway)
         if gateway.native_appointment_can_write(native_appointment_id) is not True:
             gateway.deny()
+        # ``Patient Encounter.appointment_type`` is installed required and is
+        # derived from the linked booking, never from the client.
+        appointment_type = gateway.native_appointment_encounter_type(
+            native_appointment_id
+        )
+        if (
+            encounter_contract.create_target_problem(
+                {
+                    "appointment": native_appointment_id,
+                    "appointment_type": appointment_type,
+                }
+            )
+            is not None
+        ):
+            return _locked_response(gateway)
     else:
         try:
             native_encounter_id = _resolve_target(
@@ -494,6 +702,13 @@ def save_draft(gateway, body, csrf_token=None):
             return _locked_response(gateway)
         if encounter_contract.draft_target_problem(detail) is not None:
             return _locked_response(gateway)
+        if (
+            encounter_contract.persisted_medication_problem(detail)
+            is not None
+        ):
+            # Rows a native user added are neither rewritable nor deletable by
+            # this contract, so the target is refused instead of dropping them.
+            return _locked_response(gateway)
         if gateway.native_encounter_can_write(native_encounter_id) is not True:
             gateway.deny()
 
@@ -517,22 +732,37 @@ def save_draft(gateway, body, csrf_token=None):
     payload["_digest"] = digest
     payload["_native_patient_id"] = native_patient_id
     payload["_native_appointment_id"] = native_appointment_id
+    payload["_appointment_type"] = appointment_type
     if not is_create:
         payload["_native_encounter_id"] = native_encounter_id
 
+    kind = encounter_contract.ENCOUNTER_DRAFT_KIND
     try:
-        receipt = _draft_fence_body(
-            gateway,
-            settings,
-            view,
-            payload,
-            native_patient_id,
-            alias=alias,
-            is_create=is_create,
-            native_appointment_id=native_appointment_id,
-            kind=encounter_contract.ENCOUNTER_DRAFT_KIND,
-            csrf_token=csrf_token,
-        )
+        with gateway.encounter_write_lease(
+            actor, kind, payload["operation_key"], digest
+        ) as lease:
+            locked_state = _draft_volatile_decision(
+                gateway,
+                payload,
+                native_patient_id,
+                view=view,
+                is_create=is_create,
+                native_appointment_id=native_appointment_id,
+                kind=kind,
+                csrf_token=csrf_token,
+                expected_secret=settings.epoch_secret,
+                cross_actor=role == "NUR" and not is_create,
+            )
+            claim = _dispatch(lease, gateway)
+            receipt = _draft_native_write(
+                gateway,
+                payload,
+                alias=alias,
+                is_create=is_create,
+                kind=kind,
+                locked_state=locked_state,
+                claim=claim,
+            )
     except encounter_write.EncounterTargetNotEligible:
         return _locked_response(gateway)
     except encounter_write.EncounterBudgetExhausted:
@@ -574,6 +804,142 @@ def save_draft(gateway, body, csrf_token=None):
         return _locked_response(gateway)
 
 
+def _completion_volatile_decision(
+    gateway,
+    payload,
+    native_encounter_id,
+    *,
+    view,
+    kind,
+    csrf_token,
+    expected_patient,
+    expected_secret,
+):
+    """Decide the completion under row locks, before the dispatch.
+
+    Same reason as :func:`_draft_volatile_decision`: ``Lease.dispatch`` is what
+    records ``DISPATCHED``, so a booking or medication race detected after it
+    would block the whole site without a single native write. The site
+    configuration is reloaded and the full gate re-read against a restarted
+    snapshot, the encounter row and then its linked booking are locked ``FOR
+    UPDATE`` and revalidated here, and the write and read authority the submit
+    needs is re-checked on the locked row. The status that decides the cascade
+    comes from the locked booking, never from the pre-lease read.
+    """
+
+    gateway.refresh_site_config()
+    gateway.reset_native_read_snapshot()
+    fence_settings, fence_view, fence_role = _shared_gate(gateway, csrf_token)
+    if fence_view.user != view.user:
+        raise patient_write.WriteUncertain()
+    _require_fresh_role(gateway, fence_settings, fence_view, fence_role)
+    if fence_settings.epoch_secret != expected_secret:
+        raise patient_write.UnsafeSideEffect("configured epoch secret changed")
+    if fence_role not in ENCOUNTER_COMPLETE_ROLE_CODES:
+        gateway.deny()
+    if gateway.healthcare_encounter_side_effects_unsafe() is not False:
+        gateway.deny()
+
+    try:
+        state = gateway.lock_encounter_target(native_encounter_id, None)
+        values = _values(state)
+        # The identity the request resolved is not authority: a concurrent
+        # rebind of the encounter to another patient changes what would be
+        # submitted, so it is refused rather than completed.
+        if values["patient"] != expected_patient:
+            raise patient_write.UnsafeSideEffect("target patient changed")
+        if encounter_contract.persisted_medication_problem(values) is not None:
+            raise encounter_write.EncounterTargetNotEligible()
+        if encounter_contract.complete_target_problem(values) is not None:
+            raise encounter_write.EncounterTargetNotEligible()
+        booking = gateway.lock_linked_appointment_for_read(values.get("appointment"))
+        if booking is None:
+            raise patient_write.UnsafeSideEffect(
+                "linked booking is not readable under the lock"
+            )
+        if booking.get("patient") != values["patient"]:
+            raise patient_write.UnsafeSideEffect("linked booking patient changed")
+        locked_values = {
+            **values,
+            "appointment_status": booking.get("status"),
+        }
+        if encounter_contract.complete_target_problem(locked_values) is not None:
+            raise encounter_write.EncounterTargetNotEligible()
+        if (
+            encounter_contract.completion_problems(
+                {**values, "allergy_reviewed": payload["allergy_reviewed"]}
+            )
+        ):
+            raise encounter_write.EncounterTargetNotEligible()
+        # The cascade expectation is a decision, not a postcondition: an
+        # unreadable row count must refuse here instead of becoming an
+        # uncertainty after the submit.
+        if encounter_contract.expected_service_requests(values) is None:
+            raise encounter_write.EncounterTargetNotEligible()
+        if gateway.native_encounter_can_write(native_encounter_id) is not True:
+            gateway.deny()
+        if gateway.native_patient_can_read(values["patient"]) is not True:
+            gateway.deny()
+        _require_budget(gateway, kind)
+    except BaseException:
+        _release_read_locks(gateway)
+        raise
+    return state
+
+
+def _complete_native_write(
+    gateway,
+    native_encounter_id,
+    *,
+    alias,
+    kind,
+    locked_state,
+    baseline,
+    claim,
+):
+    """Run the already-dispatched submit and its closed-world cascade check."""
+
+    try:
+        values = _values(locked_state)
+        expected = encounter_contract.expected_service_requests(values)
+        gateway.submit_native_encounter(locked_state)
+        cascade = gateway.native_encounter_cascade_detail(
+            native_encounter_id, baseline
+        )
+        if encounter_contract.cascade_problem(cascade, expected) is not None:
+            raise patient_write.WriteUncertain()
+        receipt = _finish_fence(gateway, claim, kind, alias, native_encounter_id)
+    except encounter_write.EncounterTargetNotEligible:
+        _rollback_or_raise(gateway)
+        raise
+    except encounter_write.EncounterBudgetExhausted:
+        _rollback_or_raise(gateway)
+        raise
+    except (
+        patient_write.WriteLocked,
+        patient_write.WriteConflict,
+        patient_write.StoreUnavailable,
+        patient_write.WriteUncertain,
+        patient_write.UnsafeSideEffect,
+    ):
+        _rollback_or_raise(gateway)
+        raise
+    except Exception:
+        _mark_unknown(
+            claim,
+            "native Patient Encounter complete outcome not established",
+        )
+        _rollback_or_raise(gateway)
+        raise patient_write.WriteUncertain() from None
+    except BaseException:
+        # An interrupt is not an established outcome: attempt the native rollback
+        # while the lease is still held, then let it propagate. The durable key
+        # stays DISPATCHED — no auto-unlock, no retry, no terminal rewrite.
+        _release_read_locks(gateway)
+        raise
+    return receipt
+
+
 def complete(gateway, body, csrf_token=None):
     """Submit a draft encounter and verify the expected native cascade (DOC)."""
 
@@ -604,6 +970,10 @@ def complete(gateway, body, csrf_token=None):
     if detail is None:
         gateway.deny()
     if encounter_contract.complete_target_problem(detail) is not None:
+        return _locked_response(gateway)
+    if encounter_contract.persisted_medication_problem(detail) is not None:
+        # A submitted encounter would carry medication rows this contract can
+        # neither complete nor remove. Refuse the target, never delete the rows.
         return _locked_response(gateway)
     if gateway.native_encounter_can_write(native_encounter_id) is not True:
         gateway.deny()
@@ -647,67 +1017,29 @@ def complete(gateway, body, csrf_token=None):
 
     kind = encounter_contract.ENCOUNTER_COMPLETE_KIND
     try:
-        with gateway.encounter_write_fence(
+        with gateway.encounter_write_lease(
             actor, kind, payload["operation_key"], digest
-        ) as claim:
-            try:
-                _require_budget(gateway, kind)
-                gateway.reset_native_read_snapshot()
-                fence_settings, fence_view, fence_role = _shared_gate(
-                    gateway, csrf_token
-                )
-                if fence_view.user != actor:
-                    raise patient_write.WriteUncertain()
-                if fence_role not in ENCOUNTER_COMPLETE_ROLE_CODES:
-                    gateway.deny()
-                state = gateway.lock_encounter_target(
-                    native_encounter_id, None
-                )
-                values = _values(state)
-                if values["patient"] != detail.get("patient"):
-                    raise patient_write.UnsafeSideEffect("target patient changed")
-                if encounter_contract.complete_target_problem(values) is not None:
-                    raise encounter_write.EncounterTargetNotEligible()
-                problems = encounter_contract.completion_problems(
-                    {**values, "allergy_reviewed": payload["allergy_reviewed"]}
-                )
-                if problems:
-                    raise encounter_write.EncounterTargetNotEligible()
-                expected = encounter_contract.expected_service_requests(values)
-                gateway.submit_native_encounter(state)
-                cascade = gateway.native_encounter_cascade_detail(
-                    native_encounter_id, baseline
-                )
-                if (
-                    encounter_contract.cascade_problem(cascade, expected)
-                    is not None
-                ):
-                    raise patient_write.WriteUncertain()
-                receipt = _finish_fence(
-                    gateway, claim, kind, alias, native_encounter_id
-                )
-            except encounter_write.EncounterTargetNotEligible:
-                _rollback_or_raise(gateway)
-                raise
-            except encounter_write.EncounterBudgetExhausted:
-                _rollback_or_raise(gateway)
-                raise
-            except (
-                patient_write.WriteLocked,
-                patient_write.WriteConflict,
-                patient_write.StoreUnavailable,
-                patient_write.WriteUncertain,
-                patient_write.UnsafeSideEffect,
-            ):
-                _rollback_or_raise(gateway)
-                raise
-            except Exception:
-                _mark_unknown(
-                    claim,
-                    "native Patient Encounter complete outcome not established",
-                )
-                _rollback_or_raise(gateway)
-                raise patient_write.WriteUncertain() from None
+        ) as lease:
+            locked_state = _completion_volatile_decision(
+                gateway,
+                payload,
+                native_encounter_id,
+                view=view,
+                kind=kind,
+                csrf_token=csrf_token,
+                expected_patient=detail.get("patient"),
+                expected_secret=settings.epoch_secret,
+            )
+            claim = _dispatch(lease, gateway)
+            receipt = _complete_native_write(
+                gateway,
+                native_encounter_id,
+                alias=alias,
+                kind=kind,
+                locked_state=locked_state,
+                baseline=baseline,
+                claim=claim,
+            )
     except encounter_write.EncounterTargetNotEligible:
         return _locked_response(gateway)
     except encounter_write.EncounterBudgetExhausted:
@@ -744,6 +1076,139 @@ def complete(gateway, body, csrf_token=None):
             "post-commit encounter completion response construction failed",
         )
         return _locked_response(gateway)
+
+
+def _amend_volatile_decision(
+    gateway,
+    payload,
+    native_encounter_id,
+    *,
+    view,
+    kind,
+    csrf_token,
+    expected_patient,
+    expected_secret,
+):
+    """Decide the amendment under the encounter row lock, before the dispatch.
+
+    The addendum is a separate Clinical Note insert, so the target decision is
+    the only fallible step. It is taken here for the same reason as the draft and
+    completion paths: a race detected after ``dispatch`` would leave the key
+    ``DISPATCHED`` and lock the site with no native write behind it. The site
+    configuration is reloaded and the full gate re-read against a restarted
+    snapshot, and the write, read and Clinical Note create authority the addendum
+    needs is re-checked under the held lease.
+    """
+
+    gateway.refresh_site_config()
+    gateway.reset_native_read_snapshot()
+    fence_settings, fence_view, fence_role = _shared_gate(
+        gateway, csrf_token
+    )
+    if fence_view.user != view.user:
+        raise patient_write.WriteUncertain()
+    _require_fresh_role(gateway, fence_settings, fence_view, fence_role)
+    if fence_settings.epoch_secret != expected_secret:
+        raise patient_write.UnsafeSideEffect("configured epoch secret changed")
+    if fence_role not in ENCOUNTER_AMEND_ROLE_CODES:
+        gateway.deny()
+    if gateway.healthcare_encounter_side_effects_unsafe() is not False:
+        gateway.deny()
+
+    try:
+        state = gateway.lock_encounter_target(native_encounter_id, None)
+        values = _values(state)
+        if values["patient"] != expected_patient:
+            raise patient_write.UnsafeSideEffect("target patient changed")
+        if encounter_contract.amend_target_problem(values) is not None:
+            raise encounter_write.EncounterTargetNotEligible()
+        if gateway.native_encounter_can_write(native_encounter_id) is not True:
+            gateway.deny()
+        if gateway.native_patient_can_read(values.get("patient")) is not True:
+            gateway.deny()
+        if gateway.native_clinical_note_can_create() is not True:
+            gateway.deny()
+        _require_budget(gateway, kind)
+    except BaseException:
+        _release_read_locks(gateway)
+        raise
+    return state
+
+
+def _amend_native_write(
+    gateway,
+    native_encounter_id,
+    *,
+    actor,
+    alias,
+    kind,
+    expected_note,
+    locked_state,
+    claim,
+):
+    """Insert the dispatched addendum and re-verify the never-rewrite preimages.
+
+    The preimages come from the locked row, not from the pre-lease read: an
+    ordinary concurrent edit before this operation took the lock must not be
+    reported as an uncertainty after dispatch.
+    """
+
+    locked_values = _values(locked_state)
+    encounter_modified = locked_values["modified"]
+    original_note_modified = locked_values["clinical_note_modified"]
+    try:
+        addendum_id = gateway.create_native_clinical_note_addendum(
+            locked_state, expected_note, actor
+        )
+        facts = gateway.native_encounter_amend_facts(
+            native_encounter_id,
+            addendum_id,
+            expected_note,
+            locked_values["clinical_note"],
+            original_note_modified,
+        )
+        if (
+            encounter_contract.amend_postcondition_problem(
+                encounter_modified=facts.get("encounter_modified"),
+                expected_encounter_modified=encounter_modified,
+                clinical_note_modified=facts.get("clinical_note_modified"),
+                original_note_modified=original_note_modified,
+                addendum_created=facts.get("addendum_created"),
+                expected_note=facts.get("addendum_note"),
+            )
+            is not None
+        ):
+            raise patient_write.WriteUncertain()
+        receipt = _finish_fence(gateway, claim, kind, alias, native_encounter_id)
+    except encounter_write.EncounterTargetNotEligible:
+        _rollback_or_raise(gateway)
+        raise
+    except encounter_write.EncounterBudgetExhausted:
+        _rollback_or_raise(gateway)
+        raise
+    except (
+        patient_write.WriteLocked,
+        patient_write.WriteConflict,
+        patient_write.StoreUnavailable,
+        patient_write.WriteUncertain,
+        patient_write.UnsafeSideEffect,
+    ):
+        _rollback_or_raise(gateway)
+        raise
+    except Exception:
+        _mark_unknown(
+            claim,
+            "native Clinical Note addendum outcome not established",
+        )
+        _rollback_or_raise(gateway)
+        raise patient_write.WriteUncertain() from None
+    except BaseException:
+        # An interrupt is not an established outcome: attempt the native rollback
+        # while the lease is still held, then let it propagate. The durable key
+        # stays DISPATCHED — no auto-unlock, no retry, no terminal rewrite.
+        _release_read_locks(gateway)
+        raise
+    return receipt
 
 
 def amend(gateway, body, csrf_token=None):
@@ -800,74 +1265,32 @@ def amend(gateway, body, csrf_token=None):
         return _locked_response(gateway)
 
     expected_note = encounter_contract.addendum_note(actor, payload["addendum"])
-    original_note_modified = detail.get("clinical_note_modified")
-    encounter_modified = detail.get("modified")
 
     try:
-        with gateway.encounter_write_fence(
+        with gateway.encounter_write_lease(
             actor, kind, payload["operation_key"], digest
-        ) as claim:
-            try:
-                _require_budget(gateway, kind)
-                gateway.reset_native_read_snapshot()
-                fence_settings, fence_view, fence_role = _shared_gate(
-                    gateway, csrf_token
-                )
-                if fence_view.user != actor:
-                    raise patient_write.WriteUncertain()
-                if fence_role not in complete_roles:
-                    gateway.deny()
-                state = gateway.lock_encounter_target(native_encounter_id, None)
-                values = _values(state)
-                if encounter_contract.amend_target_problem(values) is not None:
-                    raise encounter_write.EncounterTargetNotEligible()
-                addendum_id = gateway.create_native_clinical_note_addendum(
-                    state, expected_note, actor
-                )
-                facts = gateway.native_encounter_amend_facts(
-                    native_encounter_id,
-                    addendum_id,
-                    expected_note,
-                    detail.get("clinical_note"),
-                    original_note_modified,
-                )
-                if (
-                    encounter_contract.amend_postcondition_problem(
-                        encounter_modified=facts.get("encounter_modified"),
-                        expected_encounter_modified=encounter_modified,
-                        clinical_note_modified=facts.get("clinical_note_modified"),
-                        original_note_modified=original_note_modified,
-                        addendum_created=facts.get("addendum_created"),
-                        expected_note=facts.get("addendum_note"),
-                    )
-                    is not None
-                ):
-                    raise patient_write.WriteUncertain()
-                receipt = _finish_fence(
-                    gateway, claim, kind, alias, native_encounter_id
-                )
-            except encounter_write.EncounterTargetNotEligible:
-                _rollback_or_raise(gateway)
-                raise
-            except encounter_write.EncounterBudgetExhausted:
-                _rollback_or_raise(gateway)
-                raise
-            except (
-                patient_write.WriteLocked,
-                patient_write.WriteConflict,
-                patient_write.StoreUnavailable,
-                patient_write.WriteUncertain,
-                patient_write.UnsafeSideEffect,
-            ):
-                _rollback_or_raise(gateway)
-                raise
-            except Exception:
-                _mark_unknown(
-                    claim,
-                    "native Clinical Note addendum outcome not established",
-                )
-                _rollback_or_raise(gateway)
-                raise patient_write.WriteUncertain() from None
+        ) as lease:
+            locked_state = _amend_volatile_decision(
+                gateway,
+                payload,
+                native_encounter_id,
+                view=view,
+                kind=kind,
+                csrf_token=csrf_token,
+                expected_patient=detail.get("patient"),
+                expected_secret=settings.epoch_secret,
+            )
+            claim = _dispatch(lease, gateway)
+            receipt = _amend_native_write(
+                gateway,
+                native_encounter_id,
+                actor=actor,
+                alias=alias,
+                kind=kind,
+                expected_note=expected_note,
+                locked_state=locked_state,
+                claim=claim,
+            )
     except encounter_write.EncounterTargetNotEligible:
         return _locked_response(gateway)
     except encounter_write.EncounterBudgetExhausted:

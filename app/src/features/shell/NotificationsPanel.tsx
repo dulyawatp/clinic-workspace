@@ -8,6 +8,7 @@ import { StatePanel } from "../../ui/StatePanel";
 import { useCapabilities } from "./CapabilityProvider";
 import { navFor } from "./nav";
 import { useWorkItems } from "./useWorkItems";
+import { WorkItemsError } from "./WorkItemsError";
 
 export function NotificationsPanel({
   onNavigate,
@@ -51,13 +52,11 @@ export function NotificationsPanel({
       {status === "loading" || status === "error" ? (
         <SessionCheckPanel />
       ) : status !== "authenticated" ? null : query.isError ? (
-        <StatePanel
-          kind="error"
-          title={t("errors.UPSTREAM_UNAVAILABLE")}
+        <WorkItemsError
+          error={query.error}
           onRetry={() => {
             void query.refetch();
           }}
-          retryLabel={t("action.retry")}
         />
       ) : query.isPending ? (
         <StatePanel kind="loading" title={t("common.loading")} />

@@ -134,7 +134,7 @@ import sqlite3
 import stat
 import uuid
 from collections.abc import Mapping
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -366,6 +366,8 @@ __all__ = [
     "FenceReleased",
     "FINANCE_OPERATION_KINDS",
     "InvalidOperation",
+    "Lease",
+    "LeaseConsumed",
     "Ledger",
     "LedgerInfo",
     "LATCH_ACTOR",
@@ -471,6 +473,10 @@ class FenceReleased(FenceError):
 
 class UnterminatedFence(FenceError):
     """The fenced body exited without a terminal record."""
+
+
+class LeaseConsumed(FenceError):
+    """The lease already attempted its single dispatch."""
 
 
 @dataclass(frozen=True)
@@ -1597,6 +1603,51 @@ class Ledger:
             _release_lock(lock_fd)
             os.close(directory_fd)
 
+    @contextmanager
+    def lease(self, *, actor, kind, operation_key, payload_digest):
+        """Hold the fence lock without appending; ``dispatch()`` claims once.
+
+        Nothing is written until ``Lease.dispatch`` is called, which rechecks
+        the latch under the held lock. Each lease allows one dispatch attempt.
+        The lock is released only when the lease exits.
+
+        The latch is checked on entry and again immediately before the first
+        append. Writing the latch from another process is not coordinated with
+        the append, so a latch created in that last window may not prevent
+        this operation from dispatching or completing. The latch remains
+        independent of the operation's terminal state.
+        """
+
+        actor = _require_actor(actor)
+        kind = _require_kind(kind)
+        operation_key = _require_operation_key(operation_key)
+        digest = _require_digest(payload_digest)
+        lock_fd, directory_fd = self._acquire_lock()
+        try:
+            self._require_no_latch(directory_fd)
+            lease = Lease(
+                ledger=self,
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                payload_digest=digest,
+                directory_fd=directory_fd,
+            )
+            try:
+                yield lease
+            except BaseException:
+                lease._close()
+                raise
+            else:
+                lease._close()
+                if lease._claim is not None and lease._claim.terminal_sequence is None:
+                    raise UnterminatedFence(
+                        "leased body exited without a terminal record"
+                    )
+        finally:
+            _release_lock(lock_fd)
+            os.close(directory_fd)
+
     # -- internals -----------------------------------------------------
 
     def _try_latch_file(self, reason):
@@ -1808,6 +1859,110 @@ class Ledger:
         except BaseException:
             os.close(directory_fd)
             raise
+
+
+class Lease:
+    """A held fence lock that appends nothing until ``dispatch()`` is called.
+
+    Created only by :meth:`Ledger.lease`. ``dispatch`` may be attempted once;
+    the attempt is consumed even when it fails.
+    """
+
+    __slots__ = (
+        "_ledger",
+        "_actor",
+        "_kind",
+        "_operation_key",
+        "_payload_digest",
+        "_directory_fd",
+        "_stack",
+        "_claim",
+        "_attempted",
+        "_open",
+    )
+
+    def __init__(
+        self,
+        *,
+        ledger,
+        actor,
+        kind,
+        operation_key,
+        payload_digest,
+        directory_fd,
+    ):
+        self._ledger = ledger
+        self._actor = actor
+        self._kind = kind
+        self._operation_key = operation_key
+        self._payload_digest = payload_digest
+        self._directory_fd = directory_fd
+        self._stack = None
+        self._claim = None
+        self._attempted = False
+        self._open = True
+
+    def dispatch(self):
+        """Claim the key under the held lock and return its :class:`Claim`.
+
+        The latch is rechecked under the held lock as late as the claim allows,
+        but a latch written by an independent process between the last check
+        and the append cannot be refused without cross-process coordination;
+        that case is detected later, never silently dropped.
+        """
+
+        if not self._open:
+            raise FenceReleased("the write fence lease is released")
+        if self._attempted:
+            raise LeaseConsumed("this lease already attempted its dispatch")
+        self._attempted = True
+        self._ledger._require_no_latch(self._directory_fd)
+        stack = ExitStack()
+        # Publish ownership before any resource is acquired so a BaseException
+        # anywhere in the handoff tears the stack down; relying on garbage
+        # collection would leak the connection while a traceback retains it.
+        self._stack = stack
+        try:
+            connection = stack.enter_context(
+                self._ledger._connection(self._directory_fd)
+            )
+            # Closest feasible recheck to the first append: an independent actor
+            # can write the latch after the store was verified and before the
+            # claim. This narrows the window but cannot close it, because the
+            # latch write and the append are not coordinated across processes.
+            self._ledger._require_no_latch(self._directory_fd)
+            claim = self._ledger._claim(
+                connection,
+                self._actor,
+                self._kind,
+                self._operation_key,
+                self._payload_digest,
+            )
+            self._claim = claim
+            claim._attach(self._directory_fd)
+        except BaseException:
+            self._teardown()
+            raise
+        return claim
+
+    def _teardown(self):
+        """Release the claim and close the stack; safe to call repeatedly."""
+
+        claim, stack = self._claim, self._stack
+        self._claim = None
+        self._stack = None
+        if claim is not None:
+            claim._release()
+        if stack is not None:
+            stack.close()
+
+    def _close(self):
+        self._open = False
+        claim = self._claim
+        self._teardown()
+        # Keep the released claim: ``Ledger.lease`` reads its terminal sequence
+        # to tell an unterminated dispatch from one that was never attempted.
+        self._claim = claim
 
 
 class Claim:

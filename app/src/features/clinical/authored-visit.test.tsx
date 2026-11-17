@@ -325,7 +325,7 @@ it("reports a refused native save without retrying", async () => {
   posts.stop();
 });
 
-it("authors medication and lab rows into the native draft payload", async () => {
+it("explains native medication deferral and allows lab entry without sending medication rows", async () => {
   vi.stubEnv("VITE_CLINIC_NATIVE", "1");
   const user = userEvent.setup();
   let body: Record<string, unknown> | null = null;
@@ -359,14 +359,12 @@ it("authors medication and lab rows into the native draft payload", async () => 
   });
 
   await user.click(await screen.findByRole("tab", { name: /ยา|medication/i }));
-  await user.click(
-    await screen.findByRole("button", { name: "เพิ่มยา" }),
+  expect(await screen.findByText(/ไม่สามารถสั่งยา/)).toBeVisible();
+  expect(screen.getByText(/รายการยาเดิมจะไม่แสดง/)).toHaveTextContent(
+    "การตรวจที่มีรายการยาเดิมไม่สามารถบันทึกหรือจบการตรวจในหน้านี้ได้ โปรดขอความช่วยเหลือจากเจ้าหน้าที่",
   );
-  await user.type(
-    screen.getByLabelText("รหัสยา"),
-    "DRUG-1",
-  );
-  await user.type(screen.getByLabelText("ขนาดยา"), "1 tab");
+  expect(screen.queryByRole("button", { name: "เพิ่มยา" })).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("รหัสยา")).not.toBeInTheDocument();
 
   await user.click(screen.getByRole("tab", { name: /ผลแล็บ|lab/i }));
   await user.click(
@@ -377,7 +375,7 @@ it("authors medication and lab rows into the native draft payload", async () => 
   await user.click(screen.getByRole("button", { name: "บันทึกฉบับร่าง" }));
   await waitFor(() => expect(body).not.toBeNull());
   expect(body).toMatchObject({
-    medications: [{ drug_code: "DRUG-1", dosage: "1 tab" }],
+    medications: [],
     lab_tests: [{ lab_test_code: "CBC" }],
     procedures: [],
   });

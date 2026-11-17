@@ -22,6 +22,7 @@ def installed_fields(*, drug_field="drug_code", lab_field="lab_test_code"):
                 "practitioner",
                 "encounter_date",
                 "appointment",
+                "appointment_type",
                 "symptoms",
                 "diagnosis",
                 "drug_prescription",
@@ -34,8 +35,8 @@ def installed_fields(*, drug_field="drug_code", lab_field="lab_test_code"):
                 "patient",
                 "practitioner",
                 "note",
-                "reference_doctype",
-                "reference_docname",
+                "reference_doc",
+                "reference_name",
             ),
             "Vital Signs": (
                 "patient",
@@ -48,7 +49,7 @@ def installed_fields(*, drug_field="drug_code", lab_field="lab_test_code"):
                 "weight",
             ),
             "Service Request": ("patient", "status"),
-            "Complaint Detail": ("complaint",),
+            "Patient Encounter Symptom": ("complaint",),
             "Patient Encounter Diagnosis": ("diagnosis",),
             "Lab Prescription": (lab_field,),
             "Procedure Prescription": ("procedure",),
@@ -56,6 +57,70 @@ def installed_fields(*, drug_field="drug_code", lab_field="lab_test_code"):
     }
     fields["Drug Prescription"] = {drug_field, "dosage", "period"}
     return fields
+
+
+def installed_shapes(
+    *,
+    symptom_type="Table MultiSelect",
+    symptom_child="Patient Encounter Symptom",
+    note_pair=("reference_doc", "reference_name"),
+):
+    """The installed healthcare v16.6.1 metadata, fieldname -> (type, options).
+
+    This is the shape ``frappe.get_meta(doctype).fields`` carries: scalar fields,
+    Table fields and default columns (``modified`` has no DocField row, so its
+    shape is unknown).
+    """
+
+    return {
+        "Patient Encounter": {
+            "patient": ("Link", "Patient"),
+            "practitioner": ("Link", "Healthcare Practitioner"),
+            "encounter_date": ("Date", None),
+            "appointment": ("Link", "Patient Appointment"),
+            "appointment_type": ("Link", "Appointment Type"),
+            "symptoms": (symptom_type, symptom_child),
+            "diagnosis": ("Table MultiSelect", "Patient Encounter Diagnosis"),
+            "drug_prescription": ("Table", "Drug Prescription"),
+            "lab_test_prescription": ("Table", "Lab Prescription"),
+            "procedure_prescription": ("Table", "Procedure Prescription"),
+            "status": ("Select", "\nOpen\nOrdered\nCompleted\nCancelled"),
+            "modified": (None, None),
+        },
+        "Clinical Note": {
+            "patient": ("Link", "Patient"),
+            "practitioner": ("Link", "Healthcare Practitioner"),
+            "note": ("Text Editor", None),
+            note_pair[0]: ("Link", "DocType"),
+            note_pair[1]: ("Dynamic Link", note_pair[0]),
+        },
+        "Vital Signs": {
+            "patient": ("Link", "Patient"),
+            "temperature": ("Float", None),
+            "pulse": ("Int", None),
+            "respiratory_rate": ("Int", None),
+            "bp_systolic": ("Int", None),
+            "bp_diastolic": ("Int", None),
+            "height": ("Float", None),
+            "weight": ("Float", None),
+        },
+        "Service Request": {
+            "patient": ("Link", "Patient"),
+            "status": ("Select", "\nDraft\nActive\nCompleted"),
+        },
+        "Patient Encounter Symptom": {"complaint": ("Link", "Complaint")},
+        "Patient Encounter Diagnosis": {"diagnosis": ("Link", "Diagnosis")},
+        "Drug Prescription": {
+            "drug_code": ("Link", "Item"),
+            "dosage": ("Link", "Prescription Dosage"),
+            "period": ("Link", "Prescription Duration"),
+            "dosage_form": ("Link", "Dosage Form"),
+        },
+        "Lab Prescription": {"lab_test_code": ("Link", "Lab Test Template")},
+        "Procedure Prescription": {
+            "procedure": ("Link", "Clinical Procedure Template")
+        },
+    }
 
 
 class InstallPreflightTests(unittest.TestCase):
@@ -87,6 +152,199 @@ class InstallPreflightTests(unittest.TestCase):
         del fields["Vital Signs"]
         self.assertEqual(
             contract.install_problem(fields), "missing DocType Vital Signs"
+        )
+
+
+class InstalledShapeTests(unittest.TestCase):
+    """The installed metadata is typed: a name-only set cannot prove a table."""
+
+    def test_the_installed_shape_passes(self):
+        self.assertIsNone(contract.install_problem(installed_shapes()))
+
+    def test_the_installed_appointment_type_is_required(self):
+        self.assertIn(
+            "appointment_type",
+            contract.REQUIRED_FIELDS[contract.ENCOUNTER_DOCTYPE],
+        )
+
+    def test_a_scalar_column_with_the_table_name_is_refused(self):
+        self.assertEqual(
+            contract.install_problem(installed_shapes(symptom_type="Data")),
+            "field Patient Encounter.symptoms is not a table field",
+        )
+
+    def test_the_symptom_child_doctype_is_pinned(self):
+        self.assertEqual(
+            contract.install_problem(
+                installed_shapes(symptom_child="Complaint Detail")
+            ),
+            "field Patient Encounter.symptoms child table is not "
+            "Patient Encounter Symptom",
+        )
+
+    def test_the_legacy_complaint_child_alone_is_refused(self):
+        fields = installed_fields()
+        del fields[contract.SYMPTOM_CHILD_DOCTYPE]
+        fields["Complaint Detail"] = {"complaint"}
+        self.assertEqual(
+            contract.install_problem(fields),
+            "missing DocType Patient Encounter Symptom",
+        )
+
+    def test_a_mixed_reference_pair_is_refused(self):
+        """Only a matched pair links a note; a half-legacy mix links nothing."""
+
+        shapes = installed_shapes()
+        note = shapes["Clinical Note"]
+        del note["reference_name"]
+        note["reference_docname"] = ("Dynamic Link", "reference_doc")
+
+        self.assertEqual(
+            contract.install_problem(shapes),
+            "missing field Clinical Note.reference_name",
+        )
+        self.assertEqual(contract.note_reference_fields(shapes), (None, None))
+
+    def test_a_reference_doc_that_is_not_a_doctype_link_is_refused(self):
+        shapes = installed_shapes()
+        shapes["Clinical Note"]["reference_doc"] = ("Data", None)
+
+        self.assertEqual(
+            contract.install_problem(shapes),
+            "field Clinical Note.reference_doc is not a DocType link",
+        )
+        self.assertEqual(contract.note_reference_fields(shapes), (None, None))
+
+    def test_a_reference_name_that_points_at_another_field_is_refused(self):
+        shapes = installed_shapes()
+        shapes["Clinical Note"]["reference_name"] = (
+            "Dynamic Link",
+            "reference_doctype",
+        )
+
+        self.assertEqual(
+            contract.install_problem(shapes),
+            "field Clinical Note.reference_name is not a dynamic link to "
+            "reference_doc",
+        )
+
+    def test_a_reference_name_that_is_not_a_dynamic_link_is_refused(self):
+        shapes = installed_shapes()
+        shapes["Clinical Note"]["reference_name"] = ("Data", None)
+
+        self.assertEqual(
+            contract.install_problem(shapes),
+            "field Clinical Note.reference_name is not a dynamic link to "
+            "reference_doc",
+        )
+
+    def test_the_note_reference_pair_is_the_installed_one(self):
+        self.assertEqual(
+            contract.note_reference_fields(installed_shapes()),
+            ("reference_doc", "reference_name"),
+        )
+
+    def test_the_legacy_note_reference_pair_still_resolves(self):
+        shapes = installed_shapes(
+            note_pair=("reference_doctype", "reference_docname")
+        )
+        self.assertEqual(
+            contract.note_reference_fields(shapes),
+            ("reference_doctype", "reference_docname"),
+        )
+
+
+class MedicationSupportTests(unittest.TestCase):
+    """Medication rows stay outside the reviewed contract.
+
+    ``Drug Prescription.dosage_form`` is installed required and the payload
+    cannot supply it, so a medication-bearing draft would fail after dispatch and
+    latch the site. It is refused before the fence instead.
+    """
+
+    def test_a_medication_bearing_draft_is_refused(self):
+        self.assertEqual(
+            contract.medication_problem(
+                {"medications": [{"drug_code": "DRUG-1"}]}
+            ),
+            "medication rows are outside the reviewed encounter contract",
+        )
+
+    def test_an_empty_medication_section_is_admitted(self):
+        for fields in (
+            {},
+            {"medications": []},
+            {"medications": ()},
+            {"medications": None},
+        ):
+            with self.subTest(fields=fields):
+                self.assertIsNone(contract.medication_problem(fields))
+
+    def test_a_non_sequence_medication_value_is_refused(self):
+        self.assertEqual(
+            contract.medication_problem({"medications": {"drug_code": "D-1"}}),
+            "medication rows are outside the reviewed encounter contract",
+        )
+
+
+class PersistedMedicationTests(unittest.TestCase):
+    """A target that already holds medication rows is refused on the target.
+
+    The reviewed contract cannot write a medication row and must not delete the
+    rows a native user left behind, so the count — not the codes — decides. A
+    blank drug code still counts.
+    """
+
+    def test_a_target_holding_medication_rows_is_refused(self):
+        self.assertEqual(
+            contract.persisted_medication_problem({"medication_count": 1}),
+            "target encounter has existing medication rows",
+        )
+
+    def test_blank_drug_codes_still_count(self):
+        self.assertEqual(
+            contract.persisted_medication_problem(
+                {"medication_count": 2, "medication_codes": ("", None)}
+            ),
+            "target encounter has existing medication rows",
+        )
+
+    def test_a_clean_target_passes(self):
+        self.assertIsNone(
+            contract.persisted_medication_problem({"medication_count": 0})
+        )
+
+    def test_an_unreadable_count_fails_closed(self):
+        for value in (None, "1", -1, True, 1.0):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    contract.persisted_medication_problem(
+                        {"medication_count": value}
+                    ),
+                    "medication row count is unreadable",
+                )
+
+
+class CreateTargetTests(unittest.TestCase):
+    def test_a_create_needs_the_linked_appointments_type(self):
+        self.assertEqual(
+            contract.create_target_problem(
+                {"appointment": "APPT-1", "appointment_type": None}
+            ),
+            "linked appointment has no appointment type",
+        )
+        self.assertEqual(
+            contract.create_target_problem(
+                {"appointment": None, "appointment_type": "APPT-TYPE-1"}
+            ),
+            "draft create has no linked appointment",
+        )
+
+    def test_a_derived_appointment_type_passes(self):
+        self.assertIsNone(
+            contract.create_target_problem(
+                {"appointment": "APPT-1", "appointment_type": "APPT-TYPE-1"}
+            )
         )
 
 

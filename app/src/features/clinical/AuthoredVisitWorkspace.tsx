@@ -62,7 +62,6 @@ export interface NativeVisitBinding {
 function nativePayload(
   values: AuthoredVisitValues,
   rows: {
-    medications: NativeRow[];
     labTests: NativeRow[];
     procedures: NativeRow[];
   },
@@ -90,10 +89,8 @@ function nativePayload(
     diagnoses: diagnosis
       ? [{ diagnosis: values.diagnosisCode.trim() || diagnosis }]
       : [],
-    medications: coded(rows.medications).map((row) => ({
-      drug_code: row.code.trim(),
-      dosage: row.second?.trim() || null,
-    })),
+    // Medication entry is unavailable; the backend guards existing prescription rows.
+    medications: [],
     lab_tests: coded(rows.labTests).map((row) => ({
       lab_test_code: row.code.trim(),
     })),
@@ -253,7 +250,6 @@ export function AuthoredVisitWorkspace({
     native?.baseModified ?? null,
   );
   const [busy, setBusy] = useState(false);
-  const [medicationRows, setMedicationRows] = useState<NativeRow[]>([]);
   const [labRows, setLabRows] = useState<NativeRow[]>([]);
   const [procedureRows, setProcedureRows] = useState<NativeRow[]>([]);
 
@@ -308,7 +304,6 @@ export function AuthoredVisitWorkspace({
       base_modified: baseModified,
       appointment: native.appointmentId ?? null,
       ...nativePayload(values, {
-        medications: medicationRows,
         labTests: labRows,
         procedures: procedureRows,
       }),
@@ -607,19 +602,7 @@ export function AuthoredVisitWorkspace({
         )
       ) : section === "medications" ? (
         native ? (
-          <div className="pc-stack">
-            <NativeRows
-              id="native-medications"
-              labelKey="encounterWrite.medicationCode"
-              secondLabelKey="field.dose"
-              addLabelKey="action.addMedication"
-              emptyKey="clinical.noMedications"
-              rows={medicationRows}
-              onChange={setMedicationRows}
-              disabled={locked || !canDraft}
-            />
-            <p className="clinical-notice">{t("visit.medicationsNotice")}</p>
-          </div>
+          <p className="clinical-notice">{t("encounterWrite.medicationsUnavailable")}</p>
         ) : (
           <div className="pc-stack">
             {!visit || visit.meds.length === 0 ? (

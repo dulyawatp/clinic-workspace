@@ -13,13 +13,24 @@ import { type ReadPage, type ReadParams, readQuery } from "./client";
  * or a late response from the previous session. A 401/403 stays an error state:
  * no retry, no placeholder rows and no fabricated data.
  */
-export function useReadQuery<T>(resource: string, params: ReadParams = {}) {
+export function useReadQuery<T>(
+  resource: string,
+  params: ReadParams = {},
+  options: { suppressAutomaticRefetchOnError?: boolean } = {},
+) {
   const { status, authGeneration } = useSession();
+  const refetchUnlessErrored = options.suppressAutomaticRefetchOnError
+    ? (query: { state: { status: string } }) => query.state.status !== "error"
+    : undefined;
 
   return useQuery<ReadPage<T>, AppError>({
     queryKey: [resource, params, authGeneration],
     enabled: status === "authenticated",
     queryFn: ({ signal }) => readQuery<T>(resource, params, signal),
     retry: false,
+    retryOnMount: options.suppressAutomaticRefetchOnError ? false : undefined,
+    refetchOnMount: refetchUnlessErrored,
+    refetchOnWindowFocus: refetchUnlessErrored,
+    refetchOnReconnect: refetchUnlessErrored,
   });
 }

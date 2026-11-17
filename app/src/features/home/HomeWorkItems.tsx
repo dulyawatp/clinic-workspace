@@ -3,14 +3,12 @@ import { Link } from "react-router-dom";
 import { ROUTES, type StaticRouteKey } from "../../app/routes";
 import { useSession } from "../../app/SessionProvider";
 import { Badge, Card, SampleBanner } from "../../design/components";
-import {
-  getCapability,
-  isCapability,
-} from "../../domain/capability";
+import { getCapability, isCapability } from "../../domain/capability";
 import { StatePanel } from "../../ui/StatePanel";
 import { useCapabilities } from "../shell/CapabilityProvider";
 import { navFor } from "../shell/nav";
 import { useWorkItems } from "../shell/useWorkItems";
+import { WorkItemsError } from "../shell/WorkItemsError";
 import { useWorkItemMarks } from "./useWorkItemMarks";
 
 /**
@@ -57,20 +55,20 @@ export function HomeWorkItems() {
         title={t("shell.notifications")}
         hint={t("roleHome.workItemsHint")}
         actions={
-          <Badge tone={unread > 0 ? "demo" : "neutral"}>
-            {t("roleHome.unread", { count: unread })}
-          </Badge>
+          !query.isError && !query.isPending ? (
+            <Badge tone={unread > 0 ? "demo" : "neutral"}>
+              {t("roleHome.unread", { count: unread })}
+            </Badge>
+          ) : undefined
         }
       >
         <SampleBanner label={t("app.demoTag")} title={t("notif.demoNote")} />
         {query.isError ? (
-          <StatePanel
-            kind="error"
-            title={t("errors.UPSTREAM_UNAVAILABLE")}
+          <WorkItemsError
+            error={query.error}
             onRetry={() => {
               void query.refetch();
             }}
-            retryLabel={t("action.retry")}
           />
         ) : query.isPending ? (
           <StatePanel kind="loading" title={t("common.loading")} />
@@ -92,7 +90,10 @@ export function HomeWorkItems() {
                     onClick={() => markRead(item.id)}
                   >
                     {!read && (
-                      <span className="role-home__unread-dot" aria-hidden="true">
+                      <span
+                        className="role-home__unread-dot"
+                        aria-hidden="true"
+                      >
                         ●
                       </span>
                     )}

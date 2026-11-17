@@ -51,15 +51,41 @@ class FakeLockedState:
 
 
 class FakeClaim:
-    def __init__(self):
+    def __init__(self, call_order=None, label=None):
         self.committed = []
         self.unknowns = []
+        self._call_order = call_order
+        self._label = label
 
     def commit(self, receipt):
+        if self._call_order is not None:
+            self._call_order.append(f"{self._label}_claim_commit")
         self.committed.append(receipt)
 
     def unknown(self, reason):
         self.unknowns.append(reason)
+
+
+class FakeLease:
+    """Stand-in for ``write_fence.Lease``: one dispatch attempt, no records."""
+
+    def __init__(self, gateway):
+        self.gateway = gateway
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def dispatch(self):
+        self.gateway.call_order.append("encounter_dispatch")
+        self.gateway.encounter_lease_dispatches.append(
+            self.gateway.encounter_lease_calls[-1]
+        )
+        if self.gateway.encounter_dispatch_error is not None:
+            raise self.gateway.encounter_dispatch_error
+        return self.gateway.encounter_lease_claim
 
 
 class FakeFence:
@@ -222,6 +248,14 @@ class FakeGateway:
         self.encounter_can_create = True
         self.encounter_can_write = True
         self.clinical_note_can_create = True
+        self.encounter_appointment_type = "APPT-TYPE-1"
+        self.locked_appointment = {
+            "patient": "PAT-1",
+            "status": "Open",
+            "appointment_type": "APPT-TYPE-1",
+        }
+        self.locked_appointment_calls = []
+        self.read_locked_appointment_calls = []
         self.encounter_side_effects_unsafe = False
         self.encounter_details = {}
         self.encounter_action_detail_calls = []
@@ -251,9 +285,22 @@ class FakeGateway:
         self.encounter_ack_calls = []
         self.encounter_ack_status = "acked"
         self.encounter_ack_error = None
-        self.encounter_fence_calls = []
-        self.encounter_fence_claim = FakeClaim()
-        self.encounter_fence_error = None
+        self.encounter_lease_calls = []
+        self.encounter_lease_dispatches = []
+        self.encounter_lease_claim = FakeClaim(call_order=self.call_order, label="encounter")
+        self.encounter_lease_error = None
+        self.encounter_dispatch_error = None
+        self.on_encounter_lease_entered = None
+        self.config_refresh_calls = 0
+        self.stale_read_snapshot = False
+        self.read_snapshot = None
+        # Fresh role read (uncached DB mirror). ``fresh_roles=None`` mirrors the
+        # current session; set a tuple to pin the answer, or the two failure
+        # flags to model an unreadable table.
+        self.fresh_role_calls = []
+        self.fresh_roles = None
+        self.fresh_roles_unreadable = False
+        self.fresh_roles_error = None
 
         # -- procedure write surface --------------------------------------
         self.procedure_boundary_problem = None
@@ -454,7 +501,15 @@ class FakeGateway:
         sequence = self.setting_sequences.get(key)
         if sequence:
             return sequence.pop(0)
+        if self.stale_read_snapshot:
+            if self.read_snapshot is None:
+                self.read_snapshot = dict(self._settings)
+            return self.read_snapshot.get(key)
         return self._settings.get(key)
+
+    def refresh_site_config(self):
+        self.call_order.append("config_refresh")
+        self.config_refresh_calls += 1
 
     def csrf_token(self):
         self.csrf_calls += 1
@@ -579,9 +634,11 @@ class FakeGateway:
             raise self.update_error
 
     def commit(self):
+        self.call_order.append("commit")
         self.commit_calls += 1
 
     def rollback(self):
+        self.call_order.append("rollback")
         self.rollback_calls += 1
 
     def lookup_create_receipt(self, actor, operation_key):
@@ -750,6 +807,24 @@ class FakeGateway:
     def reset_native_read_snapshot(self):
         self.call_order.append("snapshot_reset")
         self.snapshot_resets += 1
+        # A restarted snapshot drops the reads this request already made.
+        self.read_snapshot = None
+
+    def fresh_user_roles(self, user):
+        """Mirror the adapter's uncached ``Has Role`` read."""
+
+        self.call_order.append("fresh_roles_read")
+        self.fresh_role_calls.append(user)
+        if self.fresh_roles_error is not None:
+            raise self.fresh_roles_error
+        if self.fresh_roles_unreadable:
+            return None
+        if self.fresh_roles is not None:
+            return tuple(self.fresh_roles)
+        view = self.current_session
+        if view is None or view.user != user:
+            return ()
+        return tuple(view.roles)
 
     def native_appointment_checkin(self, state, today):
         self.checkin_calls.append((state, today))
@@ -850,6 +925,7 @@ class FakeGateway:
     # -- local encounter write path -------------------------------------
 
     def native_encounter_boundary_problem(self):
+        self.call_order.append("gate_read")
         return self.encounter_boundary_problem
 
     def native_encounter_install_problem(self):
@@ -864,6 +940,31 @@ class FakeGateway:
     def native_clinical_note_can_create(self):
         return self.clinical_note_can_create
 
+    def native_appointment_encounter_type(self, native_appointment_id):
+        self.encounter_appointment_type_calls = getattr(
+            self, "encounter_appointment_type_calls", []
+        )
+        self.encounter_appointment_type_calls.append(native_appointment_id)
+        return self.encounter_appointment_type
+
+    def lock_linked_appointment(self, native_appointment_id):
+        """Stand-in for the FOR UPDATE read: returns the current row or None."""
+
+        self.call_order.append("appointment_lock")
+        self.locked_appointment_calls.append(native_appointment_id)
+        if self.locked_appointment is None:
+            return None
+        return dict(self.locked_appointment)
+
+    def lock_linked_appointment_for_read(self, native_appointment_id):
+        """Stand-in for the read-authority FOR UPDATE lock of the booking."""
+
+        self.call_order.append("appointment_lock")
+        self.read_locked_appointment_calls.append(native_appointment_id)
+        if self.locked_appointment is None:
+            return None
+        return dict(self.locked_appointment)
+
     def healthcare_encounter_side_effects_unsafe(self):
         return self.encounter_side_effects_unsafe
 
@@ -876,6 +977,7 @@ class FakeGateway:
         return dict(value) if value is not None else None
 
     def lock_encounter_target(self, native_encounter_id, base_modified=None):
+        self.call_order.append("encounter_lock")
         self.encounter_lock_calls.append((native_encounter_id, base_modified))
         if self.encounter_lock_error is not None:
             raise self.encounter_lock_error
@@ -885,18 +987,21 @@ class FakeGateway:
         return FakeLockedState(**values)
 
     def create_native_encounter_draft(self, payload):
+        self.call_order.append("encounter_create")
         self.create_encounter_calls.append(dict(payload))
         if self.create_encounter_error is not None:
             raise self.create_encounter_error
         return self.created_encounter_id
 
     def save_native_encounter_draft(self, state, payload):
+        self.call_order.append("encounter_save")
         self.save_encounter_calls.append((state, dict(payload)))
         if self.save_encounter_error is not None:
             raise self.save_encounter_error
         return getattr(state, "native_id", self.created_encounter_id)
 
     def submit_native_encounter(self, state):
+        self.call_order.append("encounter_submit")
         self.submit_encounter_calls.append(state)
         if self.submit_encounter_error is not None:
             raise self.submit_encounter_error
@@ -923,6 +1028,7 @@ class FakeGateway:
         }
 
     def create_native_clinical_note_addendum(self, state, note_text, actor):
+        self.call_order.append("encounter_addendum")
         self.addendum_calls.append((state, note_text, actor))
         if self.addendum_error is not None:
             raise self.addendum_error
@@ -995,14 +1101,16 @@ class FakeGateway:
             raise self.encounter_ack_error
         return self.encounter_ack_status
 
-    def encounter_write_fence(self, actor, kind, operation_key, payload_digest):
-        self.call_order.append("encounter_fence")
-        self.encounter_fence_calls.append(
+    def encounter_write_lease(self, actor, kind, operation_key, payload_digest):
+        self.call_order.append("encounter_lease")
+        self.encounter_lease_calls.append(
             (actor, kind, operation_key, payload_digest)
         )
-        return FakeFence(
-            self.encounter_fence_claim, self.encounter_fence_error
-        )
+        if self.on_encounter_lease_entered is not None:
+            self.on_encounter_lease_entered(self)
+        if self.encounter_lease_error is not None:
+            raise self.encounter_lease_error
+        return FakeLease(self)
 
     def receipt_native_encounter_id(self, receipt):
         from clinic_ui.core import encounter_write

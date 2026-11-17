@@ -36,6 +36,7 @@ from clinic_ui.core import (
     fence_store,
     finance_contract,
     patient_write,
+    policy,
     procedure_contract,
     procedure_write,
     purchase_contract,
@@ -72,6 +73,10 @@ APPOINTMENT_ACTION_RAW_FIELDS = ("invoiced", "paid_amount")
 APPOINTMENT_ACTION_FIELDS = (
     APPOINTMENT_ACTION_TEXT_FIELDS + APPOINTMENT_ACTION_RAW_FIELDS
 )
+# The linked booking values the encounter path revalidates on the locked row:
+# ``Patient Encounter.appointment_type`` is installed required and derived, and
+# the patient/status pair is the completion cascade source.
+APPOINTMENT_ENCOUNTER_FIELDS = ("patient", "status", "appointment_type")
 # DocFields that carry a permlevel and can be masked. Verified against Frappe
 # v16: ``Meta._fields`` is ``{field.fieldname: field for field in self.fields}``
 # (``frappe/model/meta.py:514-515``), so it contains DocFields only.
@@ -199,7 +204,7 @@ VITAL_SIGNS_DOCTYPE = encounter_contract.VITAL_SIGNS_DOCTYPE
 SERVICE_REQUEST_DOCTYPE = encounter_contract.SERVICE_REQUEST_DOCTYPE
 ENCOUNTER_READ_FIELDS = ("patient", "docstatus", "status", "appointment")
 ENCOUNTER_CHILD_TABLES = {
-    "complaint": "Complaint Detail",
+    "complaint": "Patient Encounter Symptom",
     "diagnosis": "Patient Encounter Diagnosis",
     "drug_prescription": "Drug Prescription",
     "lab_test_prescription": "Lab Prescription",
@@ -221,6 +226,7 @@ class EncounterLockedState:
     complaint: bool
     diagnosis_count: int
     medication_codes: tuple
+    medication_count: int
     lab_count: int
     procedure_count: int
     clinical_note: str | None
@@ -240,6 +246,7 @@ class EncounterLockedState:
             "complaint": self.complaint,
             "diagnosis_count": self.diagnosis_count,
             "medication_codes": self.medication_codes,
+            "medication_count": self.medication_count,
             "lab_count": self.lab_count,
             "procedure_count": self.procedure_count,
             "clinical_note": self.clinical_note,
@@ -321,6 +328,36 @@ class ServiceRequestLockedState:
         }
 
 
+class EncounterWriteLease:
+    """A held encounter fence lease that claims only when dispatched.
+
+    ``Lease.dispatch`` is the one call that appends ``DISPATCHED``, so every
+    authorization, configuration and target decision taken between the lease and
+    the dispatch writes nothing when it refuses.
+    """
+
+    __slots__ = ("_lease",)
+
+    def __init__(self, lease):
+        self._lease = lease
+
+    def dispatch(self):
+        """Claim the operation key under the held lock, or map the refusal."""
+
+        try:
+            return self._lease.dispatch()
+        except write_fence.OperationLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.SiteLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.OperationConflict as exc:
+            raise patient_write.WriteConflict() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+
 class Gateway:
     """Adapter used by the whitelisted entry points."""
 
@@ -351,6 +388,17 @@ class Gateway:
                 loaded = {}
             self._site_config = loaded if isinstance(loaded, dict) else {}
         return self._site_config
+
+    def refresh_site_config(self):
+        """Drop the cached site configuration so the next gate rereads the file.
+
+        Only the encounter write path calls this: it runs a second gate under the
+        held lease and must see the file as it is now, not as it was when this
+        request first read it. Every other route keeps the single read it already
+        makes.
+        """
+
+        self._site_config = None
 
     def setting(self, key):
         return self._configuration().get(key)
@@ -391,6 +439,43 @@ class Gateway:
             enabled=bool(record_enabled),
             roles=tuple(role for role in (roles or ()) if isinstance(role, str)),
         )
+
+    def fresh_user_roles(self, user):
+        """Read ``user``'s native roles from the ``Has Role`` rows, uncached.
+
+        ``frappe.get_roles`` memoises its answer in the framework cache
+        (``frappe.cache.hget("roles", user, ...)`` in the pinned v16), so a role
+        granted or revoked mid-request stays invisible to it. This read goes
+        straight to the installed table with the pinned parent/parenttype filters
+        and the pinned automatic-role exclusion. It never calls ``get_roles`` and
+        never writes or purges a cache, so it can neither mask nor manufacture a
+        role.
+
+        ``None`` means the read failed or could not be trusted; callers must
+        refuse. An empty tuple means the read succeeded and the user has no
+        stored role row.
+        """
+
+        if not isinstance(user, str) or not user.strip():
+            return None
+        try:
+            rows = self.frappe.db.get_all(
+                "Has Role",
+                filters={
+                    "parenttype": "User",
+                    "parent": user,
+                    "role": ["not in", list(policy.AUTOMATIC_FRAMEWORK_ROLES)],
+                },
+                pluck="role",
+            )
+        except Exception:
+            return None
+        if not isinstance(rows, (list, tuple)):
+            return None
+        roles = tuple(row for row in rows if isinstance(row, str) and row)
+        if len(roles) != len(rows):
+            return None
+        return roles
 
     def csrf_token(self):
         try:
@@ -2482,7 +2567,19 @@ class Gateway:
         }
 
     def _encounter_meta_fields(self):
-        """Resolve the installed field names through the metadata cache."""
+        """Resolve the installed field names through the metadata cache.
+
+        Meta fieldnames, not ``get_valid_columns()``: the latter excludes Table
+        fields in frappe 16.54.0, and ``Patient Encounter.symptoms``,
+        ``diagnosis`` and the three prescription tables are all Table fields.
+        The installed ``default_fields`` (``name``, ``owner``, ``creation``,
+        ``modified``, ``modified_by``, ``docstatus``, ``idx``) are ordinary
+        columns, not ``DocField`` rows, so they are unioned in explicitly with an
+        unknown shape; only frappe's own default columns are admitted by name.
+
+        The typed shape ``(fieldtype, options)`` is what the closed-world table
+        check needs: a scalar column with a table's name would otherwise pass.
+        """
 
         cached = getattr(self, "_encounter_fields_cache", None)
         if cached is not None:
@@ -2495,9 +2592,25 @@ class Gateway:
         doctypes = set(encounter_contract.REQUIRED_FIELDS) | {VITAL_SIGNS_DOCTYPE}
         for doctype in doctypes:
             meta = get_meta(doctype)
-            fields[doctype] = set(meta.get_valid_columns())
+            default_fields = getattr(meta, "default_fields", None) or ()
+            installed = {
+                field.fieldname: (
+                    getattr(field, "fieldtype", None),
+                    getattr(field, "options", None),
+                )
+                for field in meta.fields
+            }
+            for name in default_fields:
+                if isinstance(name, str):
+                    installed.setdefault(name, (None, None))
+            fields[doctype] = installed
         self._encounter_fields_cache = fields
         return fields
+
+    def _encounter_note_reference_fields(self):
+        """The installed Clinical Note reference pair, or ``(None, None)``."""
+
+        return encounter_contract.note_reference_fields(self._encounter_meta_fields())
 
     def native_encounter_install_problem(self):
         """Preflight the installed DocType/field set; a gap is a refusal."""
@@ -2642,12 +2755,14 @@ class Gateway:
             appointment_status = self._text_value(
                 self.frappe.db.get_value(APPOINTMENT_DOCTYPE, appointment, "status")
             )
-        complaint_field = self._encounter_field("Complaint Detail", "complaint")
+        complaint_field = self._encounter_field(
+            encounter_contract.SYMPTOM_CHILD_DOCTYPE, "complaint"
+        )
         complaint = False
         if complaint_field:
             complaint = bool(
                 self.frappe.db.count(
-                    "Complaint Detail",
+                    encounter_contract.SYMPTOM_CHILD_DOCTYPE,
                     {"parent": native, complaint_field: ("!=", "")},
                 )
             )
@@ -2655,6 +2770,11 @@ class Gateway:
             self.frappe.db.count(
                 "Patient Encounter Diagnosis", {"parent": native}
             )
+        )
+        # The row count, not the codes: a blank drug code is still a medication
+        # row the reviewed contract must not rewrite or delete.
+        medication_count = int(
+            self.frappe.db.count("Drug Prescription", {"parent": native})
         )
         lab_count = int(
             self.frappe.db.count("Lab Prescription", {"parent": native})
@@ -2676,16 +2796,24 @@ class Gateway:
         clinical_note = None
         clinical_note_modified = None
         assessment = plan = followup = None
-        notes = self.frappe.get_all(
-            CLINICAL_NOTE_DOCTYPE,
-            filters={
-                "reference_doctype": ENCOUNTER_DOCTYPE,
-                "reference_docname": native,
-            },
-            fields=["name", "modified", "note"],
-            order_by="creation desc",
-            limit=1,
-        ) or ()
+        reference_doctype_field, reference_name_field = (
+            self._encounter_note_reference_fields()
+        )
+        notes = ()
+        if reference_doctype_field and reference_name_field:
+            # The installed pair is ``reference_doc``/``reference_name``. An
+            # unresolved pair reads no note, so completion stays blocked instead
+            # of trusting a note nobody linked.
+            notes = self.frappe.get_all(
+                CLINICAL_NOTE_DOCTYPE,
+                filters={
+                    reference_doctype_field: ENCOUNTER_DOCTYPE,
+                    reference_name_field: native,
+                },
+                fields=["name", "modified", "note"],
+                order_by="creation desc",
+                limit=1,
+            ) or ()
         if notes:
             row = notes[0]
             note = row.get("note") if hasattr(row, "get") else None
@@ -2709,6 +2837,7 @@ class Gateway:
             "complaint": complaint,
             "diagnosis_count": diagnosis_count,
             "medication_codes": medication_codes,
+            "medication_count": medication_count,
             "lab_count": lab_count,
             "procedure_count": procedure_count,
             "clinical_note": clinical_note,
@@ -2745,7 +2874,9 @@ class Gateway:
         """Replace the reviewed child rows with the normalized payload."""
 
         fields = payload["fields"]
-        complaint_field = self._encounter_field("Complaint Detail", "complaint")
+        complaint_field = self._encounter_field(
+            encounter_contract.SYMPTOM_CHILD_DOCTYPE, "complaint"
+        )
         if fields.get("complaint") is not None and complaint_field:
             doc.set("symptoms", [])
             doc.append("symptoms", {complaint_field: fields["complaint"]})
@@ -2799,29 +2930,130 @@ class Gateway:
         text = encounter_contract.build_note_text(note)
         if not text:
             return
+        reference_doctype_field, reference_name_field = (
+            self._encounter_note_reference_fields()
+        )
+        if not reference_doctype_field or not reference_name_field:
+            raise patient_write.WriteUncertain()
         practitioner = self.setting(config.ENCOUNTER_PRACTITIONER_KEY)
         try:
             doc = self.frappe.new_doc(CLINICAL_NOTE_DOCTYPE)
             doc.patient = patient
             doc.practitioner = practitioner
             doc.note = text
-            doc.reference_doctype = ENCOUNTER_DOCTYPE
-            doc.reference_docname = native_encounter_id
+            setattr(doc, reference_doctype_field, ENCOUNTER_DOCTYPE)
+            setattr(doc, reference_name_field, native_encounter_id)
             doc.insert()
         except Exception:
             raise patient_write.WriteUncertain() from None
+
+    def native_appointment_encounter_type(self, native_appointment_id):
+        """The linked booking's ``appointment_type``, or ``None``.
+
+        ``Patient Encounter.appointment_type`` is installed required and is never
+        a client value, so the create decision needs the booking's own type before
+        the fence. The read reuses the cancel path's document and field-level
+        checks so an unreadable or masked column fails closed.
+        """
+
+        detail = self.native_appointment_view(native_appointment_id)
+        if detail is None:
+            return None
+        try:
+            meta = self.frappe.get_meta(APPOINTMENT_DOCTYPE)
+            if not self._fields_readable(
+                meta, APPOINTMENT_ENCOUNTER_FIELDS
+            ):
+                return None
+            value = self._text_value(
+                self.frappe.db.get_value(
+                    APPOINTMENT_DOCTYPE, native_appointment_id, "appointment_type"
+                )
+            )
+        except Exception:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip()
+
+    def lock_linked_appointment(self, native_appointment_id):
+        """Lock the linked booking and return its decision values, or ``None``.
+
+        The fence serialises this contract's own operations only: another native
+        writer can edit the booking at any moment, and a plain ``get_value`` is
+        not a stable read. ``FOR UPDATE`` holds the row to the end of the
+        transaction, so the patient, status and appointment_type returned here
+        are the committed values for every decision after this call.
+
+        No snapshot restart happens here on purpose: the fence body already ran
+        ``reset_native_read_snapshot()``, and a second rollback would drop row
+        locks taken after it. ``None`` covers a missing, denied, restricted or
+        unreadable row, so the caller refuses *before* dispatch — an exception
+        after dispatch would leave the operation uncertain and latch the site.
+        """
+
+        return self._lock_linked_appointment(native_appointment_id, "write")
+
+    def lock_linked_appointment_for_read(self, native_appointment_id):
+        """Lock the linked booking for a caller that holds read authority only.
+
+        The completion cascade reads the booking's committed status and never
+        writes the booking, so it must not require ``Patient Appointment``
+        ``write``: that right was never part of this contract. The row lock, the
+        readable-field check and the refusal on a denied read are the same.
+        """
+
+        return self._lock_linked_appointment(native_appointment_id, "read")
+
+    def _lock_linked_appointment(self, native_appointment_id, ptype):
+        try:
+            frappe = self.frappe
+            user = frappe.session.user
+            doc = frappe.get_doc(
+                APPOINTMENT_DOCTYPE, native_appointment_id, for_update=True
+            )
+            if doc is None:
+                return None
+            if not frappe.has_permission(
+                APPOINTMENT_DOCTYPE,
+                ptype=ptype,
+                doc=native_appointment_id,
+                user=user,
+            ):
+                return None
+            meta = frappe.get_meta(APPOINTMENT_DOCTYPE)
+            if not self._fields_readable(meta, APPOINTMENT_ENCOUNTER_FIELDS):
+                return None
+            values = {
+                field: self._text_value(getattr(doc, field, None))
+                for field in APPOINTMENT_ENCOUNTER_FIELDS
+            }
+        except Exception:
+            return None
+        return values
 
     def create_native_encounter_draft(self, payload):
         """Insert the draft encounter (docstatus 0) and its separate documents."""
 
         patient = payload["_native_patient_id"]
         appointment = payload["_native_appointment_id"]
+        appointment_type_field = self._encounter_field(
+            ENCOUNTER_DOCTYPE, "appointment_type"
+        )
         try:
             doc = self.frappe.new_doc(ENCOUNTER_DOCTYPE)
             doc.patient = patient
             doc.practitioner = self.setting(config.ENCOUNTER_PRACTITIONER_KEY)
             doc.company = self.setting(config.ENCOUNTER_COMPANY_KEY)
             doc.appointment = appointment
+            if appointment_type_field:
+                # Installed required and derived from the linked booking, which
+                # the endpoint already refused to create without.
+                setattr(
+                    doc,
+                    appointment_type_field,
+                    payload.get("_appointment_type"),
+                )
             doc.encounter_date = self.frappe.utils.nowdate()
             doc.encounter_time = self.frappe.utils.nowtime()
             self._write_encounter_children(doc, payload)
@@ -2872,13 +3104,18 @@ class Gateway:
 
         if not isinstance(state.clinical_note, str) or not state.clinical_note:
             raise encounter_write.EncounterTargetNotEligible()
+        reference_doctype_field, reference_name_field = (
+            self._encounter_note_reference_fields()
+        )
+        if not reference_doctype_field or not reference_name_field:
+            raise patient_write.WriteUncertain()
         try:
             doc = self.frappe.new_doc(CLINICAL_NOTE_DOCTYPE)
             doc.patient = state.patient
             doc.practitioner = self.setting(config.ENCOUNTER_PRACTITIONER_KEY)
             doc.note = note_text
-            doc.reference_doctype = ENCOUNTER_DOCTYPE
-            doc.reference_docname = state.doc.name
+            setattr(doc, reference_doctype_field, ENCOUNTER_DOCTYPE)
+            setattr(doc, reference_name_field, state.doc.name)
             doc.insert()
         except encounter_write.EncounterTargetNotEligible:
             raise
@@ -2989,18 +3226,25 @@ class Gateway:
             raise patient_write.WriteUncertain() from exc
 
     @contextmanager
-    def encounter_write_fence(self, actor, kind, operation_key, payload_digest):
+    def encounter_write_lease(self, actor, kind, operation_key, payload_digest):
+        """Hold the encounter fence lock; the caller decides when to dispatch.
+
+        Nothing is appended until ``dispatch`` is called, so authorization,
+        configuration and target eligibility can be refreshed under the held
+        lock and refused without burning the key or latching the site.
+        """
+
         if kind not in write_fence.ENCOUNTER_OPERATION_KINDS:
             raise patient_write.WriteUncertain()
         ledger = self._ledger()
         try:
-            with ledger.fence(
+            with ledger.lease(
                 actor=actor,
                 kind=kind,
                 operation_key=operation_key,
                 payload_digest=payload_digest,
-            ) as claim:
-                yield claim
+            ) as lease:
+                yield EncounterWriteLease(lease)
         except write_fence.OperationLocked as exc:
             raise patient_write.WriteLocked() from exc
         except write_fence.SiteLocked as exc:

@@ -218,6 +218,23 @@ class BootstrapCapabilityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_capabilities({**valid, name: ENABLED_STATE})
 
+    def test_the_encounter_draft_gate_does_not_advertise_medication_ordering(self):
+        """Medication rows are refused pre-fence, so they are not advertised.
+
+        The draft contract refuses any non-empty ``medications`` section until a
+        reviewed medication contract exists (the installed ``dosage_form`` is
+        required and unsupplied). The published map must not claim otherwise.
+        Lab ordering is still accepted by the same body and keeps its gate.
+        """
+
+        capabilities = bootstrap_capabilities(write_encounter_draft=True)
+
+        self.assertEqual(capabilities["write.encounter.draft"], ENABLED_STATE)
+        self.assertEqual(
+            capabilities["write.medication.order"], READ_ONLY_STATE
+        )
+        self.assertEqual(capabilities["write.lab.order"], ENABLED_STATE)
+
     def test_new_write_ids_are_published_read_only(self):
         capabilities = read_only_capabilities()
         for name in NEW_WRITE_NAMES:

@@ -72,6 +72,11 @@ ADMIN_ROLE_CODES = frozenset({"ADM"})
 
 NON_CLINICAL_IDENTITIES = frozenset({"", "Guest", "Administrator"})
 
+# Pinned Frappe v16 ``frappe.permissions.AUTOMATIC_ROLES``. ``get_roles`` adds
+# them to every answer without any ``Has Role`` row, so a table read can never
+# establish one of them as a caller's authoritative role.
+AUTOMATIC_FRAMEWORK_ROLES = ("Guest", "All", "Desk User", "Administrator")
+
 GUEST_SID = "Guest"
 
 
@@ -127,6 +132,16 @@ def is_valid_session(view):
     return view.enabled is True
 
 
+def _matching_codes(native_roles, role_map):
+    """Clinic codes whose mapped native role is present, in map order."""
+
+    return [
+        code
+        for code, mapped in role_map.items()
+        if code in SUPPORTED_ROLE_CODES and native_roles.intersection(mapped)
+    ]
+
+
 def resolve_role(view, role_map):
     """Resolve exactly one clinic role code, or ``None``.
 
@@ -141,14 +156,47 @@ def resolve_role(view, role_map):
         return None
 
     native_roles = set(role for role in view.roles if isinstance(role, str))
-    matches = [
-        code
-        for code, mapped in role_map.items()
-        if code in SUPPORTED_ROLE_CODES and native_roles.intersection(mapped)
-    ]
+    matches = _matching_codes(native_roles, role_map)
     if len(matches) != 1:
         return None
     return matches[0]
+
+
+def fresh_role_problem(fresh_roles, role_map, gated_role):
+    """Return why a fresh DB role read does not confirm ``gated_role``.
+
+    ``None`` means the read agrees with the role the outer gate already
+    authorised. Every other outcome is a refusal: this check is deny-only and
+    never re-resolves a different authority for the request.
+
+    ``fresh_roles`` is the tuple a direct ``Has Role`` read returned, or ``None``
+    when the read failed. A role whose native mapping is one of
+    :data:`AUTOMATIC_FRAMEWORK_ROLES` cannot be established from the table at
+    all, so it refuses too.
+    """
+
+    if not isinstance(role_map, dict) or not role_map:
+        return "no role map"
+    if not isinstance(gated_role, str) or not gated_role:
+        return "no gated role"
+    mapped = role_map.get(gated_role)
+    if not isinstance(mapped, (tuple, list, frozenset, set)):
+        return "gated role is not mapped"
+    mapped = tuple(role for role in mapped if isinstance(role, str) and role)
+    if not mapped:
+        return "gated role has no native role"
+    if any(role in AUTOMATIC_FRAMEWORK_ROLES for role in mapped):
+        return "gated role maps to an automatic framework role"
+    if not isinstance(fresh_roles, tuple):
+        return "fresh roles unreadable"
+
+    fresh = set(role for role in fresh_roles if isinstance(role, str))
+    matches = _matching_codes(fresh, role_map)
+    if len(matches) != 1:
+        return "fresh roles do not resolve to one clinic role"
+    if matches[0] != gated_role:
+        return "fresh role disagrees with the gated role"
+    return None
 
 
 def authorize(view, role_map, allowed_codes):

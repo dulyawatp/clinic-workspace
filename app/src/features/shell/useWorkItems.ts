@@ -12,5 +12,11 @@ export interface WorkItem {
 
 /** Server-scoped read only; never aggregate counts or infer authorization. */
 export function useWorkItems() {
-  return useReadQuery<WorkItem>("work-items", {});
+  return useReadQuery<WorkItem>(
+    "work-items",
+    {},
+    {
+      suppressAutomaticRefetchOnError: true,
+    },
+  );
 }

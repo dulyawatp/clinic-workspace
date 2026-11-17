@@ -123,8 +123,10 @@ def _appointment_write_flags(gateway, settings, role):
 def _encounter_write_flags(gateway, settings, role):
     """Return ``(draft, complete, amend)`` after the encounter write gate.
 
-    Draft (and the medication/lab ordering that rides it) admits DOC and NUR;
-    completion and amendment are DOC-only. The gate is independent of the other
+    Draft (and the native lab ordering that rides it) admits DOC and NUR;
+    completion and amendment are DOC-only. Medication ordering is not advertised:
+    the draft contract refuses any non-empty ``medications`` section before the
+    fence until a reviewed medication contract exists. The gate is independent of the other
     write flags: exact approved site, encounter flag, deployment marker, ready
     fence store, safe Healthcare Settings, installed-field preflight, no
     boundary drift and the caller's own native authority.

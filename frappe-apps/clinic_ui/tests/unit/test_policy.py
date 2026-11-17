@@ -140,6 +140,75 @@ class RoleResolutionTests(unittest.TestCase):
             self.assertIn(code, policy.SUPPORTED_ROLE_CODES)
 
 
+class FreshRoleAgreementTests(unittest.TestCase):
+    """A fresh DB role read can only confirm or refuse the cached gated role.
+
+    Nothing here re-resolves a different authority, and nothing grants: the
+    cached role that passed the outer gate stays the only role this request may
+    use.
+    """
+
+    def test_the_automatic_set_is_the_pinned_framework_set(self):
+        self.assertEqual(
+            policy.AUTOMATIC_FRAMEWORK_ROLES,
+            ("Guest", "All", "Desk User", "Administrator"),
+        )
+
+    def test_a_db_read_that_still_grants_the_gated_role_agrees(self):
+        self.assertIsNone(
+            policy.fresh_role_problem(("Physician",), ROLE_MAP, "DOC")
+        )
+        self.assertIsNone(policy.fresh_role_problem(("Nurse",), ROLE_MAP, "NUR"))
+
+    def test_a_revoked_db_role_refuses(self):
+        self.assertIsNotNone(policy.fresh_role_problem((), ROLE_MAP, "DOC"))
+
+    def test_a_db_grant_never_promotes_the_cached_gated_role(self):
+        # Cached DOC, DB now grants Nurse only: refuse rather than re-resolve.
+        self.assertIsNotNone(
+            policy.fresh_role_problem(("Nurse",), ROLE_MAP, "DOC")
+        )
+
+    def test_two_fresh_clinic_codes_are_ambiguous_and_refuse(self):
+        self.assertIsNotNone(
+            policy.fresh_role_problem(("Physician", "Nurse"), ROLE_MAP, "DOC")
+        )
+
+    def test_an_unreadable_db_read_refuses(self):
+        self.assertIsNotNone(policy.fresh_role_problem(None, ROLE_MAP, "DOC"))
+
+    def test_an_unusable_gated_role_or_map_refuses(self):
+        for role_map, gated in (
+            ({}, "DOC"),
+            (None, "DOC"),
+            (ROLE_MAP, None),
+            (ROLE_MAP, ""),
+            (ROLE_MAP, "REC"),
+            ({"DOC": ()}, "DOC"),
+            ({"DOC": (None,)}, "DOC"),
+        ):
+            with self.subTest(role_map=role_map, gated=gated):
+                self.assertIsNotNone(
+                    policy.fresh_role_problem(("Physician",), role_map, gated)
+                )
+
+    def test_a_gated_role_mapped_to_an_automatic_role_fails_closed(self):
+        # ``frappe.get_roles`` returns these without any Has Role row, so a DB
+        # read can never establish them.
+        for role in policy.AUTOMATIC_FRAMEWORK_ROLES:
+            with self.subTest(role=role):
+                self.assertIsNotNone(
+                    policy.fresh_role_problem((role,), {"DOC": (role,)}, "DOC")
+                )
+
+    def test_a_malformed_fresh_value_refuses(self):
+        for fresh in ("Physician", {"Physician"}, 7):
+            with self.subTest(fresh=fresh):
+                self.assertIsNotNone(
+                    policy.fresh_role_problem(fresh, ROLE_MAP, "DOC")
+                )
+
+
 class RoleCodeSetTests(unittest.TestCase):
     """The full write-contract wave publishes seven clinic role codes.
 

@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -2598,6 +2599,362 @@ class CrossKindConcurrencyTests(FenceTestCase):
         self.assertEqual(winner.receipt, "native-receipt")
         self.assertIsNone(
             ledger.lookup(actor="doc@example.test", kind="book", operation_key=key)
+        )
+
+
+class LeaseTests(FenceTestCase):
+    """Exclusive zero-event lease: lock held, no events until explicit dispatch."""
+
+    def lease_kwargs(self, number=1, actor="doc@example.test", kind="create"):
+        return dict(
+            actor=actor,
+            kind=kind,
+            operation_key=self.operation_key(number),
+            payload_digest=self.digest(number),
+        )
+
+    def test_lease_appends_no_events_until_dispatch(self):
+        ledger = self.ledger()
+        before = len(self.events())
+        with ledger.lease(**self.lease_kwargs(1)):
+            self.assertEqual(len(self.events()), before)
+        self.assertEqual(len(self.events()), before)
+
+    def test_lease_without_dispatch_then_fence_succeeds(self):
+        ledger = self.ledger()
+        with ledger.lease(**self.lease_kwargs(1)):
+            pass
+        self.claim_and_commit(ledger, number=2)
+        record = ledger.lookup(
+            actor="doc@example.test", kind="create",
+            operation_key=self.operation_key(2),
+        )
+        self.assertEqual(record.state, "COMMITTED")
+
+    def test_dispatch_then_commit_inside_lease_is_durable(self):
+        ledger = self.ledger()
+        with ledger.lease(**self.lease_kwargs(1)) as lease:
+            claim = lease.dispatch()
+            self.assertEqual(claim.state, "DISPATCHED")
+            claim.commit("native-receipt-1")
+        record = ledger.lookup(
+            actor="doc@example.test", kind="create",
+            operation_key=self.operation_key(1),
+        )
+        self.assertEqual(record.state, "COMMITTED")
+        self.assertEqual(record.receipt, "native-receipt-1")
+
+    def test_duplicate_key_refused_with_zero_events_then_new_lease_succeeds(self):
+        ledger = self.ledger()
+        self.claim_and_commit(ledger, number=1)
+        before = len(self.events())
+        with ledger.lease(**self.lease_kwargs(1)) as lease:
+            with self.assertRaises(OperationLocked):
+                lease.dispatch()
+        self.assertEqual(len(self.events()), before)
+        self.acknowledge(ledger, number=1)
+        with ledger.lease(**self.lease_kwargs(2)) as lease:
+            claim = lease.dispatch()
+            claim.commit("native-receipt-2")
+        self.assertEqual(len(self.events()), before + 4)
+
+    def test_second_dispatch_is_refused_even_after_success(self):
+        ledger = self.ledger()
+        with ledger.lease(**self.lease_kwargs(1)) as lease:
+            claim = lease.dispatch()
+            claim.commit("native-receipt-1")
+            with self.assertRaises(write_fence.LeaseConsumed):
+                lease.dispatch()
+        self.assertEqual(len(self.events()), 2 + 1)
+
+    def test_partial_dispatch_failure_consumes_the_lease(self):
+        ledger = self.ledger()
+        real_append = write_fence._append
+        calls = []
+
+        def flaky_append(*args, **kwargs):
+            calls.append(kwargs.get("state"))
+            if len(calls) == 2:
+                raise sqlite3.OperationalError("disk I/O error")
+            return real_append(*args, **kwargs)
+
+        with mock.patch.object(write_fence, "_append", side_effect=flaky_append):
+            with ledger.lease(**self.lease_kwargs(1)) as lease:
+                with self.assertRaises(StoreUnavailable):
+                    lease.dispatch()
+                with self.assertRaises(write_fence.LeaseConsumed):
+                    lease.dispatch()
+        record = ledger.lookup(
+            actor="doc@example.test", kind="create",
+            operation_key=self.operation_key(1),
+        )
+        self.assertEqual(record.state, "DISPATCHED")
+        with self.assertRaises(SiteLocked):
+            self.claim_and_commit(ledger, number=2)
+
+    def test_released_lease_is_unusable(self):
+        ledger = self.ledger()
+        with ledger.lease(**self.lease_kwargs(1)) as lease:
+            pass
+        with self.assertRaises(FenceReleased):
+            lease.dispatch()
+        self.assertEqual(self.events(), [])
+
+    def test_claim_is_unusable_after_lease_exit(self):
+        ledger = self.ledger()
+        with ledger.lease(**self.lease_kwargs(1)) as lease:
+            claim = lease.dispatch()
+            claim.commit("native-receipt-1")
+        with self.assertRaises(FenceReleased):
+            claim.commit("native-receipt-again")
+
+    def test_lease_holds_the_lock_against_a_second_ledger(self):
+        ledger = self.ledger()
+        other = self.ledger()
+        with ledger.lease(**self.lease_kwargs(1)):
+            with self.assertRaises(LockUnavailable):
+                other.lease(**self.lease_kwargs(2)).__enter__()
+            with self.assertRaises(LockUnavailable):
+                other.fence(**self.lease_kwargs(2)).__enter__()
+        with other.lease(**self.lease_kwargs(2)):
+            pass
+
+    def test_lock_stays_held_through_terminal_and_exit(self):
+        ledger = self.ledger()
+        other = self.ledger()
+        with ledger.lease(**self.lease_kwargs(1)) as lease:
+            claim = lease.dispatch()
+            claim.commit("native-receipt-1")
+            with self.assertRaises(LockUnavailable):
+                other.fence(**self.lease_kwargs(2)).__enter__()
+        self.acknowledge(ledger, number=1)
+        with other.fence(**self.lease_kwargs(2)) as claim2:
+            claim2.commit("native-receipt-2")
+
+    def test_latch_appearing_outside_the_lock_is_refused_at_dispatch(self):
+        ledger = self.ledger()
+        other = self.ledger()
+        with ledger.lease(**self.lease_kwargs(1)) as lease:
+            self.assertTrue(other.latch("manual investigation"))
+            before = len(self.events())
+            with self.assertRaises(SiteLocked):
+                lease.dispatch()
+            self.assertEqual(len(self.events()), before)
+
+    def test_unterminated_dispatch_raises_on_exit_and_stays_dispatched(self):
+        ledger = self.ledger()
+        with self.assertRaises(UnterminatedFence):
+            with ledger.lease(**self.lease_kwargs(1)) as lease:
+                lease.dispatch()
+        record = ledger.lookup(
+            actor="doc@example.test", kind="create",
+            operation_key=self.operation_key(1),
+        )
+        self.assertEqual(record.state, "DISPATCHED")
+
+    def test_body_error_after_dispatch_never_appends_unknown(self):
+        ledger = self.ledger()
+        with self.assertRaises(RuntimeError):
+            with ledger.lease(**self.lease_kwargs(1)) as lease:
+                lease.dispatch()
+                raise RuntimeError("process lost before terminal")
+        record = ledger.lookup(
+            actor="doc@example.test", kind="create",
+            operation_key=self.operation_key(1),
+        )
+        self.assertEqual(record.state, "DISPATCHED")
+
+    def test_invalid_input_is_refused_before_taking_the_lock(self):
+        ledger = self.ledger()
+        other = self.ledger()
+        with ledger.lease(**self.lease_kwargs(1)):
+            with self.assertRaises(InvalidOperation):
+                with other.lease(**self.lease_kwargs(2, actor=" bad")):
+                    self.fail("invalid input must not reach the body")
+
+    def test_latch_present_at_entry_is_refused_and_lock_released(self):
+        ledger = self.ledger()
+        other = self.ledger()
+        self.assertTrue(ledger.latch("manual investigation"))
+        with self.assertRaises(SiteLocked):
+            with other.lease(**self.lease_kwargs(1)):
+                self.fail("a latched site must not hand out a lease")
+        # SiteLocked, not LockUnavailable: the refused entry released the lock.
+        with self.assertRaises(SiteLocked):
+            with ledger.lease(**self.lease_kwargs(2)):
+                self.fail("a latched site must not hand out a lease")
+
+    def test_lease_refuses_dispatch_while_a_barrier_is_unacknowledged(self):
+        ledger = self.ledger()
+        self.claim_and_commit(ledger, number=1)
+        before = self.events()
+        with ledger.lease(**self.lease_kwargs(2)) as lease:
+            with self.assertRaises(SiteLocked):
+                lease.dispatch()
+        self.assertEqual(self.events(), before)
+
+    def test_latch_created_after_connection_verification_is_refused_before_claim(self):
+        ledger = self.ledger()
+        real_connection = Ledger._connection
+        latch_path = self.directory / write_fence.LATCH_FILENAME
+
+        @contextmanager
+        def verified_then_latched(ledger_self, directory_fd):
+            with real_connection(ledger_self, directory_fd) as connection:
+                # An independent actor latches the site after the store is
+                # verified but before the first append.
+                if not latch_path.exists():
+                    latch_path.write_text("manual investigation", encoding="utf-8")
+                yield connection
+
+        with mock.patch.object(Ledger, "_connection", verified_then_latched):
+            with ledger.lease(**self.lease_kwargs(1)) as lease:
+                with self.assertRaises(SiteLocked):
+                    lease.dispatch()
+                with self.assertRaises(write_fence.LeaseConsumed):
+                    lease.dispatch()
+        self.assertEqual(self.events(), [])
+
+    def test_interrupt_during_ownership_handoff_closes_the_connection(self):
+        ledger = self.ledger()
+        real_connection = Ledger._connection
+        closed = []
+
+        @contextmanager
+        def tracking_connection(ledger_self, directory_fd):
+            with real_connection(ledger_self, directory_fd) as connection:
+                try:
+                    yield connection
+                finally:
+                    closed.append("closed")
+
+        def interrupted_attach(claim, directory_fd):
+            raise KeyboardInterrupt("interrupted between claim and handoff")
+
+        with mock.patch.object(Ledger, "_connection", tracking_connection):
+            with mock.patch.object(write_fence.Claim, "_attach", interrupted_attach):
+                with ledger.lease(**self.lease_kwargs(1)) as lease:
+                    # ``assertRaises`` strips the traceback, which would free
+                    # the interrupted frame and hide the leak, so keep it.
+                    caught = None
+                    try:
+                        lease.dispatch()
+                    except KeyboardInterrupt as exc:
+                        caught = exc
+        # The retained traceback keeps the interrupted frame, and the stack it
+        # owned, alive past lease exit; teardown must not depend on collection.
+        self.assertIsNotNone(caught)
+        self.assertIsNotNone(caught.__traceback__)
+        self.assertEqual(closed, ["closed"])
+        self.assertEqual(
+            [event[4] for event in self.events()], ["DISPATCHED", "DISPATCHED"]
+        )
+
+    def test_claim_is_unusable_after_exceptional_lease_exit(self):
+        ledger = self.ledger()
+        claim = None
+        with self.assertRaises(RuntimeError):
+            with ledger.lease(**self.lease_kwargs(1)) as lease:
+                claim = lease.dispatch()
+                raise RuntimeError("process lost before terminal")
+        with self.assertRaises(FenceReleased):
+            claim.commit("native-receipt-1")
+        with self.assertRaises(FenceReleased):
+            claim.unknown("lost before terminal")
+        self.assertEqual(
+            [event[4] for event in self.events()], ["DISPATCHED", "DISPATCHED"]
+        )
+
+    def test_claim_is_unusable_after_unterminated_lease_exit(self):
+        ledger = self.ledger()
+        claim = None
+        with self.assertRaises(UnterminatedFence):
+            with ledger.lease(**self.lease_kwargs(1)) as lease:
+                claim = lease.dispatch()
+        with self.assertRaises(FenceReleased):
+            claim.commit("native-receipt-1")
+        self.assertEqual(
+            [event[4] for event in self.events()], ["DISPATCHED", "DISPATCHED"]
+        )
+
+    def test_crash_after_dispatch_keeps_unresolved_state_and_releases_the_lock(self):
+        lease_crash_after_dispatch_child = """
+import os
+import sys
+
+from clinic_ui.core.write_fence import Anchor, Ledger
+
+path, dep, epoch, seq, key, digest = sys.argv[1:7]
+ledger = Ledger.open(path, anchor=Anchor(dep, int(epoch), int(seq)))
+with ledger.lease(
+    actor="doc@example.test", kind="create",
+    operation_key=key, payload_digest=digest,
+) as lease:
+    lease.dispatch()
+    os._exit(31)
+"""
+        self.run_child(
+            lease_crash_after_dispatch_child,
+            str(self.directory),
+            self.info.deployment_id,
+            str(self.info.epoch),
+            str(self.info.sequence),
+            self.operation_key(1),
+            self.digest(1),
+            expect=31,
+        )
+        ledger = self.ledger()
+        self.assertEqual(
+            ledger.lookup(
+                actor="doc@example.test", kind="create",
+                operation_key=self.operation_key(1),
+            ).state,
+            "DISPATCHED",
+        )
+        self.assertEqual(
+            [event[4] for event in self.events()], ["DISPATCHED", "DISPATCHED"]
+        )
+        # The crash released the flock: a fresh lease is granted, and only the
+        # unresolved key refuses the dispatch.
+        with self.ledger().lease(**self.lease_kwargs(2)) as lease:
+            with self.assertRaises(SiteLocked):
+                lease.dispatch()
+
+    def test_crash_before_dispatch_appends_nothing_and_frees_the_lock(self):
+        lease_crash_child = """
+import os
+import sys
+
+from clinic_ui.core.write_fence import Anchor, Ledger
+
+path, dep, epoch, seq, key, digest = sys.argv[1:7]
+ledger = Ledger.open(path, anchor=Anchor(dep, int(epoch), int(seq)))
+with ledger.lease(
+    actor="doc@example.test", kind="create",
+    operation_key=key, payload_digest=digest,
+):
+    os._exit(29)
+"""
+        before = self.events()
+        self.run_child(
+            lease_crash_child,
+            str(self.directory),
+            self.info.deployment_id,
+            str(self.info.epoch),
+            str(self.info.sequence),
+            self.operation_key(1),
+            self.digest(1),
+            expect=29,
+        )
+        self.assertEqual(self.events(), before)
+        ledger = self.ledger()
+        self.claim_and_commit(ledger, number=2)
+        self.assertEqual(
+            ledger.lookup(
+                actor="doc@example.test", kind="create",
+                operation_key=self.operation_key(2),
+            ).state,
+            "COMMITTED",
         )
 
 

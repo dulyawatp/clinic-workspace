@@ -94,6 +94,14 @@ WRITE_CAPABILITY_GATES = {
     "write.admin.master": ("admin", ("ADM",)),
 }
 
+# Deferred write surfaces: never enabled, whatever the site config says.
+# Medication ordering was deferred on 2026-11-18: the draft contract refuses a
+# non-empty ``medications`` section before the fence until a reviewed medication
+# contract exists, so the published map must keep it read_only even when the
+# encounter family gate is open. The capability stays in WRITE_CAPABILITY_GATES
+# and in the frozen contract, so it is still asserted - never silently dropped.
+DEFERRED_WRITE_CAPABILITIES = frozenset({"write.medication.order"})
+
 # Cut or unimplemented surfaces: read_only whatever the site config says.
 PERMANENT_READ_ONLY = frozenset(
     {
@@ -216,13 +224,30 @@ def expected_enabled_writes(gates, role):
 
     A capability is enabled only when its family gate flag is on and the role
     is admitted by the family's policy set; everything else must be read_only.
+    Deferred capabilities stay disabled even when their family gate is open.
     """
 
     enabled = set()
     for capability, (family, roles) in WRITE_CAPABILITY_GATES.items():
+        if capability in DEFERRED_WRITE_CAPABILITIES:
+            continue
         if role in roles and _gate_open(gates.get(family)):
             enabled.add(capability)
     return enabled
+
+
+def deferred_capability_states(capabilities):
+    """Return the observed state of each deferred capability for evidence.
+
+    A capability the bootstrap map does not publish reads as ``None``; the
+    capability-level problem is reported by ``capability_problems``.
+    """
+
+    if not isinstance(capabilities, dict):
+        return {}
+    return {
+        name: capabilities.get(name) for name in sorted(DEFERRED_WRITE_CAPABILITIES)
+    }
 
 
 def capability_problems(capabilities, expected_ids, gates, role):
@@ -257,6 +282,9 @@ def capability_problems(capabilities, expected_ids, gates, role):
     leaked = sorted(PERMANENT_READ_ONLY & enabled)
     if leaked:
         problems.append(f"permanently read_only writes enabled: {leaked}")
+    deferred_enabled = sorted(DEFERRED_WRITE_CAPABILITIES & enabled)
+    if deferred_enabled:
+        problems.append(f"deferred writes enabled: {deferred_enabled}")
     if role == "DOC" and not APPROVED_ENABLED_WRITES <= enabled:
         problems.append(
             f"approved writes regressed: {sorted(APPROVED_ENABLED_WRITES - enabled)}"
@@ -361,6 +389,10 @@ def selfcheck() -> int:
     good_capabilities = {name: "read_only" for name in capability_ids}
     for name in expected_enabled_writes(good_gates, "DOC"):
         good_capabilities[name] = "enabled"
+    gated_encounter_gates = dict(good_gates, encounter=1)
+    gated_encounter_capabilities = {name: "read_only" for name in capability_ids}
+    for name in expected_enabled_writes(gated_encounter_gates, "DOC"):
+        gated_encounter_capabilities[name] = "enabled"
 
     good_ledger = {
         "ready": True,
@@ -397,6 +429,20 @@ def selfcheck() -> int:
         ("a missing capability id is caught", bool(capability_problems(
             good_capabilities, capability_ids + ["write.new.thing"], good_gates, "DOC"
         ))),
+        ("the encounter gate leaves medication ordering disabled", (
+            "write.medication.order"
+            not in expected_enabled_writes(dict(good_gates, encounter=1), "DOC")
+            and {"write.encounter.draft", "write.lab.order"}
+            <= expected_enabled_writes(dict(good_gates, encounter=1), "DOC")
+        )),
+        ("an enabled medication write is caught with the encounter gate open", bool(
+            capability_problems(
+                dict(gated_encounter_capabilities, **{"write.medication.order": "enabled"}),
+                capability_ids,
+                gated_encounter_gates,
+                "DOC",
+            )
+        )),
         ("ledger read-back matches", not fence_ledger_problems(
             good_ledger, 24, APPROVED_BUDGETS
         )),
@@ -1000,6 +1046,7 @@ def main() -> int:
             "gates": gates,
             "enabled": sorted(enabled_writes),
             "expected_enabled": sorted(expected_enabled_writes(gates, "DOC")),
+            "deferred_capabilities": deferred_capability_states(capabilities),
             "problems": capability_issues,
         },
     )
