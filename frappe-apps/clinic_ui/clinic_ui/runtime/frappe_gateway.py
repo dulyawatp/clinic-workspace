@@ -3175,6 +3175,26 @@ class Gateway:
             return record.receipt
         raise patient_write.WriteLocked()
 
+    def lookup_encounter_operation(self, actor, kind, operation_key):
+        """Read the latest durable record for one encounter operation.
+
+        Strictly read-only: no claim, no dispatch, no latch, no unlock and no
+        retry. The raw state is returned so the caller can refuse a non-terminal
+        operation itself instead of turning it into a lock response.
+        """
+
+        if kind not in write_fence.ENCOUNTER_OPERATION_KINDS:
+            raise patient_write.WriteUncertain()
+        ledger = self._ledger()
+        try:
+            return ledger.lookup(
+                actor=actor, kind=kind, operation_key=operation_key
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
     def list_committed_encounter_receipts(
         self, limit, kind=None, operation_key=None
     ):

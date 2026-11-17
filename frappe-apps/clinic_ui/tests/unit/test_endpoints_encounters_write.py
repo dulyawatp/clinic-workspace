@@ -26,6 +26,7 @@ from clinic_ui.runtime import frappe_gateway
 from .fake_gateway import (
     Denied,
     FakeAppointmentReceipt,
+    FakeEncounterOperation,
     FakeEncounterReceipt,
     FakeGateway,
     SECRET,
@@ -205,6 +206,17 @@ class RealLedgerLeaseGateway(FakeGateway):
             return record.receipt
         raise patient_write.WriteLocked()
 
+    def lookup_encounter_operation(self, actor, kind, operation_key):
+        # Mirrors ``frappe_gateway.Gateway.lookup_encounter_operation``.
+        try:
+            return self._store.lookup(
+                actor=actor, kind=kind, operation_key=operation_key
+            )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
 
 class LeaseLedgerIntegrationTests(unittest.TestCase):
     """A refusal before ``dispatch()`` must not burn the operation key.
@@ -311,7 +323,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         }
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.create_encounter_calls, [])
         self.assertEqual(fake.encounter_lease_dispatches, [])
@@ -323,7 +335,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
             "status": "Open",
             "appointment_type": "APPT-TYPE-1",
         }
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake, draft_body(operation_key="enc-draft-key-0009-0123"), CSRF
         )
 
@@ -345,7 +357,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
             "appointment_type": "APPT-TYPE-1",
         }
 
-        payload = encounters_write.save_draft(fake, draft_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.create_encounter_calls, [])
@@ -358,7 +370,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
             "status": "Checked In",
             "appointment_type": "APPT-TYPE-1",
         }
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake, draft_body(operation_key="enc-draft-key-0009-0123"), CSRF
         )
         self.assertEqual(payload["status"], "draft_saved")
@@ -369,7 +381,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake.encounter_locked[NATIVE_ENCOUNTER] = {"medication_count": 1}
         sequence = self.ledger.info().sequence
 
-        payload = encounters_write.save_draft(fake, update_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, update_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.save_encounter_calls, [])
@@ -380,7 +392,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         self.assert_no_key("encounter_draft", DRAFT_UPDATE_KEY)
 
         fake.encounter_locked.pop(NATIVE_ENCOUNTER)
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake, update_body(operation_key="enc-draft-key-0009-0123"), CSRF
         )
         self.assertEqual(payload["status"], "draft_saved")
@@ -396,14 +408,14 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
             "status": "Draft",
         }
 
-        payload = encounters_write.amend(fake, amend_body(), CSRF)
+        payload = encounters_write._amend_undeferred(fake, amend_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.addendum_calls, [])
         self.assert_no_key("encounter_amend", AMEND_KEY)
 
         fake.encounter_locked.pop(NATIVE_ENCOUNTER)
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake, draft_body(operation_key="enc-draft-key-0009-0123"), CSRF
         )
         self.assertEqual(payload["status"], "draft_saved")
@@ -413,14 +425,14 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         self.seed_committed_draft()
         fake.encounter_locked[NATIVE_ENCOUNTER] = {"medication_count": 1}
 
-        payload = encounters_write.complete(fake, complete_body(), CSRF)
+        payload = encounters_write._complete_undeferred(fake, complete_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.submit_encounter_calls, [])
         self.assert_no_key("encounter_complete", COMPLETE_KEY)
 
         fake.encounter_locked.pop(NATIVE_ENCOUNTER)
-        payload = encounters_write.complete(
+        payload = encounters_write._complete_undeferred(
             fake, complete_body(operation_key="enc-complete-key-0009-01"), CSRF
         )
         self.assertEqual(payload["status"], "completed")
@@ -436,7 +448,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
             ),
             "acked",
         )
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake, draft_body(operation_key="enc-draft-key-0009-0123"), CSRF
         )
         self.assertEqual(payload["status"], "draft_saved")
@@ -446,7 +458,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake = self.integration_gateway()
         booked(fake)
 
-        payload = encounters_write.save_draft(fake, draft_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(payload["status"], "draft_saved")
         order = fake.call_order
@@ -467,7 +479,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         booked(fake)
         self.seed_committed_draft()
 
-        payload = encounters_write.save_draft(fake, draft_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(payload, {"code": "STALE_VERSION"})
         self.assertEqual(fake.create_encounter_calls, [])
@@ -478,7 +490,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(record.state, write_fence.COMMITTED)
 
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake, draft_body(operation_key="enc-draft-key-0009-0123"), CSRF
         )
         self.assertEqual(payload["status"], "draft_saved")
@@ -487,10 +499,10 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake = self.integration_gateway()
         booked(fake)
 
-        first = encounters_write.save_draft(fake, draft_body(), CSRF)
+        first = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
         self.assertEqual(first["status"], "draft_saved")
 
-        payload = encounters_write.save_draft(fake, draft_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(len(fake.create_encounter_calls), 1)
@@ -509,7 +521,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -525,7 +537,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake.on_encounter_lease_entered = disable_encounter_write
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -539,7 +551,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -553,7 +565,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -566,7 +578,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         booked(fake)
         fake.create_encounter_error = RuntimeError("native write failed")
 
-        payload = encounters_write.save_draft(fake, draft_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.rollback_calls, 1)
@@ -577,7 +589,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
 
         # The dispatched key is never retried: the unresolved barrier blocks the
         # next operation until an operator reconciles it.
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake, draft_body(operation_key="enc-draft-key-0009-0123"), CSRF
         )
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
@@ -593,7 +605,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake.fresh_roles = ()
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.fresh_role_calls, [ACTOR])
         self.assertEqual(fake.encounter_lease_dispatches, [])
@@ -611,7 +623,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake.fresh_roles = ("Physician",)
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(
+            encounters_write._save_draft_undeferred(
                 fake,
                 {
                     "patient": "WS-1",
@@ -631,7 +643,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake = self.integration_gateway()
         fake.fresh_roles = ("Physician",)
 
-        payload = encounters_write.save_draft(fake, draft_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(payload["status"], "draft_saved")
         self.assertEqual(fake.fresh_role_calls, [ACTOR])
@@ -643,7 +655,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake.fresh_roles = ("Physician", "Nurse")
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -659,7 +671,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
                     fake.fresh_roles_error = RuntimeError("has role unreadable")
 
                 with self.assertRaises(Denied):
-                    encounters_write.save_draft(fake, draft_body(), CSRF)
+                    encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
                 self.assertEqual(fake.fresh_role_calls, [ACTOR])
                 self.assertEqual(fake.encounter_lease_dispatches, [])
@@ -675,7 +687,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake.fresh_roles = ()
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -684,7 +696,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake = self.integration_gateway()
         fake.fresh_roles = ("Physician",)
 
-        payload = encounters_write.save_draft(fake, draft_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(payload["status"], "draft_saved")
         order = fake.call_order
@@ -701,7 +713,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake.fresh_roles = ()
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(
+            encounters_write._save_draft_undeferred(
                 fake,
                 {
                     "patient": "WS-1",
@@ -723,7 +735,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake.fresh_roles = ()
 
         with self.assertRaises(Denied):
-            encounters_write.complete(fake, complete_body(), CSRF)
+            encounters_write._complete_undeferred(fake, complete_body(), CSRF)
 
         self.assertEqual(fake.fresh_role_calls, [ACTOR])
         self.assertEqual(fake.encounter_lease_dispatches, [])
@@ -739,7 +751,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake.fresh_roles = ()
 
         with self.assertRaises(Denied):
-            encounters_write.amend(fake, amend_body(), CSRF)
+            encounters_write._amend_undeferred(fake, amend_body(), CSRF)
 
         self.assertEqual(fake.fresh_role_calls, [ACTOR])
         self.assertEqual(fake.encounter_lease_dispatches, [])
@@ -749,7 +761,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake = gateway()
         booked(fake)
 
-        encounters_write.save_draft(fake, draft_body(), CSRF)
+        encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         order = fake.call_order
         gate_reads = [index for index, name in enumerate(order) if name == "gate_read"]
@@ -769,7 +781,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -782,7 +794,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -798,7 +810,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -812,7 +824,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, update_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, update_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.save_encounter_calls, [])
@@ -828,7 +840,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -848,7 +860,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake.on_encounter_lease_entered = rebind
 
         with self.assertRaises(Denied):
-            encounters_write.complete(fake, complete_body(), CSRF)
+            encounters_write._complete_undeferred(fake, complete_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.submit_encounter_calls, [])
@@ -862,7 +874,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.complete(fake, complete_body(), CSRF)
+            encounters_write._complete_undeferred(fake, complete_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.submit_encounter_calls, [])
@@ -879,7 +891,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.amend(fake, amend_body(), CSRF)
+            encounters_write._amend_undeferred(fake, amend_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.addendum_calls, [])
@@ -894,7 +906,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         fake.create_encounter_error = KeyboardInterrupt()
 
         with self.assertRaises(KeyboardInterrupt):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         # The native cleanup is attempted while the lease is still held, so the
         # transaction cannot outlive the fence release.
@@ -909,7 +921,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         self.assertEqual(record.state, write_fence.DISPATCHED)
         self.assertEqual(len(fake.create_encounter_calls), 1)
 
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake, draft_body(operation_key="enc-draft-key-0009-0123"), CSRF
         )
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
@@ -924,7 +936,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -945,7 +957,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -958,7 +970,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.complete(fake, complete_body(), CSRF)
+            encounters_write._complete_undeferred(fake, complete_body(), CSRF)
 
         self.assertEqual(fake.encounter_lease_dispatches, [])
         self.assertEqual(fake.submit_encounter_calls, [])
@@ -977,7 +989,7 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         )
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(
+            encounters_write._save_draft_undeferred(
                 fake,
                 {
                     "patient": "WS-1",
@@ -999,11 +1011,73 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         committed_encounter(fake, "encounter_draft", DRAFT_KEY)
         fake.submitted_service_requests = 2
 
-        payload = encounters_write.complete(fake, complete_body(), CSRF)
+        payload = encounters_write._complete_undeferred(fake, complete_body(), CSRF)
 
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(fake.read_locked_appointment_calls, [NATIVE_APPT])
         self.assertEqual(fake.locked_appointment_calls, [])
+
+    def test_a_committed_draft_replays_from_the_real_ledger(self):
+        """The durable receipt, not a re-run, is what answers a replay.
+
+        The first request writes through the production ledger; the replay goes
+        through the deferred public entry and must return the same
+        acknowledgement token while appending nothing: same sequence, no new
+        lease, no second native write.
+        """
+
+        fake = self.integration_gateway()
+        body = draft_body()
+        first = encounters_write._save_draft_undeferred(fake, body, CSRF)
+        sequence = self.ledger.info().sequence
+        leases = list(fake.encounter_lease_calls)
+        creates = list(fake.create_encounter_calls)
+
+        payload = encounters_write.save_draft(fake, body, CSRF)
+
+        self.assertEqual(payload["status"], "draft_saved")
+        self.assertEqual(payload["ackToken"], first["ackToken"])
+        self.assertEqual(self.ledger.info().sequence, sequence)
+        self.assertEqual(fake.encounter_lease_calls, leases)
+        self.assertEqual(fake.create_encounter_calls, creates)
+
+    def test_an_unresolved_operation_answers_locked_and_appends_nothing(self):
+        """A durable ``DISPATCHED`` key keeps its ``WRITE_LOCKED`` meaning.
+
+        The eager fence answered ``409 WRITE_LOCKED`` for a key whose outcome is
+        not established. The deferral must not flatten that into a generic
+        denial, and must not latch, unlock, retry or append either.
+        """
+
+        fake = self.integration_gateway()
+        body = draft_body()
+        digest = digest_for(
+            fake, "encounter_draft", validated("encounter_draft", body)
+        )
+        with self.assertRaises(write_fence.UnterminatedFence):
+            with self.ledger.fence(
+                actor=ACTOR,
+                kind="encounter_draft",
+                operation_key=DRAFT_KEY,
+                payload_digest=digest,
+            ):
+                pass
+        sequence = self.ledger.info().sequence
+
+        payload = encounters_write.save_draft(fake, body, CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(self.ledger.info().sequence, sequence)
+        self.assertEqual(
+            self.ledger.lookup(
+                actor=ACTOR, kind="encounter_draft", operation_key=DRAFT_KEY
+            ).state,
+            write_fence.DISPATCHED,
+        )
+        self.assertEqual(fake.encounter_lease_calls, [])
+        self.assertEqual(fake.create_encounter_calls, [])
+        self.assertEqual(fake.latch_calls, [])
+        self.assertEqual(fake.operation_latch_calls, [])
 
 
 def appointment_alias(key=BOOK_KEY):
@@ -1098,12 +1172,35 @@ def amend_body(**overrides):
     return values
 
 
+VALIDATORS = {
+    "encounter_draft": encounter_write.validate_save_draft,
+    "encounter_complete": encounter_write.validate_complete,
+    "encounter_amend": encounter_write.validate_amend,
+}
+
+
+def validated(kind, body):
+    """The normalised payload the endpoint derives its digest from."""
+
+    return VALIDATORS[kind](body)
+
+
+def digest_for(fake, kind, payload):
+    loaded = config.load_settings(fake.setting, fake.site)
+    return encounter_write.operation_digest(
+        loaded.epoch_secret,
+        kind=kind,
+        operation_key=payload["operation_key"],
+        fields=encounters_write._digest_fields(payload),
+    )
+
+
 class DraftTests(unittest.TestCase):
     def test_creates_a_draft_and_acknowledges_once(self):
         fake = gateway()
         booked(fake)
 
-        payload = encounters_write.save_draft(fake, draft_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(payload["status"], "draft_saved")
         self.assertEqual(payload["encounter"]["encounter_id"], encounter_alias())
@@ -1126,7 +1223,7 @@ class DraftTests(unittest.TestCase):
         fake = gateway()
         booked(fake)
 
-        encounters_write.save_draft(fake, draft_body(), CSRF)
+        encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         order = fake.call_order
         self.assertLess(order.index("encounter_create"), order.index("commit"))
@@ -1135,7 +1232,7 @@ class DraftTests(unittest.TestCase):
     def test_medication_rows_require_drug_code_before_the_fence(self):
         fake = gateway()
         booked(fake)
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake,
             draft_body(medications=[{"dosage": "1 tab"}]),
             CSRF,
@@ -1145,14 +1242,14 @@ class DraftTests(unittest.TestCase):
 
     def test_update_requires_the_actors_committed_draft(self):
         fake = gateway()
-        payload = encounters_write.save_draft(fake, update_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, update_body(), CSRF)
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.encounter_lease_calls, [])
 
     def test_a_stale_base_modified_is_refused_inside_the_fence_without_saving(self):
         fake = gateway()
         committed_encounter(fake, "encounter_draft", DRAFT_KEY)
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake, update_body(base_modified="2026-11-14 07:00:00.000000"), CSRF
         )
         self.assertEqual(payload, {"code": "STALE_VERSION"})
@@ -1161,7 +1258,7 @@ class DraftTests(unittest.TestCase):
     def test_a_draft_can_be_updated_and_keeps_the_same_alias(self):
         fake = gateway()
         committed_encounter(fake, "encounter_draft", DRAFT_KEY)
-        payload = encounters_write.save_draft(fake, update_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, update_body(), CSRF)
         self.assertEqual(payload["status"], "draft_saved")
         self.assertEqual(payload["encounter"]["encounter_id"], encounter_alias())
         self.assertEqual(len(fake.save_encounter_calls), 1)
@@ -1176,7 +1273,7 @@ class DraftTests(unittest.TestCase):
         fake = gateway()
         booked(fake)
 
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake,
             draft_body(
                 medications=[
@@ -1194,7 +1291,7 @@ class DraftTests(unittest.TestCase):
         fake = gateway()
         committed_encounter(fake, "encounter_draft", DRAFT_KEY)
 
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake, update_body(medications=[{"drug_code": "DRUG-1"}]), CSRF
         )
 
@@ -1214,7 +1311,7 @@ class DraftTests(unittest.TestCase):
         }
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.locked_appointment_calls, [NATIVE_APPT])
         self.assertEqual(fake.create_encounter_calls, [])
@@ -1229,7 +1326,7 @@ class DraftTests(unittest.TestCase):
         }
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.create_encounter_calls, [])
 
@@ -1242,7 +1339,7 @@ class DraftTests(unittest.TestCase):
             "appointment_type": "APPT-TYPE-1",
         }
 
-        payload = encounters_write.save_draft(fake, draft_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.create_encounter_calls, [])
@@ -1253,7 +1350,7 @@ class DraftTests(unittest.TestCase):
         fake.locked_appointment = None
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(fake.create_encounter_calls, [])
 
@@ -1270,7 +1367,7 @@ class DraftTests(unittest.TestCase):
             medication_count=1
         )
 
-        payload = encounters_write.save_draft(fake, update_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, update_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.encounter_lease_calls, [])
@@ -1281,7 +1378,7 @@ class DraftTests(unittest.TestCase):
         committed_encounter(fake, "encounter_draft", DRAFT_KEY)
         fake.encounter_locked[NATIVE_ENCOUNTER] = {"medication_count": 1}
 
-        payload = encounters_write.save_draft(fake, update_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, update_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.save_encounter_calls, [])
@@ -1299,7 +1396,7 @@ class DraftTests(unittest.TestCase):
         fake.clinical_note_can_create = False
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
         self.assertEqual(fake.encounter_lease_calls, [])
 
     def test_an_update_with_a_note_is_refused_the_same_way(self):
@@ -1308,7 +1405,7 @@ class DraftTests(unittest.TestCase):
         fake.clinical_note_can_create = False
 
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, update_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, update_body(), CSRF)
         self.assertEqual(fake.encounter_lease_calls, [])
 
     def test_a_draft_without_a_note_still_saves(self):
@@ -1316,7 +1413,7 @@ class DraftTests(unittest.TestCase):
         booked(fake)
         fake.clinical_note_can_create = False
 
-        payload = encounters_write.save_draft(fake, draft_body(note=None), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(note=None), CSRF)
 
         self.assertEqual(payload["status"], "draft_saved")
 
@@ -1324,7 +1421,7 @@ class DraftTests(unittest.TestCase):
         fake = gateway()
         booked(fake)
 
-        encounters_write.save_draft(fake, draft_body(), CSRF)
+        encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(
             fake.create_encounter_calls[0]["_appointment_type"], "APPT-TYPE-1"
@@ -1335,7 +1432,7 @@ class DraftTests(unittest.TestCase):
         booked(fake)
         fake.encounter_appointment_type = None
 
-        payload = encounters_write.save_draft(fake, draft_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.encounter_lease_calls, [])
@@ -1345,7 +1442,7 @@ class DraftTests(unittest.TestCase):
         fake = gateway()
         booked(fake)
         fake.appointment_action_details[NATIVE_APPT]["status"] = "Scheduled"
-        payload = encounters_write.save_draft(fake, draft_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.encounter_lease_calls, [])
 
@@ -1354,14 +1451,14 @@ class DraftTests(unittest.TestCase):
         booked(fake)
         fake.encounter_install_problem = "missing field Drug Prescription.drug_code"
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
         self.assertEqual(fake.encounter_lease_calls, [])
 
         other = gateway()
         booked(other)
         other.encounter_boundary_problem = "versions drift for healthcare"
         with self.assertRaises(Denied):
-            encounters_write.save_draft(other, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(other, draft_body(), CSRF)
         self.assertEqual(other.encounter_lease_calls, [])
 
     def test_exhausted_draft_budget_is_refused_before_the_fence(self):
@@ -1369,7 +1466,7 @@ class DraftTests(unittest.TestCase):
         booked(fake)
         committed_encounter(fake, "encounter_draft", "enc-draft-key-0000-0001")
         committed_encounter(fake, "encounter_draft", "enc-draft-key-0000-0002")
-        payload = encounters_write.save_draft(fake, draft_body(), CSRF)
+        payload = encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.encounter_lease_calls, [])
 
@@ -1378,7 +1475,7 @@ class DraftTests(unittest.TestCase):
             current_session=session_view(user="cashier@example.test", roles=("Accounts User",))
         )
         with self.assertRaises(Denied):
-            encounters_write.save_draft(fake, draft_body(), CSRF)
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
         self.assertEqual(fake.encounter_lease_calls, [])
 
 
@@ -1392,7 +1489,7 @@ class NurseSectionTests(unittest.TestCase):
 
     def test_nurse_may_save_vitals_only(self):
         fake = self.nurse_gateway()
-        payload = encounters_write.save_draft(
+        payload = encounters_write._save_draft_undeferred(
             fake,
             {
                 "patient": "WS-1",
@@ -1418,7 +1515,7 @@ class NurseSectionTests(unittest.TestCase):
             with self.subTest(field=field):
                 fake = self.nurse_gateway()
                 with self.assertRaises(Denied):
-                    encounters_write.save_draft(
+                    encounters_write._save_draft_undeferred(
                         fake,
                         update_body(**{field: value}),
                         CSRF,
@@ -1435,7 +1532,7 @@ class CompleteTests(unittest.TestCase):
     def test_completes_and_verifies_the_expected_cascade(self):
         fake = self.ready()
         fake.submitted_service_requests = 2
-        payload = encounters_write.complete(fake, complete_body(), CSRF)
+        payload = encounters_write._complete_undeferred(fake, complete_body(), CSRF)
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["encounter"]["state"], "completed")
         self.assertEqual(len(fake.submit_encounter_calls), 1)
@@ -1455,7 +1552,7 @@ class CompleteTests(unittest.TestCase):
         fake.encounter_details[NATIVE_ENCOUNTER] = encounter_detail(
             appointment=None, appointment_status=None
         )
-        payload = encounters_write.complete(fake, complete_body(), CSRF)
+        payload = encounters_write._complete_undeferred(fake, complete_body(), CSRF)
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.encounter_lease_calls, [])
         self.assertEqual(fake.submit_encounter_calls, [])
@@ -1467,7 +1564,7 @@ class CompleteTests(unittest.TestCase):
                 fake.encounter_details[NATIVE_ENCOUNTER] = encounter_detail(
                     appointment_status=status
                 )
-                payload = encounters_write.complete(fake, complete_body(), CSRF)
+                payload = encounters_write._complete_undeferred(fake, complete_body(), CSRF)
                 self.assertEqual(payload, {"code": "WRITE_LOCKED"})
                 self.assertEqual(fake.encounter_lease_calls, [])
                 self.assertEqual(fake.submit_encounter_calls, [])
@@ -1478,7 +1575,7 @@ class CompleteTests(unittest.TestCase):
             medication_count=1
         )
 
-        payload = encounters_write.complete(fake, complete_body(), CSRF)
+        payload = encounters_write._complete_undeferred(fake, complete_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.encounter_lease_calls, [])
@@ -1488,7 +1585,7 @@ class CompleteTests(unittest.TestCase):
         fake = self.ready()
         fake.encounter_locked[NATIVE_ENCOUNTER] = {"medication_count": 1}
 
-        payload = encounters_write.complete(fake, complete_body(), CSRF)
+        payload = encounters_write._complete_undeferred(fake, complete_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.submit_encounter_calls, [])
@@ -1497,7 +1594,7 @@ class CompleteTests(unittest.TestCase):
         fake = self.ready()
         fake.encounter_locked[NATIVE_ENCOUNTER] = {"appointment": None}
 
-        payload = encounters_write.complete(fake, complete_body(), CSRF)
+        payload = encounters_write._complete_undeferred(fake, complete_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.locked_appointment_calls, [])
@@ -1511,7 +1608,7 @@ class CompleteTests(unittest.TestCase):
             "appointment_type": "APPT-TYPE-1",
         }
 
-        payload = encounters_write.complete(fake, complete_body(), CSRF)
+        payload = encounters_write._complete_undeferred(fake, complete_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.submit_encounter_calls, [])
@@ -1529,13 +1626,13 @@ class CompleteTests(unittest.TestCase):
                 fake.encounter_details[NATIVE_ENCOUNTER] = encounter_detail(
                     **{field: value}
                 )
-                payload = encounters_write.complete(fake, complete_body(), CSRF)
+                payload = encounters_write._complete_undeferred(fake, complete_body(), CSRF)
                 self.assertEqual(payload, {"code": "VALIDATION"})
                 self.assertEqual(fake.encounter_lease_calls, [])
 
     def test_the_allergy_acknowledgement_is_required(self):
         fake = self.ready()
-        payload = encounters_write.complete(
+        payload = encounters_write._complete_undeferred(
             fake, complete_body(allergy_reviewed=False), CSRF
         )
         self.assertEqual(payload, {"code": "VALIDATION"})
@@ -1544,7 +1641,7 @@ class CompleteTests(unittest.TestCase):
     def test_a_cascade_mismatch_rolls_back_and_does_not_commit(self):
         fake = self.ready()
         fake.submitted_service_requests = 1
-        payload = encounters_write.complete(fake, complete_body(), CSRF)
+        payload = encounters_write._complete_undeferred(fake, complete_body(), CSRF)
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.encounter_lease_claim.committed, [])
         self.assertEqual(fake.rollback_calls, 1)
@@ -1555,13 +1652,13 @@ class CompleteTests(unittest.TestCase):
         )
         committed_encounter(fake, "encounter_draft", DRAFT_KEY)
         with self.assertRaises(Denied):
-            encounters_write.complete(fake, complete_body(), CSRF)
+            encounters_write._complete_undeferred(fake, complete_body(), CSRF)
         self.assertEqual(fake.encounter_lease_calls, [])
 
     def test_complete_budget_is_single(self):
         fake = self.ready()
         committed_encounter(fake, "encounter_complete", "enc-complete-key-0000-01")
-        payload = encounters_write.complete(fake, complete_body(), CSRF)
+        payload = encounters_write._complete_undeferred(fake, complete_body(), CSRF)
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.encounter_lease_calls, [])
 
@@ -1577,7 +1674,7 @@ class AmendTests(unittest.TestCase):
 
     def test_creates_an_addendum_and_never_rewrites_the_original(self):
         fake = self.finalized()
-        payload = encounters_write.amend(fake, amend_body(), CSRF)
+        payload = encounters_write._amend_undeferred(fake, amend_body(), CSRF)
         self.assertEqual(payload["status"], "amended")
         self.assertTrue(payload["addendum"].startswith("addendum_"))
         state, note_text, actor = fake.addendum_calls[0]
@@ -1612,7 +1709,7 @@ class AmendTests(unittest.TestCase):
         }
         fake.amend_facts = {"encounter_modified": newer}
 
-        payload = encounters_write.amend(fake, amend_body(), CSRF)
+        payload = encounters_write._amend_undeferred(fake, amend_body(), CSRF)
 
         self.assertEqual(payload["status"], "amended")
         facts_call = fake.amend_facts_calls[0]
@@ -1622,7 +1719,7 @@ class AmendTests(unittest.TestCase):
     def test_a_draft_is_not_amendable_pre_fence(self):
         fake = gateway()
         committed_encounter(fake, "encounter_draft", DRAFT_KEY)
-        payload = encounters_write.amend(fake, amend_body(), CSRF)
+        payload = encounters_write._amend_undeferred(fake, amend_body(), CSRF)
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.encounter_lease_calls, [])
         self.assertEqual(fake.addendum_calls, [])
@@ -1632,7 +1729,7 @@ class AmendTests(unittest.TestCase):
         fake.amend_facts = {
             "clinical_note_modified": "2026-11-14 09:59:00.000000"
         }
-        payload = encounters_write.amend(fake, amend_body(), CSRF)
+        payload = encounters_write._amend_undeferred(fake, amend_body(), CSRF)
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.encounter_lease_claim.committed, [])
         self.assertEqual(fake.rollback_calls, 1)
@@ -1640,9 +1737,445 @@ class AmendTests(unittest.TestCase):
     def test_amend_budget_is_single(self):
         fake = self.finalized()
         committed_encounter(fake, "encounter_amend", "enc-amend-key-0000-0001")
-        payload = encounters_write.amend(fake, amend_body(), CSRF)
+        payload = encounters_write._amend_undeferred(fake, amend_body(), CSRF)
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.encounter_lease_calls, [])
+
+
+class DeferredWriteTests(unittest.TestCase):
+    """New encounter mutations are refused before any fence or native write.
+
+    The capability map publishes the encounter draft, completion, amendment and
+    lab-ordering ids ``read_only``; these tests prove a direct caller of the API
+    gets the same answer. Every case passes the read gate, the explicit
+    same-session CSRF check and the enabled encounter deployment gate first, so
+    the refusal is the deferral and not a gate artefact.
+    """
+
+    def assert_refused_without_dispatch(self, fake, call):
+        with self.assertRaises(Denied):
+            call()
+        self.assertEqual(fake.encounter_lease_calls, [])
+        self.assertEqual(fake.create_encounter_calls, [])
+        self.assertEqual(fake.save_encounter_calls, [])
+        self.assertEqual(fake.submit_encounter_calls, [])
+        self.assertEqual(fake.addendum_calls, [])
+        self.assertEqual(fake.encounter_lease_claim.committed, [])
+        self.assertEqual(fake.commit_calls, 0)
+
+    def test_a_new_draft_is_refused_before_the_fence(self):
+        fake = gateway()
+        booked(fake)
+
+        self.assert_refused_without_dispatch(
+            fake, lambda: encounters_write.save_draft(fake, draft_body(), CSRF)
+        )
+
+        # The explicit same-session CSRF check still runs ahead of the refusal.
+        self.assertEqual(fake.csrf_supplied, [CSRF])
+
+    def test_a_draft_update_is_refused_before_the_fence(self):
+        fake = gateway()
+        committed_encounter(fake, "encounter_draft", DRAFT_KEY)
+
+        self.assert_refused_without_dispatch(
+            fake, lambda: encounters_write.save_draft(fake, update_body(), CSRF)
+        )
+
+    def test_a_completion_is_refused_before_the_fence(self):
+        fake = gateway()
+        committed_encounter(fake, "encounter_draft", DRAFT_KEY)
+
+        self.assert_refused_without_dispatch(
+            fake, lambda: encounters_write.complete(fake, complete_body(), CSRF)
+        )
+
+    def test_an_amendment_is_refused_before_the_fence(self):
+        fake = gateway()
+        committed_encounter(fake, "encounter_draft", DRAFT_KEY)
+        fake.encounter_details[NATIVE_ENCOUNTER] = encounter_detail(
+            docstatus=1, status="Completed"
+        )
+
+        self.assert_refused_without_dispatch(
+            fake, lambda: encounters_write.amend(fake, amend_body(), CSRF)
+        )
+
+    def test_a_lab_bearing_draft_is_refused_before_the_fence(self):
+        """Lab rows ride the draft payload and never reach the fence."""
+
+        fake = gateway()
+        booked(fake)
+
+        self.assert_refused_without_dispatch(
+            fake,
+            lambda: encounters_write.save_draft(
+                fake, draft_body(lab_tests=[{"lab_test_code": "CBC"}]), CSRF
+            ),
+        )
+
+    def test_a_nurse_draft_is_refused_before_the_fence(self):
+        fake = gateway(
+            current_session=session_view(user="nurse@example.test", roles=("Nurse",))
+        )
+        booked(fake)
+
+        self.assert_refused_without_dispatch(
+            fake, lambda: encounters_write.save_draft(fake, draft_body(), CSRF)
+        )
+
+    def test_a_bad_csrf_token_refuses_without_dispatching(self):
+        fake = gateway()
+        booked(fake)
+
+        self.assert_refused_without_dispatch(
+            fake, lambda: encounters_write.save_draft(fake, draft_body(), "wrong")
+        )
+
+
+class CommittedReplayTests(unittest.TestCase):
+    """An exact replay of the caller's own committed operation still answers.
+
+    Nothing new dispatches, mutates, latches, unlocks or retries. A terminal
+    ``COMMITTED`` record for this actor, kind, operation key, payload digest and
+    alias rebuilds the same body and the same acknowledgement token; this actor's
+    own ``DISPATCHED``/``UNKNOWN`` key keeps the eager fence's
+    ``409 WRITE_LOCKED`` answer; every other key is refused.
+    """
+
+    def committed(self, fake, kind, body, *, state="COMMITTED", digest=None,
+                  actor=ACTOR, alias=None, native_id=NATIVE_ENCOUNTER):
+        payload = validated(kind, body)
+        key = payload["operation_key"]
+        stored_alias = alias
+        if stored_alias is None:
+            stored_alias = payload["encounter"] or encounter_alias(key)
+        if digest is None:
+            digest = digest_for(fake, kind, payload)
+        receipt = encounter_write.encode_receipt(
+            kind=kind, alias=stored_alias, native_encounter_id=native_id
+        )
+        fake.encounter_operations[(actor, kind, key)] = FakeEncounterOperation(
+            state, digest, receipt
+        )
+        return receipt
+
+    def expected_ack(self, fake, kind, body, receipt):
+        payload = validated(kind, body)
+        loaded = config.load_settings(fake.setting, fake.site)
+        return encounter_write.ack_token(
+            loaded.epoch_secret,
+            fake.site,
+            ACTOR,
+            kind,
+            payload["operation_key"],
+            receipt,
+        )
+
+    def assert_no_dispatch(self, fake):
+        self.assertEqual(fake.encounter_lease_calls, [])
+        self.assertEqual(fake.create_encounter_calls, [])
+        self.assertEqual(fake.save_encounter_calls, [])
+        self.assertEqual(fake.submit_encounter_calls, [])
+        self.assertEqual(fake.addendum_calls, [])
+        self.assertEqual(fake.commit_calls, 0)
+
+    def test_a_committed_draft_create_replays_its_own_ack_token(self):
+        fake = gateway()
+        body = draft_body()
+        receipt = self.committed(
+            fake, "encounter_draft", body, actor=ACTOR
+        )
+
+        payload = encounters_write.save_draft(fake, body, CSRF)
+
+        self.assertEqual(payload["status"], "draft_saved")
+        self.assertEqual(
+            payload["ackToken"], self.expected_ack(fake, "encounter_draft", body, receipt)
+        )
+        self.assertEqual(payload["encounter"]["encounter_id"], encounter_alias())
+        self.assertNotIn("NATIVE-ENC", repr(payload))
+        self.assert_no_dispatch(fake)
+        self.assertEqual(fake.encounter_ack_calls, [])
+
+    def test_a_committed_draft_update_replays(self):
+        fake = gateway()
+        body = update_body()
+        receipt = self.committed(fake, "encounter_draft", body)
+
+        payload = encounters_write.save_draft(fake, body, CSRF)
+
+        self.assertEqual(payload["status"], "draft_saved")
+        self.assertEqual(
+            payload["ackToken"], self.expected_ack(fake, "encounter_draft", body, receipt)
+        )
+        self.assert_no_dispatch(fake)
+
+    def test_a_committed_completion_replays(self):
+        fake = gateway()
+        body = complete_body()
+        receipt = self.committed(fake, "encounter_complete", body)
+
+        payload = encounters_write.complete(fake, body, CSRF)
+
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(
+            payload["ackToken"],
+            self.expected_ack(fake, "encounter_complete", body, receipt),
+        )
+        self.assert_no_dispatch(fake)
+
+    def test_a_committed_amendment_replays_its_addendum_reference(self):
+        fake = gateway()
+        body = amend_body()
+        receipt = self.committed(fake, "encounter_amend", body)
+
+        payload = encounters_write.amend(fake, body, CSRF)
+
+        self.assertEqual(payload["status"], "amended")
+        self.assertEqual(payload["addendum"], f"addendum_{AMEND_KEY}")
+        self.assertEqual(
+            payload["ackToken"],
+            self.expected_ack(fake, "encounter_amend", body, receipt),
+        )
+        self.assert_no_dispatch(fake)
+
+    def test_the_replayed_token_is_the_one_acknowledge_accepts(self):
+        fake = gateway()
+        body = complete_body()
+        receipt = self.committed(fake, "encounter_complete", body)
+
+        payload = encounters_write.complete(fake, body, CSRF)
+        token = payload["ackToken"]
+
+        self.assertTrue(encounter_write.is_valid_ack_token(token))
+        self.assertEqual(
+            token,
+            encounter_write.ack_token(
+                config.load_settings(fake.setting, fake.site).epoch_secret,
+                fake.site,
+                ACTOR,
+                "encounter_complete",
+                COMPLETE_KEY,
+                receipt,
+            ),
+        )
+        self.assertEqual(
+            encounters_write.acknowledge(
+                fake,
+                {
+                    "operation_key": COMPLETE_KEY,
+                    "kind": "encounter_complete",
+                    "ack_token": token,
+                },
+                CSRF,
+            ),
+            {"acknowledged": True},
+        )
+
+    def test_a_different_payload_on_the_same_key_is_refused(self):
+        fake = gateway()
+        self.committed(fake, "encounter_draft", draft_body(), digest="ab" * 32)
+
+        with self.assertRaises(Denied):
+            encounters_write.save_draft(fake, draft_body(complaint="Other"), CSRF)
+
+        self.assert_no_dispatch(fake)
+
+    def test_another_actors_key_is_refused(self):
+        fake = gateway()
+        body = draft_body()
+        self.committed(
+            fake, "encounter_draft", body, actor="other@example.test"
+        )
+
+        with self.assertRaises(Denied):
+            encounters_write.save_draft(fake, body, CSRF)
+
+        self.assert_no_dispatch(fake)
+
+    def test_a_receipt_for_another_alias_is_refused(self):
+        fake = gateway()
+        body = update_body()
+        self.committed(
+            fake, "encounter_draft", body, alias=encounter_alias(DRAFT_UPDATE_KEY)
+        )
+
+        with self.assertRaises(Denied):
+            encounters_write.save_draft(fake, body, CSRF)
+
+        self.assert_no_dispatch(fake)
+
+    def test_an_unreadable_store_is_refused(self):
+        fake = gateway()
+        body = draft_body()
+        fake.encounter_operations[(ACTOR, "encounter_draft", DRAFT_KEY)] = (
+            patient_write.StoreUnavailable()
+        )
+
+        with self.assertRaises(Denied):
+            encounters_write.save_draft(fake, body, CSRF)
+
+        self.assert_no_dispatch(fake)
+
+    def test_a_malformed_replay_body_is_refused_before_any_lookup(self):
+        fake = gateway()
+
+        payload = encounters_write.save_draft(fake, {"patient": "WS-1"}, CSRF)
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.encounter_operation_calls, [])
+        self.assert_no_dispatch(fake)
+
+
+    def test_a_dispatched_replay_answers_locked_without_latching(self):
+        """The eager fence answered ``WRITE_LOCKED``; so does a replay.
+
+        The key is the caller's own and its outcome is not established, so the
+        refusal keeps that meaning instead of collapsing into a generic denial.
+        Nothing is latched, unlocked, retried or appended.
+        """
+
+        fake = gateway()
+        body = draft_body()
+        self.committed(fake, "encounter_draft", body, state="DISPATCHED")
+
+        payload = encounters_write.save_draft(fake, body, CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assert_no_dispatch(fake)
+        self.assertEqual(fake.latch_calls, [])
+        self.assertEqual(fake.operation_latch_calls, [])
+
+    def test_an_unknown_replay_answers_locked_without_latching(self):
+        fake = gateway()
+        body = complete_body()
+        self.committed(fake, "encounter_complete", body, state="UNKNOWN")
+
+        payload = encounters_write.complete(fake, body, CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assert_no_dispatch(fake)
+        self.assertEqual(fake.latch_calls, [])
+        self.assertEqual(fake.operation_latch_calls, [])
+
+    def test_a_replay_is_refused_when_the_fresh_role_disagrees(self):
+        fake = gateway()
+        body = draft_body()
+        self.committed(fake, "encounter_draft", body)
+        # The stored Has Role rows no longer resolve to the gated role.
+        fake.fresh_roles = ("Nurse",)
+
+        with self.assertRaises(Denied):
+            encounters_write.save_draft(fake, body, CSRF)
+
+        self.assertEqual(fake.fresh_role_calls, [ACTOR])
+        self.assert_no_dispatch(fake)
+        self.assertEqual(fake.latch_calls, [])
+
+    def test_a_replay_is_refused_when_the_fresh_role_read_fails(self):
+        fake = gateway()
+        body = draft_body()
+        self.committed(fake, "encounter_draft", body)
+        fake.fresh_roles_unreadable = True
+
+        with self.assertRaises(Denied):
+            encounters_write.save_draft(fake, body, CSRF)
+
+        self.assert_no_dispatch(fake)
+
+    def test_the_replay_authority_reread_follows_the_snapshot_reset(self):
+        fake = gateway()
+        body = draft_body()
+        self.committed(fake, "encounter_draft", body)
+
+        encounters_write.save_draft(fake, body, CSRF)
+
+        order = fake.call_order
+        self.assertLess(
+            order.index("config_refresh"), order.index("snapshot_reset")
+        )
+        self.assertLess(
+            order.index("snapshot_reset"), order.index("fresh_roles_read")
+        )
+
+    def test_a_replay_is_refused_when_the_native_detail_is_missing(self):
+        fake = gateway()
+        body = draft_body()
+        self.committed(fake, "encounter_draft", body)
+        fake.native_encounter_detail = lambda native_id: None
+
+        with self.assertRaises(Denied):
+            encounters_write.save_draft(fake, body, CSRF)
+
+        self.assert_no_dispatch(fake)
+        self.assertEqual(fake.latch_calls, [])
+        self.assertEqual(fake.operation_latch_calls, [])
+
+    def test_a_replay_uses_the_refreshed_patient_allowlist(self):
+        """The response is built from the re-read settings, not the stale ones.
+
+        The patient is dropped from the allowlist between the two gate reads.
+        ``_success`` maps the native patient through the allowlist, so a replay
+        that kept the first read would answer with a patient the site no longer
+        maps; it must refuse instead.
+        """
+
+        fake = gateway()
+        body = draft_body()
+        self.committed(fake, "encounter_draft", body)
+        fake.on_snapshot_reset = lambda gw: gw._settings.update(
+            clinic_ui_synthetic_patients=[]
+        )
+
+        with self.assertRaises(Denied):
+            encounters_write.save_draft(fake, body, CSRF)
+
+        self.assert_no_dispatch(fake)
+        self.assertEqual(fake.latch_calls, [])
+
+    def test_a_replay_is_refused_when_the_session_user_changes(self):
+        fake = gateway()
+        body = draft_body()
+        self.committed(fake, "encounter_draft", body)
+        fake.on_snapshot_reset = lambda gw: setattr(
+            gw,
+            "current_session",
+            session_view(user="other@example.test", roles=("Physician",)),
+        )
+
+        with self.assertRaises(Denied):
+            encounters_write.save_draft(fake, body, CSRF)
+
+        self.assert_no_dispatch(fake)
+
+    def test_a_replay_is_refused_when_the_gated_role_changes(self):
+        fake = gateway()
+        body = draft_body()
+        self.committed(fake, "encounter_draft", body)
+        fake.on_snapshot_reset = lambda gw: setattr(
+            gw,
+            "current_session",
+            session_view(user=ACTOR, roles=("Nurse",)),
+        )
+
+        with self.assertRaises(Denied):
+            encounters_write.save_draft(fake, body, CSRF)
+
+        self.assert_no_dispatch(fake)
+
+    def test_a_replay_is_refused_when_the_epoch_secret_changes(self):
+        fake = gateway()
+        body = draft_body()
+        self.committed(fake, "encounter_draft", body)
+        fake.on_snapshot_reset = lambda gw: gw._settings.update(
+            clinic_ui_epoch_secret="f" * 32
+        )
+
+        with self.assertRaises(Denied):
+            encounters_write.save_draft(fake, body, CSRF)
+
+        self.assert_no_dispatch(fake)
 
 
 class AckTests(unittest.TestCase):

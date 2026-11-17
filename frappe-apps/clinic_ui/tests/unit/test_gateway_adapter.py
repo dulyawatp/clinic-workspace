@@ -5047,5 +5047,138 @@ class EncounterWriteLeaseAdapterTests(GatewayTestCase):
             self.assertIsNone(gateway.setting("clinic_ui_native_encounter_write_enabled"))
 
 
+class EncounterOperationLookupTests(GatewayTestCase):
+    """``lookup_encounter_operation`` reads one key and never changes it.
+
+    The replay path needs the durable state *and* the stored payload digest, not
+    just the receipt, so it can refuse an uncertain key with the eager fence's
+    ``WRITE_LOCKED`` answer and refuse a different payload outright. The read is
+    plain ``Ledger.lookup``: no claim, no latch, no unlock, no event.
+    """
+
+    KEY = "enc-draft-key-0001-0123"
+    RECEIPT = "encounter-receipt"
+
+    def doctor(self, site_path=None):
+        stub = FakeFrappe(
+            site_path=site_path,
+            session=types.SimpleNamespace(
+                user="doctor@example.test", sid="sid-abc123"
+            ),
+        )
+        stub.db.values[("__perm__", None, "create")] = True
+        stub.db.values[("__perm__", None, "write")] = True
+        stub.db.values[("__perm__", None, "read")] = True
+        stub.db.existing.add(("Gender", "Female"))
+        return stub
+
+    def gateway_with_store(self, root):
+        return self.gateway(self.doctor(site_path=root))
+
+    def initialized_root(self):
+        import tempfile
+
+        root = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: __import__("shutil").rmtree(root, ignore_errors=True)
+        )
+        private = Path(root) / "private"
+        private.mkdir(mode=0o700)
+        fence_store.initialize_store(
+            private / fence_store.STORE_DIRNAME,
+            private / fence_store.ANCHOR_FILENAME,
+        )
+        return root
+
+    def committed(self, gateway):
+        with gateway.encounter_write_lease(
+            "doctor@example.test", "encounter_draft", self.KEY, "a" * 64
+        ) as lease:
+            claim = lease.dispatch()
+            claim.commit(self.RECEIPT)
+
+    def test_it_returns_the_committed_record_with_its_digest(self):
+        gateway = self.gateway_with_store(self.initialized_root())
+        self.committed(gateway)
+        sequence = gateway._ledger().info().sequence
+
+        record = gateway.lookup_encounter_operation(
+            "doctor@example.test", "encounter_draft", self.KEY
+        )
+
+        self.assertEqual(record.state, write_fence.COMMITTED)
+        self.assertEqual(record.payload_digest, "a" * 64)
+        self.assertEqual(record.receipt, self.RECEIPT)
+        self.assertEqual(gateway._ledger().info().sequence, sequence)
+
+    def test_it_returns_an_non_terminal_record_instead_of_locking(self):
+        gateway = self.gateway_with_store(self.initialized_root())
+        with self.assertRaises(patient_write.WriteUncertain):
+            with gateway.encounter_write_lease(
+                "doctor@example.test", "encounter_draft", self.KEY, "b" * 64
+            ) as lease:
+                lease.dispatch()
+        sequence = gateway._ledger().info().sequence
+
+        record = gateway.lookup_encounter_operation(
+            "doctor@example.test", "encounter_draft", self.KEY
+        )
+
+        self.assertEqual(record.state, write_fence.DISPATCHED)
+        self.assertEqual(record.payload_digest, "b" * 64)
+        self.assertEqual(gateway._ledger().info().sequence, sequence)
+
+    def test_another_actors_key_is_no_record(self):
+        gateway = self.gateway_with_store(self.initialized_root())
+        self.committed(gateway)
+
+        self.assertIsNone(
+            gateway.lookup_encounter_operation(
+                "other@example.test", "encounter_draft", self.KEY
+            )
+        )
+
+    def test_a_foreign_kind_is_refused_before_the_ledger_is_read(self):
+        gateway = self.gateway_with_store(self.initialized_root())
+        gateway._ledger = lambda: self.fail("the ledger must not be read")
+
+        with self.assertRaises(patient_write.WriteUncertain):
+            gateway.lookup_encounter_operation(
+                "doctor@example.test", "create", self.KEY
+            )
+
+    def test_an_unreadable_store_maps_to_store_unavailable(self):
+        gateway = self.gateway_with_store(self.initialized_root())
+
+        class FailingLedger:
+            def lookup(self, **kwargs):
+                raise write_fence.StoreUnavailable("store failed")
+
+        gateway._ledger = lambda: FailingLedger()
+        try:
+            with self.assertRaises(patient_write.StoreUnavailable):
+                gateway.lookup_encounter_operation(
+                    "doctor@example.test", "encounter_draft", self.KEY
+                )
+        finally:
+            del gateway._ledger
+
+    def test_a_fence_error_maps_to_write_uncertain(self):
+        gateway = self.gateway_with_store(self.initialized_root())
+
+        class FailingLedger:
+            def lookup(self, **kwargs):
+                raise write_fence.FenceError("ledger error")
+
+        gateway._ledger = lambda: FailingLedger()
+        try:
+            with self.assertRaises(patient_write.WriteUncertain):
+                gateway.lookup_encounter_operation(
+                    "doctor@example.test", "encounter_draft", self.KEY
+                )
+        finally:
+            del gateway._ledger
+
+
 if __name__ == "__main__":
     unittest.main()

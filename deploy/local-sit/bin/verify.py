@@ -97,10 +97,28 @@ WRITE_CAPABILITY_GATES = {
 # Deferred write surfaces: never enabled, whatever the site config says.
 # Medication ordering was deferred on 2026-11-18: the draft contract refuses a
 # non-empty ``medications`` section before the fence until a reviewed medication
-# contract exists, so the published map must keep it read_only even when the
-# encounter family gate is open. The capability stays in WRITE_CAPABILITY_GATES
-# and in the frozen contract, so it is still asserted - never silently dropped.
-DEFERRED_WRITE_CAPABILITIES = frozenset({"write.medication.order"})
+# contract exists. Encounter draft, completion and amendment plus lab ordering
+# were deferred the same day: a pinned native draft save closes its appointment
+# while the completion contract requires an open or checked-in appointment, and
+# lab ordering has no reviewed contract. The encounter backend refuses these
+# requests before fence dispatch, so the published map must keep them read_only
+# even when the encounter family gate is open. Every capability stays in
+# WRITE_CAPABILITY_GATES and in the frozen contract, so each is still asserted
+# as deferred - never silently dropped from the checks.
+#
+# Scope of the live check: the verifier reads a single authenticated DOC
+# bootstrap, so the assertion below covers DOC only. NUR, REC and the other role
+# maps need separate authorization-safe verification; the verifier adds no extra
+# live logins to cover them.
+DEFERRED_WRITE_CAPABILITIES = frozenset(
+    {
+        "write.encounter.draft",
+        "write.encounter.complete",
+        "write.encounter.amend",
+        "write.lab.order",
+        "write.medication.order",
+    }
+)
 
 # Cut or unimplemented surfaces: read_only whatever the site config says.
 PERMANENT_READ_ONLY = frozenset(
@@ -429,19 +447,15 @@ def selfcheck() -> int:
         ("a missing capability id is caught", bool(capability_problems(
             good_capabilities, capability_ids + ["write.new.thing"], good_gates, "DOC"
         ))),
-        ("the encounter gate leaves medication ordering disabled", (
-            "write.medication.order"
-            not in expected_enabled_writes(dict(good_gates, encounter=1), "DOC")
-            and {"write.encounter.draft", "write.lab.order"}
+        ("the encounter gate leaves every deferred DOC write disabled", (
+            not DEFERRED_WRITE_CAPABILITIES
+            & expected_enabled_writes(dict(good_gates, encounter=1), "DOC")
+            and {
+                "write.patient.create",
+                "write.patient.update",
+                "write.appointment.book",
+            }
             <= expected_enabled_writes(dict(good_gates, encounter=1), "DOC")
-        )),
-        ("an enabled medication write is caught with the encounter gate open", bool(
-            capability_problems(
-                dict(gated_encounter_capabilities, **{"write.medication.order": "enabled"}),
-                capability_ids,
-                gated_encounter_gates,
-                "DOC",
-            )
         )),
         ("ledger read-back matches", not fence_ledger_problems(
             good_ledger, 24, APPROVED_BUDGETS
@@ -521,6 +535,18 @@ def selfcheck() -> int:
                 )
             }
         ))),
+    ]
+    cases += [
+        (
+            f"an enabled deferred write is caught: {name}",
+            bool(capability_problems(
+                dict(gated_encounter_capabilities, **{name: "enabled"}),
+                capability_ids,
+                gated_encounter_gates,
+                "DOC",
+            )),
+        )
+        for name in sorted(DEFERRED_WRITE_CAPABILITIES)
     ]
     failures = [name for name, ok in cases if not ok]
     for name, ok in cases:
@@ -1038,6 +1064,9 @@ def main() -> int:
     capability_issues = capability_problems(
         capabilities, expected_capabilities, gates, "DOC"
     )
+    # This reads the one authenticated DOC bootstrap: the deferred-write
+    # assertion covers DOC only. NUR and the other role maps are not logged in
+    # here and need separate authorization-safe verification.
     record(
         "DOC write capabilities follow the site gates",
         not capability_issues,
@@ -1046,6 +1075,7 @@ def main() -> int:
             "gates": gates,
             "enabled": sorted(enabled_writes),
             "expected_enabled": sorted(expected_enabled_writes(gates, "DOC")),
+            "deferred_expected": sorted(DEFERRED_WRITE_CAPABILITIES),
             "deferred_capabilities": deferred_capability_states(capabilities),
             "problems": capability_issues,
         },

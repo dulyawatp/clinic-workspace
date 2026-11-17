@@ -30,6 +30,15 @@ NEW_WRITE_NAMES = (
     "write.stock.consume",
 )
 
+# The deferred encounter surface: the ids stay in the client's enableable set
+# (parity is asserted below) but bootstrap never promotes them.
+DEFERRED_ENCOUNTER_NAMES = (
+    "write.encounter.draft",
+    "write.encounter.complete",
+    "write.encounter.amend",
+    "write.lab.order",
+)
+
 
 def contract_path():
     for parent in Path(__file__).resolve().parents:
@@ -218,22 +227,63 @@ class BootstrapCapabilityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_capabilities({**valid, name: ENABLED_STATE})
 
-    def test_the_encounter_draft_gate_does_not_advertise_medication_ordering(self):
-        """Medication rows are refused pre-fence, so they are not advertised.
+    def test_the_encounter_gate_does_not_advertise_any_deferred_write(self):
+        """Encounter draft, completion, amendment and lab ordering are deferred.
 
-        The draft contract refuses any non-empty ``medications`` section until a
-        reviewed medication contract exists (the installed ``dosage_form`` is
-        required and unsupplied). The published map must not claim otherwise.
-        Lab ordering is still accepted by the same body and keeps its gate.
+        A pinned native encounter draft save closes its appointment while the
+        completion contract requires that appointment to stay open or checked
+        in, and note authorization and the other cascades are unreviewed. The
+        gate may be enabled on the site, but the published map must still say
+        ``read_only``: nothing else in this module can promote them.
         """
 
-        capabilities = bootstrap_capabilities(write_encounter_draft=True)
-
-        self.assertEqual(capabilities["write.encounter.draft"], ENABLED_STATE)
-        self.assertEqual(
-            capabilities["write.medication.order"], READ_ONLY_STATE
+        capabilities = bootstrap_capabilities(
+            write_encounter_draft=True,
+            write_encounter_complete=True,
+            write_encounter_amend=True,
         )
-        self.assertEqual(capabilities["write.lab.order"], ENABLED_STATE)
+
+        for name in DEFERRED_ENCOUNTER_NAMES:
+            with self.subTest(name=name):
+                self.assertEqual(capabilities[name], READ_ONLY_STATE)
+
+    def test_each_encounter_flag_alone_publishes_read_only(self):
+        for flag in (
+            "write_encounter_draft",
+            "write_encounter_complete",
+            "write_encounter_amend",
+        ):
+            capabilities = bootstrap_capabilities(**{flag: True})
+            for name in DEFERRED_ENCOUNTER_NAMES:
+                with self.subTest(flag=flag, name=name):
+                    self.assertEqual(capabilities[name], READ_ONLY_STATE)
+
+    def test_the_deferral_leaves_the_other_write_families_unchanged(self):
+        capabilities = bootstrap_capabilities(
+            write_encounter_draft=True,
+            write_encounter_complete=True,
+            write_encounter_amend=True,
+            write_patient_create=True,
+            write_patient_update=True,
+            write_appointment_book=True,
+            write_procedure_complete=True,
+            write_procedure_create=True,
+            write_invoice_submit=True,
+        )
+
+        for name in (
+            "write.patient.create",
+            "write.patient.update",
+            "write.appointment.book",
+            "write.procedure.complete",
+            "write.procedure.create",
+            "write.invoice.submit",
+            # The procedure gate still implies its stock consumption write.
+            "write.stock.consume",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(capabilities[name], ENABLED_STATE)
+        self.assertEqual(capabilities["write.medication.order"], READ_ONLY_STATE)
 
     def test_new_write_ids_are_published_read_only(self):
         capabilities = read_only_capabilities()

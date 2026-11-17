@@ -7,6 +7,15 @@ writes (book, reschedule, cancel, no-show, check-in) and the deployment-gated
 writes added by the full write-contract wave may be promoted to ``enabled``,
 and only after the bootstrap endpoint has verified the whole reviewed local
 write gate for that surface. Every other capability stays ``read_only``.
+
+The encounter draft, completion and amendment family and the native lab
+ordering that rides the draft payload are **deferred**: appointment lifecycle
+provenance and authorization are under review (a pinned native draft save
+closes its appointment, while completion requires it to stay open or checked
+in), so nothing here promotes them and no gate value can. The ids stay in the
+enableable set because that set is the client's frozen enableable list and the
+lockstep parity test asserts the two are identical; the refusal is in the
+promotion decision below and in the endpoint boundary.
 """
 
 CAPABILITY_NAMES = (
@@ -159,19 +168,20 @@ def bootstrap_capabilities(
         capabilities["write.appointment.no_show"] = ENABLED_STATE
     if write_appointment_checkin is True:
         capabilities["write.appointment.checkin"] = ENABLED_STATE
-    # Native lab ordering rides the encounter draft payload; there is no
-    # separate endpoint, so it shares that gate. Medication ordering does NOT:
-    # the draft contract refuses any non-empty ``medications`` section before the
-    # fence until a reviewed medication contract exists (the installed
-    # ``Drug Prescription.dosage_form`` is required and unsupplied), so the
-    # published map keeps ``write.medication.order`` read_only.
-    if write_encounter_draft is True:
-        capabilities["write.encounter.draft"] = ENABLED_STATE
-        capabilities["write.lab.order"] = ENABLED_STATE
-    if write_encounter_complete is True:
-        capabilities["write.encounter.complete"] = ENABLED_STATE
-    if write_encounter_amend is True:
-        capabilities["write.encounter.amend"] = ENABLED_STATE
+    # The encounter draft, completion and amendment family, and the native lab
+    # ordering that rides the draft payload, are deferred pending the
+    # appointment lifecycle provenance and authorization review: a pinned native
+    # draft save closes its appointment while completion requires it to stay
+    # open or checked in. ``write.encounter.draft``, ``write.encounter.complete``,
+    # ``write.encounter.amend`` and ``write.lab.order`` therefore stay
+    # ``read_only`` whatever the gate says. The flags are still accepted so
+    # bootstrap keeps reporting the reviewed gate state; they are not consulted.
+    #
+    # Medication ordering is not advertised either: the draft contract refuses
+    # any non-empty ``medications`` section before the fence until a reviewed
+    # medication contract exists (the installed ``Drug Prescription.dosage_form``
+    # is required and unsupplied).
+    #
     # Completing a procedure is the stock-consumption write (SPEC:185-220): the
     # pair below is enabled by the one procedure gate, because the stock move is
     # never a separate client operation.

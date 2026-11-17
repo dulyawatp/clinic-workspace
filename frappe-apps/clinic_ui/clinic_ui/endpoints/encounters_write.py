@@ -1,5 +1,21 @@
 """Designed Patient Encounter draft, complete and amendment writes (default off).
 
+**Deferred.** ``save_draft``, ``complete`` and ``amend`` refuse every new
+mutation immediately after the shared gate: the encounter draft, completion,
+amendment and lab-ordering surfaces are deferred pending the appointment
+lifecycle provenance and authorization review (design:
+``2026-11-18-encounter-deferral``). The refusal takes no fence lease and makes no
+native mutation. The one request that still answers is an exact replay of the
+caller's own committed operation: same actor, kind, operation key, payload
+digest and alias, verified against the durable receipt, answered from that
+receipt plus a native read so a lost response is recoverable without a new
+ledger event; this actor's own ``DISPATCHED``/``UNKNOWN`` key keeps the eager
+fence's ``409 WRITE_LOCKED`` answer, and every other unmatched key is refused.
+``acknowledge`` is untouched, so work committed before the deferral stays
+recoverable. The order below describes the retained implementation
+(``_*_undeferred``), which the deferred-contract tests still assert so a
+reviewed re-enable is evidence-backed rather than a rewrite.
+
 Order is fixed and test-asserted:
 
 1. shared read gate plus the explicit same-session CSRF and encounter-write
@@ -66,12 +82,15 @@ call still lands, and the native DocPerm check (with its own framework cache) is
 a separate authority this guard neither replaces nor re-implements.
 """
 
+import hmac
+
 from clinic_ui.core import (
     dto,
     encounter_contract,
     encounter_write,
     patient_write,
     policy,
+    write_fence,
 )
 from clinic_ui.core.policy import (
     ENCOUNTER_AMEND_ROLE_CODES,
@@ -92,6 +111,15 @@ STALE_CODE = "STALE_VERSION"
 DRAFT_RESULT = "draft_saved"
 COMPLETE_RESULT = "completed"
 AMEND_RESULT = "amended"
+
+# The result status each deferred kind reports on a committed replay. The status
+# is a property of the operation kind, not of the replay, so a replayed operation
+# answers with the result it originally returned.
+REPLAY_RESULTS = {
+    encounter_contract.ENCOUNTER_DRAFT_KIND: DRAFT_RESULT,
+    encounter_contract.ENCOUNTER_COMPLETE_KIND: COMPLETE_RESULT,
+    encounter_contract.ENCOUNTER_AMEND_KIND: AMEND_RESULT,
+}
 
 
 class SuccessUncertain(Exception):
@@ -587,8 +615,224 @@ def _draft_native_write(
         raise
     return receipt
 
+
+def _refuse_encounter_write(gateway):
+    """Refuse an encounter mutation that is not an exact committed replay.
+
+    Encounter draft, completion, amendment and the native lab ordering that
+    rides the draft payload are deferred pending the appointment lifecycle
+    provenance and authorization review: a pinned native draft save closes its
+    appointment, while the completion contract requires that appointment to stay
+    open or checked in, and note authorization plus the other cascades are
+    unreviewed. Every caller of this helper has already passed the read gate, the
+    explicit same-session CSRF check, the encounter deployment gate, and the
+    pinned boundary and installed-field preflight.
+
+    A refusal here takes no fence lease, appends no ``DISPATCHED`` claim, appends
+    no event, makes no native mutation, latches nothing, unlocks nothing and
+    retries nothing, so there is no new receipt, no new acknowledgement token and
+    nothing to reconcile. A ``DISPATCHED``/``UNKNOWN`` key is *not* refused
+    through this helper - its outcome is uncertain rather than unavailable, so
+    the caller answers ``409 WRITE_LOCKED`` instead.
+
+    The retained implementation below (``_*_undeferred``) is unreachable from the
+    API until a reviewed re-enable removes the deferral.
+    """
+
+    gateway.deny()
+
+
+def _committed_operation(gateway, actor, kind, operation_key, digest, alias):
+    """Return the receipt of this actor's own committed operation, or ``None``.
+
+    Strictly read-only: one single-key ledger lookup and no more. The key must
+    resolve to a terminal ``COMMITTED`` record owned by this actor and bound to
+    the same payload digest and alias, and the stored receipt must decode to the
+    same kind and alias.
+
+    ``None`` has exactly one meaning: this actor's own key exists with an
+    established-but-not-committed state (``DISPATCHED``/``UNKNOWN``). The caller
+    answers ``409 WRITE_LOCKED`` for it, which is the answer the eager fence
+    already gave for a repeated key, and takes no latch, unlock, retry or event.
+
+    Every other unmatched key is refused by :func:`_refuse_encounter_write`:
+
+    * no record: there is nothing to replay, and a new mutation is deferred;
+    * a different digest or alias on the same key: the key belongs to another
+      payload, so replaying the stored receipt would report a write that never
+      happened;
+    * another actor's key: the lookup is actor-bound, so that is no record;
+    * an undecodable receipt, an unknown state or an unreadable store: a
+      refusal, never a guess.
+
+    ``DISPATCHED`` and ``UNKNOWN`` are not routed through this refusal: they
+    return ``None`` and the caller answers ``409 WRITE_LOCKED``, because the key
+    is the caller's own and only its outcome is unknown.
+
+    The record is read, not reconciled: an unresolved barrier or a site latch is
+    neither consulted nor cleared here, and a committed operation is still
+    answerable while one exists.
+    """
+
+    try:
+        record = gateway.lookup_encounter_operation(
+            actor, kind, operation_key
+        )
+        if record is None:
+            _refuse_encounter_write(gateway)
+        if record.state in (write_fence.DISPATCHED, write_fence.UNKNOWN):
+            return None
+        if record.state != write_fence.COMMITTED:
+            _refuse_encounter_write(gateway)
+        stored = record.payload_digest
+        if not isinstance(stored, str) or not isinstance(digest, str):
+            _refuse_encounter_write(gateway)
+        if not hmac.compare_digest(stored, digest):
+            _refuse_encounter_write(gateway)
+        decoded = encounter_write.decode_receipt(record.receipt)
+    except (
+        patient_write.WriteLocked,
+        patient_write.StoreUnavailable,
+        patient_write.WriteUncertain,
+    ):
+        _refuse_encounter_write(gateway)
+    except encounter_write.EncounterWriteError:
+        _refuse_encounter_write(gateway)
+    if decoded.kind != kind or decoded.alias != alias:
+        _refuse_encounter_write(gateway)
+    return record.receipt
+
+
+def _replay_gate(gateway, settings, view, role, csrf_token):
+    """Re-take the decision gates for a replay; deny-only, read-only.
+
+    The retained write path re-runs this decision after the snapshot restart and
+    under the held lease. A replay writes nothing, so no lease is taken and none
+    is needed, but the same authority is re-established before any answer is
+    returned: the site configuration is refreshed, the native read snapshot is
+    restarted, the shared gate runs again (read gate, explicit same-session CSRF,
+    encounter deployment gate, pinned boundary and installed-field preflight),
+    the session user and the gated role must be unchanged, the fresh ``Has Role``
+    rows must still resolve to that role, and the epoch secret must be unchanged.
+
+    The snapshot restart runs first so the fresh-role and native reads below see
+    committed rows. It is safe here because this path has written nothing: the
+    rollback can only discard this request's own reads, exactly as the in-lease
+    restart does.
+
+    No framework cache is cleared or reimplemented. ``refresh_site_config`` drops
+    this gateway's own configuration object, and the fresh-role read goes
+    straight to the ``Has Role`` rows, so a replay is never answered on a cached
+    role the stored rows no longer grant. A refusal latches nothing and appends
+    nothing.
+
+    Returns the re-read settings so the response is built from them: the patient
+    allowlist and every other configured value that shapes the body are the ones
+    the second gate just authorised, not the request's first read.
+    """
+
+    gateway.refresh_site_config()
+    gateway.reset_native_read_snapshot()
+    fence_settings, fence_view, fence_role = _shared_gate(gateway, csrf_token)
+    if fence_view.user != view.user:
+        gateway.deny()
+    if fence_role != role:
+        _refuse_encounter_write(gateway)
+    _require_fresh_role(gateway, fence_settings, fence_view, fence_role)
+    if fence_settings.epoch_secret != settings.epoch_secret:
+        _refuse_encounter_write(gateway)
+    return fence_settings
+
+
+def _replay_result(gateway, settings, actor, kind, operation_key, receipt):
+    """Rebuild the body a committed operation already returned.
+
+    ``settings`` is the value :func:`_replay_gate` re-read, so the patient
+    allowlist and the epoch secret that shape this body are the ones the second
+    gate just authorised, not this request's first read.
+
+    The acknowledgement token is recomputed from the stored receipt with the
+    server secret, which is exactly what ``acknowledge`` verifies, so a lost
+    response is recoverable without a new ledger event. The encounter detail is a
+    fresh native read, never a fabricated one; a failed read or an unexpected
+    decode refuses. Nothing is dispatched, latched, unlocked or retried, so a
+    refusal here must not latch the site either.
+    """
+
+    try:
+        decoded = encounter_write.decode_receipt(receipt)
+        ack_token = encounter_write.ack_token(
+            settings.epoch_secret,
+            gateway.site,
+            actor,
+            kind,
+            operation_key,
+            receipt,
+        )
+        addendum = None
+        if kind == encounter_contract.ENCOUNTER_AMEND_KIND:
+            addendum = f"addendum_{operation_key}"
+        return _success(
+            gateway,
+            settings,
+            REPLAY_RESULTS[kind],
+            decoded.alias,
+            decoded.native_encounter_id,
+            ack_token,
+            addendum=addendum,
+        )
+    except (SuccessUncertain, encounter_write.EncounterWriteError):
+        _refuse_encounter_write(gateway)
+
+
 def save_draft(gateway, body, csrf_token=None):
-    """Create or update a draft encounter (roles DOC; NUR vitals only)."""
+    """Refuse a new draft and replay the caller's own committed draft.
+
+    A new create or update is deferred. The one request that still answers is an
+    exact replay of this actor's own committed draft operation: the stored
+    receipt, its kind, alias and payload digest must all match. No lease is
+    taken and no native mutation is made.
+    """
+
+    settings, view, role = _shared_gate(gateway, csrf_token)
+    try:
+        payload = encounter_write.validate_save_draft(body)
+    except encounter_write.EncounterWriteError:
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    kind = encounter_contract.ENCOUNTER_DRAFT_KIND
+    operation_key = payload["operation_key"]
+    alias = payload["encounter"]
+    if alias is None:
+        alias = _alias_for(settings, gateway, view.user, operation_key)
+    try:
+        digest = encounter_write.operation_digest(
+            settings.epoch_secret,
+            kind=kind,
+            operation_key=operation_key,
+            fields=_digest_fields(payload),
+        )
+    except encounter_write.EncounterWriteError:
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    receipt = _committed_operation(
+        gateway, view.user, kind, operation_key, digest, alias
+    )
+    replay_settings = _replay_gate(
+        gateway, settings, view, role, csrf_token
+    )
+    if receipt is None:
+        return _locked_response(gateway)
+    return _replay_result(
+        gateway, replay_settings, view.user, kind, operation_key, receipt
+    )
+
+
+def _save_draft_undeferred(gateway, body, csrf_token=None):
+    """Create or update a draft encounter (roles DOC; NUR vitals only).
+
+    Retained for the deferred contract review; not reachable from the API.
+    """
 
     settings, view, role = _shared_gate(gateway, csrf_token)
     try:
@@ -941,7 +1185,52 @@ def _complete_native_write(
 
 
 def complete(gateway, body, csrf_token=None):
-    """Submit a draft encounter and verify the expected native cascade (DOC)."""
+    """Refuse a new completion and replay the caller's own committed one.
+
+    The DOC-only narrowing is kept ahead of the replay decision. A new completion
+    is deferred; only an exact replay of this actor's own committed completion
+    answers, from the stored receipt, with no lease and no native mutation.
+    """
+
+    settings, view, role = _shared_gate(gateway, csrf_token)
+    if role not in ENCOUNTER_COMPLETE_ROLE_CODES:
+        gateway.deny()
+    try:
+        payload = encounter_write.validate_complete(body)
+    except encounter_write.EncounterWriteError:
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    kind = encounter_contract.ENCOUNTER_COMPLETE_KIND
+    operation_key = payload["operation_key"]
+    alias = payload["encounter"]
+    try:
+        digest = encounter_write.operation_digest(
+            settings.epoch_secret,
+            kind=kind,
+            operation_key=operation_key,
+            fields=_digest_fields(payload),
+        )
+    except encounter_write.EncounterWriteError:
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    receipt = _committed_operation(
+        gateway, view.user, kind, operation_key, digest, alias
+    )
+    replay_settings = _replay_gate(
+        gateway, settings, view, role, csrf_token
+    )
+    if receipt is None:
+        return _locked_response(gateway)
+    return _replay_result(
+        gateway, replay_settings, view.user, kind, operation_key, receipt
+    )
+
+
+def _complete_undeferred(gateway, body, csrf_token=None):
+    """Submit a draft encounter and verify the expected native cascade (DOC).
+
+    Retained for the deferred contract review; not reachable from the API.
+    """
 
     settings, view, role = _shared_gate(gateway, csrf_token)
     if role not in ENCOUNTER_COMPLETE_ROLE_CODES:
@@ -1212,7 +1501,52 @@ def _amend_native_write(
 
 
 def amend(gateway, body, csrf_token=None):
-    """Add a Clinical Note addendum to a finalized encounter (DOC)."""
+    """Refuse a new amendment and replay the caller's own committed one.
+
+    The DOC-only narrowing is kept ahead of the replay decision. A new amendment
+    is deferred; only an exact replay of this actor's own committed amendment
+    answers, from the stored receipt, with no lease and no native mutation.
+    """
+
+    settings, view, role = _shared_gate(gateway, csrf_token)
+    if role not in ENCOUNTER_AMEND_ROLE_CODES:
+        gateway.deny()
+    try:
+        payload = encounter_write.validate_amend(body)
+    except encounter_write.EncounterWriteError:
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    kind = encounter_contract.ENCOUNTER_AMEND_KIND
+    operation_key = payload["operation_key"]
+    alias = payload["encounter"]
+    try:
+        digest = encounter_write.operation_digest(
+            settings.epoch_secret,
+            kind=kind,
+            operation_key=operation_key,
+            fields=_digest_fields(payload),
+        )
+    except encounter_write.EncounterWriteError:
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    receipt = _committed_operation(
+        gateway, view.user, kind, operation_key, digest, alias
+    )
+    replay_settings = _replay_gate(
+        gateway, settings, view, role, csrf_token
+    )
+    if receipt is None:
+        return _locked_response(gateway)
+    return _replay_result(
+        gateway, replay_settings, view.user, kind, operation_key, receipt
+    )
+
+
+def _amend_undeferred(gateway, body, csrf_token=None):
+    """Add a Clinical Note addendum to a finalized encounter (DOC).
+
+    Retained for the deferred contract review; not reachable from the API.
+    """
 
     settings, view, role = _shared_gate(gateway, csrf_token)
     complete_roles = ENCOUNTER_AMEND_ROLE_CODES

@@ -53,14 +53,16 @@ class MedicationDeferralTests(unittest.TestCase):
         enabled = verify.expected_enabled_writes(_gates(encounter=1), "DOC")
 
         self.assertNotIn(MEDICATION, enabled)
-        self.assertIn("write.encounter.draft", enabled)
-        self.assertIn("write.lab.order", enabled)
+        # Encounter writes and lab ordering were deferred on 2026-11-18 too;
+        # test_verify_encounter_deferral.py covers them in detail.
+        self.assertNotIn("write.encounter.draft", enabled)
+        self.assertNotIn("write.lab.order", enabled)
 
     def test_encounter_gate_does_not_enable_medication_for_nurse(self):
         enabled = verify.expected_enabled_writes(_gates(encounter=1), "NUR")
 
         self.assertNotIn(MEDICATION, enabled)
-        self.assertIn("write.encounter.draft", enabled)
+        self.assertNotIn("write.encounter.draft", enabled)
 
     def test_enabled_medication_is_rejected_even_with_encounter_gate_open(self):
         gates = _gates(patient=1, appointment=1, encounter=1)
@@ -77,18 +79,17 @@ class MedicationDeferralTests(unittest.TestCase):
         observed = verify.deferred_capability_states(
             {
                 MEDICATION: "enabled",
-                "write.encounter.draft": "enabled",
+                "write.patient.create": "enabled",
             }
         )
 
-        self.assertEqual(observed, {MEDICATION: "enabled"})
+        self.assertEqual(observed[MEDICATION], "enabled")
+        self.assertNotIn("write.patient.create", observed)
         self.assertEqual(
-            verify.deferred_capability_states({MEDICATION: "read_only"}),
-            {MEDICATION: "read_only"},
+            verify.deferred_capability_states({MEDICATION: "read_only"})[MEDICATION],
+            "read_only",
         )
-        self.assertEqual(
-            verify.deferred_capability_states({}), {MEDICATION: None}
-        )
+        self.assertIsNone(verify.deferred_capability_states({})[MEDICATION])
 
     def test_deferred_capability_stays_in_the_gated_capability_set(self):
         gates = _gates(patient=1, appointment=1, encounter=1)

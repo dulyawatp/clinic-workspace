@@ -280,6 +280,8 @@ class FakeGateway:
         self.amend_facts_calls = []
         self.encounter_receipts = {}
         self.encounter_receipt_records = []
+        self.encounter_operation_calls = []
+        self.encounter_operations = {}
         self.encounter_receipt_calls = []
         self.encounter_receipt_list_error = None
         self.encounter_ack_calls = []
@@ -291,6 +293,9 @@ class FakeGateway:
         self.encounter_lease_error = None
         self.encounter_dispatch_error = None
         self.on_encounter_lease_entered = None
+        # Optional hook: lets a test change the site between the two gate reads
+        # of one request (the replay authority re-read restarts the snapshot).
+        self.on_snapshot_reset = None
         self.config_refresh_calls = 0
         self.stale_read_snapshot = False
         self.read_snapshot = None
@@ -809,6 +814,8 @@ class FakeGateway:
         self.snapshot_resets += 1
         # A restarted snapshot drops the reads this request already made.
         self.read_snapshot = None
+        if self.on_snapshot_reset is not None:
+            self.on_snapshot_reset(self)
 
     def fresh_user_roles(self, user):
         """Mirror the adapter's uncached ``Has Role`` read."""
@@ -1074,6 +1081,13 @@ class FakeGateway:
             ):
                 return record.receipt
         return None
+
+    def lookup_encounter_operation(self, actor, kind, operation_key):
+        self.encounter_operation_calls.append((actor, kind, operation_key))
+        value = self.encounter_operations.get((actor, kind, operation_key))
+        if isinstance(value, Exception):
+            raise value
+        return value
 
     def list_committed_encounter_receipts(
         self, limit, kind=None, operation_key=None
@@ -2106,6 +2120,15 @@ class FakeEncounterReceipt:
         self.kind = kind
         self.actor = actor
         self.operation_key = operation_key
+        self.receipt = receipt
+
+
+class FakeEncounterOperation:
+    """One operation's latest durable row: state, digest and receipt."""
+
+    def __init__(self, state, payload_digest, receipt=None):
+        self.state = state
+        self.payload_digest = payload_digest
         self.receipt = receipt
 
 
