@@ -2745,6 +2745,95 @@ class Gateway:
             "modified": self._text_value(get("modified")),
         }
 
+    def _encounter_note_values(self, native_encounter_id):
+        """The newest linked note's identity and sections under read authority.
+
+        Deny-only: the role-level ``Clinical Note`` read and the ``note``
+        field's permlevel/mask are checked before any note row is queried, and
+        the found row's own document read is checked before its content is
+        read. The locating query asks for the name only, so no content column is
+        ever fetched before the document authority is established. ``note`` and
+        ``modified`` are read together in one ``get_value`` after that check, so
+        the text and the never-rewrite preimage come from the same row read and
+        cannot skew; a missing, failed or malformed result returns
+        ``(None, None, None, None, None)``. No permission is elevated and no
+        framework cache is cleared or reimplemented here.
+        """
+
+        missing = (None, None, None, None, None)
+        reference_doctype_field, reference_name_field = (
+            self._encounter_note_reference_fields()
+        )
+        if not reference_doctype_field or not reference_name_field:
+            # An unresolved pair reads no note, so completion stays blocked
+            # instead of trusting a note nobody linked.
+            return missing
+        if self.native_doctype_can_read(CLINICAL_NOTE_DOCTYPE) is not True:
+            return missing
+        try:
+            meta = self.frappe.get_meta(CLINICAL_NOTE_DOCTYPE)
+            if not self._fields_readable(meta, ("note",)):
+                return missing
+        except Exception:
+            return missing
+        try:
+            notes = self.frappe.get_all(
+                CLINICAL_NOTE_DOCTYPE,
+                filters={
+                    reference_doctype_field: ENCOUNTER_DOCTYPE,
+                    reference_name_field: native_encounter_id,
+                },
+                fields=["name"],
+                order_by="creation desc",
+                limit=1,
+            ) or ()
+        except Exception:
+            return missing
+        if not notes:
+            return missing
+        row = notes[0]
+        clinical_note = self._text_value(
+            row.get("name") if hasattr(row, "get") else None
+        )
+        if not clinical_note:
+            return missing
+        if (
+            self.native_doctype_can_read(CLINICAL_NOTE_DOCTYPE, clinical_note)
+            is not True
+        ):
+            return missing
+        try:
+            content = self.frappe.db.get_value(
+                CLINICAL_NOTE_DOCTYPE,
+                clinical_note,
+                ["note", "modified"],
+                as_dict=True,
+            )
+        except Exception:
+            return missing
+        if not hasattr(content, "get"):
+            return missing
+        note = content.get("note")
+        persisted_modified = content.get("modified")
+        # Keep the persisted ``str()`` representation: the amendment re-reads
+        # ``modified`` the same way and compares it byte for byte, so an ISO
+        # ``T`` rendering here would refuse a genuine amendment after re-enable.
+        clinical_note_modified = self._text_value(
+            str(persisted_modified) if persisted_modified else None
+        )
+        if not clinical_note_modified:
+            # The amendment preimage is this ``modified``: a blank one cannot be
+            # re-verified, so the note is treated as unreadable.
+            return missing
+        sections = encounter_contract.parse_note_text(note)
+        return (
+            clinical_note,
+            clinical_note_modified,
+            sections["assessment"] or None,
+            sections["plan"] or None,
+            sections["followup"] or None,
+        )
+
     def _encounter_state_values(self, doc):
         """Build the contract detail from a locked encounter document."""
 
@@ -2793,40 +2882,9 @@ class Gateway:
                 )
                 or ()
             )
-        clinical_note = None
-        clinical_note_modified = None
-        assessment = plan = followup = None
-        reference_doctype_field, reference_name_field = (
-            self._encounter_note_reference_fields()
+        clinical_note, clinical_note_modified, assessment, plan, followup = (
+            self._encounter_note_values(native)
         )
-        notes = ()
-        if reference_doctype_field and reference_name_field:
-            # The installed pair is ``reference_doc``/``reference_name``. An
-            # unresolved pair reads no note, so completion stays blocked instead
-            # of trusting a note nobody linked.
-            notes = self.frappe.get_all(
-                CLINICAL_NOTE_DOCTYPE,
-                filters={
-                    reference_doctype_field: ENCOUNTER_DOCTYPE,
-                    reference_name_field: native,
-                },
-                fields=["name", "modified", "note"],
-                order_by="creation desc",
-                limit=1,
-            ) or ()
-        if notes:
-            row = notes[0]
-            note = row.get("note") if hasattr(row, "get") else None
-            clinical_note = self._text_value(
-                row.get("name") if hasattr(row, "get") else None
-            )
-            clinical_note_modified = self._text_value(
-                str(row.get("modified")) if hasattr(row, "get") else None
-            )
-            sections = encounter_contract.parse_note_text(note)
-            assessment = sections["assessment"] or None
-            plan = sections["plan"] or None
-            followup = sections["followup"] or None
         return {
             "patient": self._text_value(getattr(doc, "patient", None)),
             "docstatus": getattr(doc, "docstatus", None),

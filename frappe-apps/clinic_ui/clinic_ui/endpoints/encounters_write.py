@@ -281,6 +281,20 @@ def _finish_fence(gateway, claim, kind, alias, native_encounter_id):
     return receipt
 
 
+def _native_patient_readable(gateway, native_patient_id):
+    """Document-level Patient read authority for one resolved native id.
+
+    ``has_permission`` with ``doc=None`` is a *role-level* answer, so a missing
+    or blank identifier must never reach the adapter: it would devolve into a
+    role check that authorises no document at all. A non-string or blank id is
+    therefore refused here, before the adapter is called.
+    """
+
+    if not isinstance(native_patient_id, str) or not native_patient_id.strip():
+        return False
+    return gateway.native_patient_can_read(native_patient_id.strip()) is True
+
+
 def _success(
     gateway,
     settings,
@@ -290,11 +304,18 @@ def _success(
     ack_token,
     *,
     addendum=None,
+    require_patient_read=False,
 ):
     try:
         detail = gateway.native_encounter_detail(native_encounter_id)
         if detail is None:
             raise ValueError("native encounter detail is missing after commit")
+        if require_patient_read and not _native_patient_readable(
+            gateway, detail.get("patient")
+        ):
+            # The body names the patient, so a revoked Patient read refuses the
+            # answer instead of reporting a record the caller may not read.
+            raise ValueError("native patient read is not authorised")
         workspace_patient_id = appointments.workspace_patient_for(
             settings, detail["patient"]
         )
@@ -780,6 +801,7 @@ def _replay_result(gateway, settings, actor, kind, operation_key, receipt):
             decoded.native_encounter_id,
             ack_token,
             addendum=addendum,
+            require_patient_read=True,
         )
     except (SuccessUncertain, encounter_write.EncounterWriteError):
         _refuse_encounter_write(gateway)

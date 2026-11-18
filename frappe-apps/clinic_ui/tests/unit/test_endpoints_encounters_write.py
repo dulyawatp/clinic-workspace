@@ -2112,6 +2112,54 @@ class CommittedReplayTests(unittest.TestCase):
         self.assertEqual(fake.latch_calls, [])
         self.assertEqual(fake.operation_latch_calls, [])
 
+    def test_a_replay_needs_the_native_patient_read(self):
+        """The replayed body carries the patient, so its read must be authorised.
+
+        A revoked Patient read is a refusal before any answer: no latch, no
+        dispatch, no event, no commit and no ledger mutation.
+        """
+
+        fake = gateway()
+        body = draft_body()
+        self.committed(fake, "encounter_draft", body)
+        ledger_before = dict(fake.encounter_operations)
+        fake.patient_can_read = False
+
+        with self.assertRaises(Denied):
+            encounters_write.save_draft(fake, body, CSRF)
+
+        self.assertEqual(fake.patient_read_calls, ["PAT-1"])
+        self.assert_no_dispatch(fake)
+        self.assertEqual(fake.latch_calls, [])
+        self.assertEqual(fake.operation_latch_calls, [])
+        self.assertEqual(fake.encounter_ack_calls, [])
+        self.assertEqual(fake.encounter_operations, ledger_before)
+
+
+    def test_a_replay_with_no_native_patient_id_refuses_without_a_role_check(self):
+        """A blank id must not devolve into the role-level ``doc=None`` answer."""
+
+        for patient in (None, "", "   "):
+            with self.subTest(patient=patient):
+                fake = gateway()
+                body = draft_body()
+                self.committed(fake, "encounter_draft", body)
+                fake.encounter_detail_map[NATIVE_ENCOUNTER] = {
+                    "patient": patient,
+                    "docstatus": 0,
+                    "status": "Draft",
+                    "modified": MODIFIED,
+                }
+
+                with self.assertRaises(Denied):
+                    encounters_write.save_draft(fake, body, CSRF)
+
+                self.assertEqual(fake.patient_read_calls, [])
+                self.assert_no_dispatch(fake)
+                self.assertEqual(fake.latch_calls, [])
+                self.assertEqual(fake.operation_latch_calls, [])
+                self.assertEqual(fake.encounter_ack_calls, [])
+
     def test_a_replay_uses_the_refreshed_patient_allowlist(self):
         """The response is built from the re-read settings, not the stale ones.
 

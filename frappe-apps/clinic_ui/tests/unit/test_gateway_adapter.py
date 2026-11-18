@@ -4416,6 +4416,9 @@ class EncounterShapeMeta:
     def __init__(self, shapes, default_fields=(), restricted=False):
         self.shapes = dict(shapes)
         self.restricted = restricted
+        self.accessible = [0]
+        self.permlevels = {}
+        self.masked = []
         self.fields = [
             types.SimpleNamespace(
                 fieldname=name, fieldtype=shape[0], options=shape[1]
@@ -4433,10 +4436,13 @@ class EncounterShapeMeta:
         }
 
     def get_permlevel_access(self, permission_type="read", parenttype=None, *, user=None):
-        return [0]
+        return list(self.accessible)
 
     def get_masked_fields(self, parenttype=None):
-        return []
+        # Actual v16 API returns field-definition copies for the session user.
+        return [
+            types.SimpleNamespace(fieldname=name) for name in self.masked
+        ]
 
     def get_field(self, fieldname):
         self.field_calls.append(fieldname)
@@ -4446,7 +4452,7 @@ class EncounterShapeMeta:
         if shape is None:
             return None
         return types.SimpleNamespace(
-            permlevel=0,
+            permlevel=self.permlevels.get(fieldname, 0),
             fieldname=fieldname,
             fieldtype=shape[0] or "Data",
             options=shape[1],
@@ -4461,12 +4467,23 @@ class EncounterDB:
         self.counts = {}
         self.all_rows = {}
         self.all_calls = []
+        self.all_field_calls = []
+        self.value_calls = []
+        self.all_errors = {}
+        self.value_errors = {}
+        self.value_overrides = {}
         self.rollbacks = 0
 
     def rollback(self):
         self.rollbacks += 1
 
     def get_value(self, doctype, name, fieldname=None, as_dict=False, **kwargs):
+        self.value_calls.append((doctype, name, fieldname))
+        error = self.value_errors.get((doctype, name))
+        if error is not None:
+            raise error
+        if (doctype, name) in self.value_overrides:
+            return self.value_overrides[(doctype, name)]
         if isinstance(fieldname, (list, tuple)):
             row = {
                 field: self.values.get((doctype, name, field))
@@ -4480,6 +4497,10 @@ class EncounterDB:
 
     def get_all(self, doctype, filters=None, fields=None, pluck=None, **kwargs):
         self.all_calls.append((doctype, dict(filters or {})))
+        self.all_field_calls.append((doctype, tuple(fields or ())))
+        error = self.all_errors.get(doctype)
+        if error is not None:
+            raise error
         rows = list(self.all_rows.get(doctype, []))
         if pluck is not None:
             return [row.get(pluck) for row in rows]
@@ -4527,6 +4548,8 @@ class EncounterStub(types.SimpleNamespace):
         self.docs = {}
         self.get_doc_calls = []
         self.permissions = set()
+        self.permission_calls = []
+        self.denied_documents = set()
         self.restricted_meta_fields = False
         self.utils = types.SimpleNamespace(
             nowdate=lambda: "2026-11-17", nowtime=lambda: "09:30:00"
@@ -4558,7 +4581,10 @@ class EncounterStub(types.SimpleNamespace):
         return self.docs.get((doctype, name))
 
     def has_permission(self, doctype, ptype="read", doc=None, user=None):
-        return (doctype, ptype) in self.permissions
+        self.permission_calls.append((doctype, ptype, doc, user))
+        if (doctype, ptype) not in self.permissions:
+            return False
+        return (doctype, doc) not in self.denied_documents
 
 
 def encounter_shapes():
@@ -4691,12 +4717,8 @@ class EncounterInstalledMetadataTests(GatewayTestCase):
             "reference_doc",
         )
 
-    def test_the_note_read_filters_on_the_installed_reference_pair(self):
-        stub = self.stub()
-        stub.db.all_rows["Clinical Note"] = [
-            {"name": "HLC-NOTE-1", "modified": "2026-11-17 08:00:00", "note": "Assessment: Acne"}
-        ]
-        doc = types.SimpleNamespace(
+    def note_doc(self):
+        return types.SimpleNamespace(
             name="HLC-ENC-1",
             patient="PAT-1",
             docstatus=0,
@@ -4705,15 +4727,237 @@ class EncounterInstalledMetadataTests(GatewayTestCase):
             modified="2026-11-17 09:00:00",
         )
 
-        values = self.gateway(stub)._encounter_state_values(doc)
+    def readable_note_stub(self):
+        """An empty stub whose user may read the linked Clinical Note."""
 
-        note_calls = [call for call in stub.db.all_calls if call[0] == "Clinical Note"]
+        stub = self.stub()
+        stub.permissions.add(("Clinical Note", "read"))
+        stub.db.all_rows["Clinical Note"] = [
+            {
+                "name": "HLC-NOTE-1",
+                "modified": "2026-11-17 08:00:00",
+                "note": "Assessment: Acne",
+            }
+        ]
+        stub.db.values[("Clinical Note", "HLC-NOTE-1", "note")] = (
+            "Assessment: Acne"
+        )
+        stub.db.values[("Clinical Note", "HLC-NOTE-1", "modified")] = (
+            "2026-11-17 08:00:00"
+        )
+        return stub
+
+    def note_queries(self, stub):
+        return [
+            call for call in stub.db.all_field_calls if call[0] == "Clinical Note"
+        ]
+
+    def note_content_reads(self, stub):
+        return [
+            call for call in stub.db.value_calls if call[0] == "Clinical Note"
+        ]
+
+    def test_the_note_read_filters_on_the_installed_reference_pair(self):
+        stub = self.readable_note_stub()
+
+        values = self.gateway(stub)._encounter_state_values(self.note_doc())
+
+        note_calls = [
+            call for call in stub.db.all_calls if call[0] == "Clinical Note"
+        ]
         self.assertEqual(
             note_calls,
             [("Clinical Note", {"reference_doc": "Patient Encounter", "reference_name": "HLC-ENC-1"})],
         )
         self.assertEqual(values["clinical_note"], "HLC-NOTE-1")
         self.assertEqual(values["assessment"], "Acne")
+
+    def test_the_note_content_is_query_only_after_the_read_checks(self):
+        """The content column is never part of the query that finds the note."""
+
+        stub = self.readable_note_stub()
+
+        values = self.gateway(stub)._encounter_state_values(self.note_doc())
+
+        self.assertEqual(
+            self.note_queries(stub),
+            [("Clinical Note", ("name",))],
+        )
+        self.assertEqual(
+            self.note_content_reads(stub),
+            [("Clinical Note", "HLC-NOTE-1", ["note", "modified"])],
+        )
+        self.assertEqual(values["clinical_note_modified"], "2026-11-17 08:00:00")
+        permission_doctypes = [call[0] for call in stub.permission_calls]
+        self.assertIn("Clinical Note", permission_doctypes)
+        self.assertIn(
+            ("Clinical Note", "read", "HLC-NOTE-1", "doctor@example.test"),
+            stub.permission_calls,
+        )
+
+    def test_a_denied_note_read_queries_nothing_and_blocks_completion(self):
+        """No Clinical Note read authority: no name read, no content read."""
+
+        stub = self.stub()
+        stub.db.all_rows["Clinical Note"] = [
+            {
+                "name": "HLC-NOTE-1",
+                "modified": "2026-11-17 08:00:00",
+                "note": "Assessment: Acne",
+            }
+        ]
+
+        values = self.gateway(stub)._encounter_state_values(self.note_doc())
+
+        self.assertIsNone(values["clinical_note"])
+        self.assertIsNone(values["clinical_note_modified"])
+        self.assertIsNone(values["assessment"])
+        self.assertIsNone(values["plan"])
+        self.assertIsNone(values["followup"])
+        self.assertEqual(self.note_queries(stub), [])
+        self.assertEqual(self.note_content_reads(stub), [])
+
+    def test_a_masked_note_field_blocks_the_content_read(self):
+        stub = self.readable_note_stub()
+        stub.get_meta("Clinical Note").masked = ["note"]
+
+        values = self.gateway(stub)._encounter_state_values(self.note_doc())
+
+        self.assertIsNone(values["clinical_note"])
+        self.assertIsNone(values["assessment"])
+        self.assertEqual(self.note_queries(stub), [])
+        self.assertEqual(self.note_content_reads(stub), [])
+
+    def test_a_note_permlevel_above_the_granted_level_blocks_the_content(self):
+        stub = self.readable_note_stub()
+        meta = stub.get_meta("Clinical Note")
+        meta.permlevels["note"] = 1
+        meta.accessible = [0]
+
+        values = self.gateway(stub)._encounter_state_values(self.note_doc())
+
+        self.assertIsNone(values["clinical_note"])
+        self.assertIsNone(values["assessment"])
+        self.assertEqual(self.note_queries(stub), [])
+        self.assertEqual(self.note_content_reads(stub), [])
+
+    def test_a_document_level_note_denial_blocks_the_content_read(self):
+        stub = self.readable_note_stub()
+        stub.denied_documents.add(("Clinical Note", "HLC-NOTE-1"))
+
+        values = self.gateway(stub)._encounter_state_values(self.note_doc())
+
+        self.assertIsNone(values["clinical_note"])
+        self.assertIsNone(values["assessment"])
+        # The name lookup happened, the content read did not.
+        self.assertEqual(
+            self.note_queries(stub),
+            [("Clinical Note", ("name",))],
+        )
+        self.assertEqual(self.note_content_reads(stub), [])
+
+    def test_an_unreadable_note_row_read_fails_closed(self):
+        stub = self.readable_note_stub()
+        stub.db.all_errors["Clinical Note"] = RuntimeError("note table unreadable")
+
+        values = self.gateway(stub)._encounter_state_values(self.note_doc())
+
+        self.assertIsNone(values["clinical_note"])
+        self.assertIsNone(values["assessment"])
+        self.assertEqual(self.note_content_reads(stub), [])
+
+    def test_a_missing_note_field_definition_fails_closed(self):
+        """No installed ``note`` field: the content can never be authorised."""
+
+        stub = self.readable_note_stub()
+        stub.get_meta("Clinical Note").shapes.pop("note")
+
+        values = self.gateway(stub)._encounter_state_values(self.note_doc())
+
+        self.assertIsNone(values["clinical_note"])
+        self.assertIsNone(values["assessment"])
+        self.assertEqual(self.note_content_reads(stub), [])
+
+    def test_a_failed_note_content_read_fails_closed(self):
+        stub = self.readable_note_stub()
+        stub.db.value_errors[("Clinical Note", "HLC-NOTE-1")] = RuntimeError(
+            "note content unreadable"
+        )
+
+        values = self.gateway(stub)._encounter_state_values(self.note_doc())
+
+        self.assertIsNone(values["clinical_note"])
+        self.assertIsNone(values["clinical_note_modified"])
+        self.assertIsNone(values["assessment"])
+        self.assertEqual(
+            self.note_content_reads(stub),
+            [("Clinical Note", "HLC-NOTE-1", ["note", "modified"])],
+        )
+
+    def test_a_malformed_note_content_result_fails_closed(self):
+        """A missing row is not an empty note: the note is reported unreadable."""
+
+        stub = self.readable_note_stub()
+        stub.db.value_overrides[("Clinical Note", "HLC-NOTE-1")] = None
+
+        values = self.gateway(stub)._encounter_state_values(self.note_doc())
+
+        self.assertIsNone(values["clinical_note"])
+        self.assertIsNone(values["clinical_note_modified"])
+        self.assertIsNone(values["assessment"])
+
+    def test_a_blank_note_modified_fails_closed(self):
+        """The amendment preimage cannot be re-verified, so the note is denied."""
+
+        stub = self.readable_note_stub()
+        stub.db.values[("Clinical Note", "HLC-NOTE-1", "modified")] = None
+
+        values = self.gateway(stub)._encounter_state_values(self.note_doc())
+
+        self.assertIsNone(values["clinical_note"])
+        self.assertIsNone(values["clinical_note_modified"])
+        self.assertIsNone(values["assessment"])
+
+    def test_the_note_preimage_keeps_the_persisted_modified_representation(self):
+        """A datetime column must not flip to the ISO ``T`` form.
+
+        The amendment re-reads ``modified`` as ``str(...)`` and compares it byte
+        for byte with this preimage. An ISO rendering would differ from the
+        postcondition's space-separated value and latch the site as
+        ``UNKNOWN``, so the preimage keeps the persisted representation.
+        """
+
+        modified = datetime(2026, 11, 17, 8, 0, 0, 123456)
+        encounter_modified = "2026-11-17 09:00:00"
+        stub = self.readable_note_stub()
+        stub.db.values[("Clinical Note", "HLC-NOTE-1", "modified")] = modified
+        stub.db.values[("Patient Encounter", "HLC-ENC-1", "modified")] = (
+            encounter_modified
+        )
+
+        values = self.gateway(stub)._encounter_state_values(self.note_doc())
+
+        self.assertEqual(values["clinical_note_modified"], str(modified))
+        self.assertNotIn("T", values["clinical_note_modified"])
+
+        facts = self.gateway(stub).native_encounter_amend_facts(
+            "HLC-ENC-1",
+            "HLC-NOTE-ADD-1",
+            "Addendum: corrected",
+            values["clinical_note"],
+            values["clinical_note_modified"],
+        )
+        self.assertIsNone(
+            encounter_contract.amend_postcondition_problem(
+                encounter_modified=facts["encounter_modified"],
+                expected_encounter_modified=encounter_modified,
+                clinical_note_modified=facts["clinical_note_modified"],
+                original_note_modified=values["clinical_note_modified"],
+                addendum_created=facts["addendum_created"],
+                expected_note="Addendum: corrected",
+            )
+        )
+
 
     def test_the_symptom_count_reads_the_installed_child_table(self):
         stub = self.stub()
