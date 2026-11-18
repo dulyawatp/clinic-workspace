@@ -24,8 +24,10 @@ SUPPORTED_ROLE_CODES = frozenset({"DOC", "REC", "NUR", "PHA", "CAS", "MGR", "ADM
 DIRECTORY_ROLE_CODES = frozenset({"DOC", "REC", "NUR"})
 
 # The patient detail read admits the same clinic role codes as the directory.
-# This gate is not a native grant: REC passes it and is still refused by the
-# Patient read permission check, so the native authority stays authoritative.
+# This gate is not a native grant: the current user's own native Patient read
+# permission is checked per record and stays authoritative. The isolated
+# 2026-11-18 preflight recorded Patient read as true for the synthetic REC
+# target, so this comment claims no role is refused by that check.
 PATIENT_VIEW_ROLE_CODES = frozenset({"DOC", "REC", "NUR"})
 
 # The read-only synthetic appointment list belongs to the two roles that own

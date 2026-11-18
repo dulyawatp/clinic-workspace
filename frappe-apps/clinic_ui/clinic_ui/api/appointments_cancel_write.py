@@ -1,14 +1,12 @@
 """Designed appointment cancel and manual no-show POST methods.
 
 ``POST /api/method/clinic_ui.api.appointments_cancel_write.cancel`` and
-``.../no_show`` are the default-off cancel/no-show family. Frappe performs the
-POST CSRF check before any method runs, and the endpoint repeats an explicit
-same-session token check that does not honour ``ignore_csrf`` or an allowed
-referrer. This module exposes no generic status setter and accepts no status
-from the client.
-
-The one-shot acknowledgement of a completed transition stays on the unchanged
-``clinic_ui.api.appointments.ack`` method, bound to the transition's fence kind.
+``.../no_show`` are the converted development transition lane. They rely on
+Frappe/Marley permissions, validation and transactions, with no operation fence,
+acknowledgement or deployment marker. Frappe performs the POST CSRF check before
+any method runs, and the endpoint repeats an explicit same-session token check
+that does not honour ``ignore_csrf`` or an allowed referrer. This module exposes
+no generic status setter and accepts no status from the client.
 
 Frappe wraps every returned mapping as ``{"message": ...}``.
 """

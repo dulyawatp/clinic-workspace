@@ -15,6 +15,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * The canonical DTO fields. A native docname is a *value* in
+ * `workspace_patient_id` or `appointment_id`, never a raw alternate field such
+ * as `patient` or `name`.
+ */
 const ITEM_KEYS = [
   "workspace_patient_id",
   "appointment_id",
@@ -97,9 +102,13 @@ function readItemFields(value: Record<string, unknown>): NativeAppointmentItem {
   };
 }
 
-function parseItem(value: unknown): NativeAppointmentItem {
-  if (!isRecord(value) || !hasExactKeys(value, ITEM_KEYS))
-    throw unavailable();
+/**
+ * One appointment row from the list or a detail payload. Only the canonical DTO
+ * fields are accepted; the identifier fields may carry an alias or a native
+ * docname, but a raw alternate field is refused.
+ */
+export function readNativeAppointmentItem(value: unknown): NativeAppointmentItem {
+  if (!isRecord(value) || !hasExactKeys(value, ITEM_KEYS)) throw unavailable();
   return readItemFields(value);
 }
 
@@ -123,8 +132,9 @@ export interface NativeAppointmentRead extends NativeAppointmentDetail {
 }
 
 /**
- * Strict parser for the versioned write-result appointment. Any extra field
- * (such as a native identifier) or a malformed version fails the whole write.
+ * Parser for the write-result appointment. Only the canonical detail fields are
+ * accepted; a raw alternate identifier field or a malformed version fails the
+ * whole write.
  */
 export function parseNativeAppointmentDetail(
   value: unknown,
@@ -135,7 +145,7 @@ export function parseNativeAppointmentDetail(
   return readDetailFields(value, expectedId);
 }
 
-/** Detail fields shared by the six-field write result and the eight-field read. */
+/** Detail fields shared by the write result and the versioned read. */
 function readDetailFields(
   value: Record<string, unknown>,
   expectedId?: string,
@@ -152,8 +162,9 @@ function readDetailFields(
 }
 
 /**
- * Strict parser for `appointments.view`. Both flags must be booleans; there is
- * no client-side inference from status or date.
+ * Parser for `appointments.view`. Both flags must be booleans; there is no
+ * client-side inference from status or date. Only the canonical fields are
+ * accepted.
  */
 export function parseNativeAppointmentRead(
   value: unknown,
@@ -178,7 +189,7 @@ export function parseNativeAppointmentRead(
  * Reads the native synthetic appointment allowlist.
  *
  * Only the Frappe envelope is unwrapped; the returned `message` is validated by
- * the feature's five-field appointment parser. 401 is an expired session with
+ * the feature's appointment parser. 401 is an expired session with
  * no retry and 404 is unsupported. A 403 is reconciled through the
  * authenticated bootstrap so a guest/expired session becomes `AUTH_EXPIRED`
  * while a genuine denial stays `FORBIDDEN`. There is no proxy or fixture
@@ -205,9 +216,9 @@ export async function fetchNativeAppointmentsBody(
 /**
  * Reads one versioned native appointment detail through the native method.
  *
- * The only input is the server-owned workspace alias. The detail contract is
- * native-only: without the native transport the caller must show unsupported,
- * never a proxy or fixture substitute.
+ * The only input is the server-owned workspace alias or native appointment
+ * docname. The detail contract is native-only: without the native transport the
+ * caller must show unsupported, never a proxy or fixture substitute.
  */
 export async function fetchNativeAppointmentDetailBody(
   workspaceAppointmentId: string,

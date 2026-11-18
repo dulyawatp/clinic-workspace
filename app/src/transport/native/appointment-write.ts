@@ -5,17 +5,14 @@ import {
 import { FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
 import { nativeCsrfToken } from "./session";
 
-/** Distinct from the patient lock: appointment and patient writes never share it. */
-const LOCK = "clinic.appointment-write.pending";
-
-const ACK_TOKEN = /^[0-9a-f]{64}$/;
-
 export type AppointmentWriteKind = "book" | "reschedule" | "checkin";
-/** Fence kinds of the designed cancel/no-show transitions. */
+/** Operation kinds of the designed cancel/no-show transitions. */
 export type AppointmentTransitionKind =
   | "appointment_cancel"
   | "appointment_no_show";
-export type AppointmentAckKind = AppointmentWriteKind | AppointmentTransitionKind;
+export type AppointmentOperationKind =
+  | AppointmentWriteKind
+  | AppointmentTransitionKind;
 export type AppointmentWriteStatus =
   | "booked"
   | "rescheduled"
@@ -23,15 +20,19 @@ export type AppointmentWriteStatus =
   | "cancelled"
   | "no_show";
 
+/**
+ * A deterministic refusal (`stale`, `validation`, `auth`, `forbidden`) or an
+ * unresolved outcome (`uncertain`). `conflict` is retained for a historical
+ * operation-conflict code; the converted lane reports a lost or unreadable
+ * response as uncertain.
+ */
 export type AppointmentWriteFailure =
-  | "locked"
   | "uncertain"
   | "stale"
   | "conflict"
   | "validation"
   | "auth"
-  | "forbidden"
-  | "unavailable";
+  | "forbidden";
 
 export class NativeAppointmentWriteError extends Error {
   readonly code: AppointmentWriteFailure;
@@ -79,14 +80,15 @@ export interface AppointmentWriteResult {
   appointment: NativeAppointmentDetail;
 }
 
-const STATUS_BY_KIND: Readonly<Record<AppointmentAckKind, AppointmentWriteStatus>> =
-  {
-    book: "booked",
-    reschedule: "rescheduled",
-    checkin: "checked_in",
-    appointment_cancel: "cancelled",
-    appointment_no_show: "no_show",
-  };
+const STATUS_BY_OPERATION: Readonly<
+  Record<AppointmentOperationKind, AppointmentWriteStatus>
+> = {
+  book: "booked",
+  reschedule: "rescheduled",
+  checkin: "checked_in",
+  appointment_cancel: "cancelled",
+  appointment_no_show: "no_show",
+};
 
 /**
  * Transitions that must return their own terminal status. The client never
@@ -98,14 +100,12 @@ const EXPECTED_DETAIL_STATUS: Readonly<Record<string, string>> = {
   appointment_no_show: "No Show",
 };
 
-const listeners = new Set<() => void>();
-
-function notifyLock(): void {
-  for (const listener of listeners) listener();
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isText(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
 }
 
 function hasExactKeys(
@@ -116,49 +116,6 @@ function hasExactKeys(
     Object.keys(value).length === keys.length &&
     keys.every((key) => Object.hasOwn(value, key))
   );
-}
-
-/**
- * The browser lock is the only persisted write state. It stores no operation
- * key, token, patient or appointment data, so a reload cannot resume a write.
- */
-export function appointmentWriteLocked(): boolean {
-  try {
-    return localStorage.getItem(LOCK) !== null;
-  } catch {
-    return true;
-  }
-}
-
-/** Same-tab notification; cross-tab changes also emit a `storage` event. */
-export function subscribeAppointmentWriteLock(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}
-
-function persistLock(): void {
-  try {
-    localStorage.setItem(LOCK, "1");
-    if (localStorage.getItem(LOCK) !== "1")
-      throw new NativeAppointmentWriteError("locked");
-  } catch {
-    throw new NativeAppointmentWriteError("locked");
-  }
-}
-
-function clearLock(): void {
-  try {
-    localStorage.removeItem(LOCK);
-    if (appointmentWriteLocked())
-      throw new NativeAppointmentWriteError("uncertain");
-  } catch {
-    throw new NativeAppointmentWriteError("uncertain");
-  }
-  notifyLock();
-}
-
-function isText(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== "";
 }
 
 function validBookInput(input: BookAppointmentInput): void {
@@ -205,21 +162,20 @@ function validTargetInput(
 }
 
 function errorCode(body: unknown): string | null {
-  if (!isRecord(body) || !isRecord(body.message)) return null;
-  return typeof body.message.code === "string" ? body.message.code : null;
+  if (!isRecord(body)) return null;
+  if (isRecord(body.message) && typeof body.message.code === "string")
+    return body.message.code;
+  return typeof body.code === "string" ? body.code : null;
 }
 
-function failure(
-  status: number,
-  body: unknown,
-): NativeAppointmentWriteError {
+function failure(status: number, body: unknown): NativeAppointmentWriteError {
   if (status === 409) {
     const code = errorCode(body);
     if (code === "STALE_VERSION")
       return new NativeAppointmentWriteError("stale");
     if (code === "OPERATION_CONFLICT")
       return new NativeAppointmentWriteError("conflict");
-    return new NativeAppointmentWriteError("locked");
+    return new NativeAppointmentWriteError("uncertain");
   }
   if (status === 401) return new NativeAppointmentWriteError("auth");
   if (status === 403) return new NativeAppointmentWriteError("forbidden");
@@ -227,23 +183,24 @@ function failure(
   return new NativeAppointmentWriteError("uncertain");
 }
 
+/**
+ * Validates the exact `{status, appointment}` result. An unexpected envelope
+ * field (including the retired `ackToken`) fails the write as uncertain, the
+ * operation status must match, and the echoed detail must be a readable
+ * appointment.
+ */
 function parseWriteResult(
-  ackKind: AppointmentAckKind,
-  expectedAlias: string | undefined,
+  operation: AppointmentOperationKind,
+  expectedId: string | undefined,
   body: unknown,
 ): AppointmentWriteResult {
-  if (
-    !isRecord(body) ||
-    !isRecord(body.message) ||
-    !hasExactKeys(body.message, ["status", "ackToken", "appointment"])
-  )
+  if (!isRecord(body) || !isRecord(body.message))
     throw new NativeAppointmentWriteError("uncertain");
 
   const message = body.message;
   if (
-    message.status !== STATUS_BY_KIND[ackKind] ||
-    typeof message.ackToken !== "string" ||
-    !ACK_TOKEN.test(message.ackToken)
+    !hasExactKeys(message, ["status", "appointment"]) ||
+    message.status !== STATUS_BY_OPERATION[operation]
   )
     throw new NativeAppointmentWriteError("uncertain");
 
@@ -251,65 +208,39 @@ function parseWriteResult(
   try {
     appointment = parseNativeAppointmentDetail(
       message.appointment,
-      expectedAlias,
+      expectedId,
     );
   } catch {
     throw new NativeAppointmentWriteError("uncertain");
   }
 
-  const expectedStatus = EXPECTED_DETAIL_STATUS[ackKind];
+  const expectedStatus = EXPECTED_DETAIL_STATUS[operation];
   if (expectedStatus !== undefined && appointment.status !== expectedStatus)
     throw new NativeAppointmentWriteError("uncertain");
 
-  return {
-    status: STATUS_BY_KIND[ackKind],
-    appointment,
-  };
+  return { status: STATUS_BY_OPERATION[operation], appointment };
 }
 
-async function acknowledge(
-  token: string,
-  kind: AppointmentAckKind,
-  operationKey: string,
-  ackToken: string,
-): Promise<void> {
-  const response = await frappeRequest("clinic_ui.api.appointments.ack", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      [FRAPPE_CSRF_HEADER]: token,
-    },
-    body: JSON.stringify({
-      operation_key: operationKey,
-      kind,
-      ack_token: ackToken,
-    }),
-  });
-  const body: unknown = await response.json().catch(() => null);
-  if (
-    response.status !== 200 ||
-    !isRecord(body) ||
-    !isRecord(body.message) ||
-    !hasExactKeys(body.message, ["acknowledged"]) ||
-    body.message.acknowledged !== true
-  )
-    throw new NativeAppointmentWriteError("uncertain");
-}
-
+/**
+ * One appointment write through the native Frappe method.
+ *
+ * The success body is the canonical `{status, appointment}` echo: the backend
+ * owns canonicalisation, so the returned detail is validated by shape, never
+ * compared field-by-field with what the form submitted. There is no
+ * acknowledgement request and no browser-side fence: the caller keeps the
+ * in-flight form guard and renders a deterministic refusal as a known failure.
+ * An unknown outcome is not reconciled for the reader: the records may be
+ * refreshed best-effort, and the reader must check current records before any
+ * repeat. Every path throws at most once, never retried.
+ */
 async function writeAppointment(
-  ackKind: AppointmentAckKind,
+  operation: AppointmentOperationKind,
   method: string,
-  operationKey: string,
-  expectedAlias: string | undefined,
+  expectedId: string | undefined,
   payload: Record<string, string>,
 ): Promise<AppointmentWriteResult> {
   const token = nativeCsrfToken();
-  if (!token || appointmentWriteLocked())
-    throw new NativeAppointmentWriteError("locked");
-
-  // Lock before dispatch. A reload, tab crash or lost response can never turn
-  // an ambiguous write into a fresh attempt.
-  persistLock();
+  if (!token) throw new NativeAppointmentWriteError("uncertain");
 
   let response: Response;
   try {
@@ -322,53 +253,31 @@ async function writeAppointment(
       body: JSON.stringify(payload),
     });
   } catch {
-    notifyLock();
+    // The request may have reached the server: the outcome is unknown.
     throw new NativeAppointmentWriteError("uncertain");
   }
 
   const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    notifyLock();
-    throw failure(response.status, body);
-  }
+  if (!response.ok) throw failure(response.status, body);
 
-  let result: AppointmentWriteResult;
-  try {
-    result = parseWriteResult(ackKind, expectedAlias, body);
-  } catch {
-    notifyLock();
-    throw new NativeAppointmentWriteError("uncertain");
-  }
-
-  const ackToken =
-    isRecord(body) && isRecord(body.message) ? body.message.ackToken : null;
-  if (typeof ackToken !== "string")
-    throw new NativeAppointmentWriteError("uncertain");
-
-  // One explicit acknowledgement, never retried. The token stays in memory and
-  // is never written to storage. A lost or failed acknowledgement keeps the
-  // browser locked for manual reconciliation.
-  try {
-    await acknowledge(token, ackKind, operationKey, ackToken);
-  } catch {
-    notifyLock();
-    throw new NativeAppointmentWriteError("uncertain");
-  }
-
-  clearLock();
-  return result;
+  return parseWriteResult(operation, expectedId, body);
 }
 
 export async function bookNativeAppointment(
   input: BookAppointmentInput,
 ): Promise<AppointmentWriteResult> {
   validBookInput(input);
-  return writeAppointment("book", "clinic_ui.api.appointments.book", input.operation_key, undefined, {
-    operation_key: input.operation_key,
-    workspace_patient_id: input.workspace_patient_id,
-    appointment_date: input.appointment_date,
-    appointment_time: input.appointment_time,
-  });
+  return writeAppointment(
+    "book",
+    "clinic_ui.api.appointments.book",
+    undefined,
+    {
+      operation_key: input.operation_key,
+      workspace_patient_id: input.workspace_patient_id,
+      appointment_date: input.appointment_date,
+      appointment_time: input.appointment_time,
+    },
+  );
 }
 
 export async function rescheduleNativeAppointment(
@@ -383,7 +292,6 @@ export async function rescheduleNativeAppointment(
   return writeAppointment(
     "reschedule",
     "clinic_ui.api.appointments.reschedule",
-    input.operation_key,
     input.workspace_appointment_id,
     {
       operation_key: input.operation_key,
@@ -402,7 +310,6 @@ export async function checkinNativeAppointment(
   return writeAppointment(
     "checkin",
     "clinic_ui.api.appointments.checkin",
-    input.operation_key,
     input.workspace_appointment_id,
     {
       operation_key: input.operation_key,
@@ -415,7 +322,7 @@ export async function checkinNativeAppointment(
 /**
  * Cancel one appointment through the designed transition. The server decides
  * eligibility and writes the terminal status; the browser only sends the
- * target alias, the workspace patient and the operator's reason.
+ * target, the workspace patient and the operator's reason.
  */
 export async function cancelNativeAppointment(
   input: CancelAppointmentInput,
@@ -424,7 +331,6 @@ export async function cancelNativeAppointment(
   return writeAppointment(
     "appointment_cancel",
     "clinic_ui.api.appointments_cancel_write.cancel",
-    input.operation_key,
     input.appointment_id,
     {
       operation_key: input.operation_key,
@@ -443,7 +349,6 @@ export async function noShowNativeAppointment(
   return writeAppointment(
     "appointment_no_show",
     "clinic_ui.api.appointments_cancel_write.no_show",
-    input.operation_key,
     input.appointment_id,
     {
       operation_key: input.operation_key,

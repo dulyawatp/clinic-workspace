@@ -240,6 +240,9 @@ class FakeFrappe(types.SimpleNamespace):
         self.docs = {}
         self.new_doc_defaults = {}
         self.before_insert_defaults = {}
+        self.get_list_calls = []
+        self.get_list_rows = []
+        self.get_list_error = None
         self.appointment_boundary_snapshot = (
             appointment_contract.reviewed_boundary_snapshot()
         )
@@ -266,6 +269,21 @@ class FakeFrappe(types.SimpleNamespace):
         self.get_doc_calls = getattr(self, "get_doc_calls", [])
         self.get_doc_calls.append((doctype, name, kwargs))
         return self.docs[(doctype, name)]
+
+    def get_list(
+        self,
+        doctype,
+        fields=None,
+        order_by=None,
+        limit_page_length=None,
+        **kwargs,
+    ):
+        self.get_list_calls.append(
+            (doctype, list(fields or ()), order_by, limit_page_length, kwargs)
+        )
+        if self.get_list_error is not None:
+            raise self.get_list_error
+        return list(self.get_list_rows)
 
     def get_roles(self, user=None):
         self.get_roles_calls = getattr(self, "get_roles_calls", [])
@@ -1370,6 +1388,143 @@ class NativePatientWriteAdapterTests(GatewayTestCase):
                 self.gateway(stub).lookup_create_receipt(
                     "doctor@example.test", "op-0123456789abcdef"
                 )
+
+
+class ReadablePatientListAdapterTests(GatewayTestCase):
+    """Bounded, permission-aware discovery for the converted patient lane."""
+
+    def doctor(self):
+        stub = FakeFrappe()
+        stub.session = types.SimpleNamespace(
+            user="doctor@example.test", sid="sid-abc123"
+        )
+        return stub
+
+    def test_uses_the_permission_aware_native_list_with_a_hard_limit(self):
+        stub = self.doctor()
+        stub.get_list_rows = [{"name": "PAT-9"}, {"name": "PAT-1"}]
+
+        names = self.gateway(stub).list_readable_patients(25)
+
+        self.assertEqual(names, ["PAT-9", "PAT-1"])
+        self.assertEqual(len(stub.get_list_calls), 1)
+        doctype, fields, order_by, limit, _kwargs = stub.get_list_calls[0]
+        self.assertEqual(doctype, "Patient")
+        self.assertEqual(fields, ["name"])
+        self.assertEqual(limit, 25)
+        self.assertIn("modified", order_by)
+        # ``frappe.get_all`` never appears on the discovery path.
+        self.assertEqual(stub.db.get_all_calls, [])
+
+    def test_missing_or_malformed_rows_are_dropped(self):
+        stub = self.doctor()
+        stub.get_list_rows = [
+            {"name": "PAT-9"},
+            {"name": ""},
+            {"name": None},
+            {},
+            "PAT-2",
+        ]
+        names = self.gateway(stub).list_readable_patients(10)
+        self.assertEqual(names, ["PAT-9"])
+
+    def test_a_list_failure_returns_none_instead_of_raising(self):
+        stub = self.doctor()
+        stub.get_list_error = RuntimeError("native list unavailable")
+        self.assertIsNone(self.gateway(stub).list_readable_patients(10))
+
+    def test_an_invalid_limit_is_refused_without_a_query(self):
+        stub = self.doctor()
+        for limit in (0, -1, None, "10", True, 100000):
+            with self.subTest(limit=limit):
+                self.assertIsNone(self.gateway(stub).list_readable_patients(limit))
+        self.assertEqual(stub.get_list_calls, [])
+
+
+class NativePermissionDenialIdentityTests(GatewayTestCase):
+    """A definite denial is recognised by type identity, never by class name."""
+
+    def test_the_installed_permission_error_type_is_recognised(self):
+        stub = FakeFrappe()
+        self.assertTrue(
+            self.gateway(stub).is_native_permission_denial(
+                FakePermissionError("denied")
+            )
+        )
+
+    def test_an_unrelated_class_with_the_same_name_is_not_recognised(self):
+        class PermissionError(Exception):
+            """Deliberately named like the framework exception; unrelated."""
+
+        stub = FakeFrappe()
+        self.assertFalse(
+            self.gateway(stub).is_native_permission_denial(PermissionError("no"))
+        )
+        self.assertFalse(
+            self.gateway(stub).is_native_permission_denial(RuntimeError("no"))
+        )
+
+    def test_a_missing_framework_type_fails_closed(self):
+        stub = FakeFrappe()
+        del stub.PermissionError
+        self.assertFalse(
+            self.gateway(stub).is_native_permission_denial(
+                FakePermissionError("denied")
+            )
+        )
+
+
+class ReadableAppointmentListAdapterTests(GatewayTestCase):
+    """Bounded, permission-aware discovery for the converted appointment lane."""
+
+    def doctor(self):
+        stub = FakeFrappe()
+        stub.session = types.SimpleNamespace(
+            user="doctor@example.test", sid="sid-abc123"
+        )
+        return stub
+
+    def test_uses_the_permission_aware_native_list_with_a_hard_limit(self):
+        stub = self.doctor()
+        stub.get_list_rows = [{"name": "APPT-9"}, {"name": "APPT-1"}]
+
+        names = self.gateway(stub).list_readable_appointments(25)
+
+        self.assertEqual(names, ["APPT-9", "APPT-1"])
+        self.assertEqual(len(stub.get_list_calls), 1)
+        doctype, fields, order_by, limit, _kwargs = stub.get_list_calls[0]
+        self.assertEqual(doctype, "Patient Appointment")
+        self.assertEqual(fields, ["name"])
+        self.assertEqual(limit, 25)
+        self.assertIn("modified", order_by)
+        # ``frappe.get_all`` and raw SQL never appear on the discovery path.
+        self.assertEqual(stub.db.get_all_calls, [])
+
+    def test_missing_or_malformed_rows_are_dropped(self):
+        stub = self.doctor()
+        stub.get_list_rows = [
+            {"name": "APPT-9"},
+            {"name": ""},
+            {"name": None},
+            {},
+            "APPT-2",
+        ]
+        names = self.gateway(stub).list_readable_appointments(10)
+        self.assertEqual(names, ["APPT-9"])
+
+    def test_a_list_failure_returns_none_instead_of_raising(self):
+        stub = self.doctor()
+        stub.get_list_error = RuntimeError("native list unavailable")
+        self.assertIsNone(self.gateway(stub).list_readable_appointments(10))
+
+    def test_an_invalid_limit_is_refused_without_a_query(self):
+        stub = self.doctor()
+        for limit in (0, -1, None, "10", True, 100000):
+            with self.subTest(limit=limit):
+                self.assertIsNone(
+                    self.gateway(stub).list_readable_appointments(limit)
+                )
+        self.assertEqual(stub.get_list_calls, [])
 
 
 class ManualInvestigationLatchTests(GatewayTestCase):
@@ -2588,6 +2743,112 @@ class AppointmentWriteAdapterTests(GatewayTestCase):
         stub.meta.permlevels.pop("notes")
         self.assertIsNone(
             self.gateway(stub).native_appointment_action_detail(self.NATIVE)
+        )
+
+    # -- site clock and note postimage -------------------------------------
+
+    def test_site_now_returns_a_whole_second_site_timestamp(self):
+        stub, _doc = self.transition_stub()
+
+        self.assertEqual(
+            self.gateway(stub)._site_now(), "2026-11-14 09:30:00"
+        )
+
+    def test_site_now_accepts_the_installed_microsecond_clock(self):
+        # Frappe 16.54 ``frappe.utils.now()`` is
+        # ``now_datetime().strftime("%Y-%m-%d %H:%M:%S.%f")``.
+        stub, _doc = self.transition_stub()
+        stub.utils.now = lambda: "2026-11-14 09:30:00.123456"
+
+        self.assertEqual(
+            self.gateway(stub)._site_now(), "2026-11-14 09:30:00.123456"
+        )
+
+    def test_site_now_rejects_values_outside_the_pinned_shapes(self):
+        for value in (
+            "2026-11-14T09:30:00",  # ISO separator
+            "2026-11-14 09:30:00.1234567",  # seven fractional digits
+            "2026-11-14 09:30:00.",  # empty fraction
+            "2026-11-14 09:30",  # missing seconds
+            "2026-11-14 09:30:00 trailing",  # trailing text
+            "14/11/2026 09:30:00",  # non-ISO date
+            "2026-13-14 09:30:00",  # impossible month
+            "",  # empty
+            None,  # not a string
+            20261114093000,  # not a string
+        ):
+            with self.subTest(value=value):
+                stub, _doc = self.transition_stub()
+                stub.utils.now = lambda value=value: value
+                with self.assertRaises(patient_write.WriteUncertain):
+                    self.gateway(stub)._site_now()
+
+    def test_site_now_fails_closed_when_the_clock_raises(self):
+        stub, _doc = self.transition_stub()
+
+        def broken_now():
+            raise RuntimeError("clock unavailable")
+
+        stub.utils.now = broken_now
+        with self.assertRaises(patient_write.WriteUncertain):
+            self.gateway(stub)._site_now()
+
+    def test_append_note_records_the_microsecond_clock_verbatim(self):
+        stub, doc = self.transition_stub()
+        stub.utils.now = lambda: "2026-11-14 09:30:00.123456"
+        state = types.SimpleNamespace(notes="Existing note.")
+
+        postimage = self.gateway(stub)._append_note(
+            state, appointment_contract.CANCEL_KIND, "Patient called.", "doc@example.test"
+        )
+
+        self.assertEqual(
+            postimage,
+            "Existing note.\n[2026-11-14 09:30:00.123456] appointment_cancel "
+            "by doc@example.test: Patient called.",
+        )
+        # The downstream contract compares the postimage verbatim, so the site
+        # value must survive unchanged through ``note_line``/``note_postimage``.
+        self.assertIsNone(
+            appointment_contract.cancel_postcondition_problem(
+                {"status": "Cancelled", "notes": postimage}, postimage
+            )
+        )
+        self.assertIsNone(
+            appointment_contract.no_show_postcondition_problem(
+                {"status": "No Show", "notes": postimage}, postimage
+            )
+        )
+
+    def test_cancel_saves_with_the_installed_microsecond_clock(self):
+        stub, doc = self.transition_stub()
+        stub.utils.now = lambda: "2026-11-14 09:30:00.123456"
+        self.inject_cancel(lambda appointment_id: None)
+
+        self.gateway(stub).cancel_native_appointment(
+            self.locked_state(doc), "Patient called.", "reception@example.test"
+        )
+
+        self.assertTrue(doc.saved)
+        self.assertEqual(
+            doc.notes,
+            "[2026-11-14 09:30:00.123456] appointment_cancel by "
+            "reception@example.test: Patient called.",
+        )
+
+    def test_no_show_saves_with_the_installed_microsecond_clock(self):
+        stub, doc = self.transition_stub(status="Scheduled")
+        stub.utils.now = lambda: "2026-11-14 09:30:00.123456"
+
+        self.gateway(stub).no_show_native_appointment(
+            self.locked_state(doc), "Patient did not arrive.", "doc@example.test"
+        )
+
+        self.assertTrue(doc.saved)
+        self.assertEqual(
+            doc.notes,
+            "[2026-11-14 09:30:00.123456] appointment_no_show by "
+            "doc@example.test: Patient did not arrive.",
         )
 
     # -- pinned boundary, fetch sources and closed-world targets ----------

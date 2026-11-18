@@ -66,24 +66,34 @@ it.each([false, undefined])("keeps profile visible without edit when editable is
     expect(screen.queryByText("ไม่สามารถแก้ไขข้อมูลรายการนี้ได้")).toBeNull();
 });
 
-it("refreshes the native directory after confirmed creation and acknowledgement", async () => {
+it("refreshes the native directory after a confirmed creation without an acknowledgement", async () => {
   vi.stubEnv("VITE_CLINIC_NATIVE", "1");
   localStorage.clear();
   let created = false;
+  let directoryReads = 0;
+  const requests: string[] = [];
   renderWithFixtures(<PatientDirectoryPage />);
   server.use(
     http.get("/api/method/clinic_ui.api.session.bootstrap", () => HttpResponse.json({ message: {
       mode: "live", sessionEpoch: "epoch", user: { id: "u", displayName: "User", roles: ["DOC"] },
       capabilities: { "read.patient": "enabled", "write.patient.create": "enabled" }, csrfToken: "csrf",
     } })),
-    http.get("/api/method/clinic_ui.api.directory.synthetic_patients", () => HttpResponse.json({ message: { items: created ? [{ workspace_patient_id: "WS-new", display_name: "Test Patient" }] : [] } })),
+    http.get("/api/method/clinic_ui.api.directory.synthetic_patients", () => {
+      directoryReads += 1;
+      return HttpResponse.json({ message: { items: created ? [{ workspace_patient_id: "WS-new", display_name: "Test Patient" }] : [] } });
+    }),
     http.post("/api/method/clinic_ui.api.patients.create", () => {
+      requests.push("create");
       created = true;
-      return HttpResponse.json({ message: { status: "created", ackToken: "a".repeat(64), patient: {
-        workspace_patient_id: "WS-new", display_name: "Test Patient", first_name: "Test", last_name: "Patient", sex: "Other", dob: "2000-01-01", status: "Active", modified: "v1",
+      // Canonical backend fields need not repeat what the form submitted.
+      return HttpResponse.json({ message: { status: "created", patient: {
+        workspace_patient_id: "PAT-0001", display_name: "TEST PATIENT", first_name: "TEST", last_name: "PATIENT", sex: "Female", dob: "2000-01-01", status: "Active", modified: "v1",
       } } });
     }),
-    http.post("/api/method/clinic_ui.api.patients.ack", () => HttpResponse.json({ message: { acknowledged: true } })),
+    http.post("/api/method/clinic_ui.api.patients.ack", () => {
+      requests.push("ack");
+      return HttpResponse.json({ message: { acknowledged: true } });
+    }),
   );
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: "เพิ่มผู้ป่วยจำลอง" }));
@@ -93,4 +103,74 @@ it("refreshes the native directory after confirmed creation and acknowledgement"
   await user.type(screen.getByLabelText("วันเกิด"), "2000-01-01");
   await user.click(screen.getByRole("button", { name: "บันทึก" }));
   expect(await screen.findByText("Test Patient")).toBeVisible();
+  expect(directoryReads).toBe(2);
+  expect(requests).toEqual(["create"]);
+});
+
+it("renders a stale refusal as a known failure without retrying", async () => {
+  vi.stubEnv("VITE_CLINIC_NATIVE", "1");
+  localStorage.clear();
+  let directoryReads = 0;
+  const creates: string[] = [];
+  renderWithFixtures(<PatientDirectoryPage />);
+  server.use(
+    http.get("/api/method/clinic_ui.api.session.bootstrap", () => HttpResponse.json({ message: {
+      mode: "live", sessionEpoch: "epoch", user: { id: "u", displayName: "User", roles: ["DOC"] },
+      capabilities: { "read.patient": "enabled", "write.patient.create": "enabled" }, csrfToken: "csrf",
+    } })),
+    http.get("/api/method/clinic_ui.api.directory.synthetic_patients", () => {
+      directoryReads += 1;
+      return HttpResponse.json({ message: { items: [] } });
+    }),
+    http.post("/api/method/clinic_ui.api.patients.create", () => {
+      creates.push("create");
+      return HttpResponse.json({ message: { code: "STALE_VERSION" } }, { status: 409 });
+    }),
+  );
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "เพิ่มผู้ป่วยจำลอง" }));
+  await user.type(screen.getByLabelText("ชื่อ"), "Test");
+  await user.type(screen.getByLabelText("นามสกุล"), "Patient");
+  await user.selectOptions(screen.getByLabelText("เพศ"), "Other");
+  await user.type(screen.getByLabelText("วันเกิด"), "2000-01-01");
+  await user.click(screen.getByRole("button", { name: "บันทึก" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("ข้อมูลผู้ป่วยมีการเปลี่ยนแปลงตั้งแต่เปิดรายการนี้");
+  expect(screen.getByRole("alert")).not.toHaveTextContent("ยังไม่ยืนยันผลการบันทึก");
+  expect(directoryReads).toBe(2);
+  expect(creates).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "บันทึก" })).toBeEnabled();
+});
+
+it("reports an unknown outcome and refreshes records before a repeat", async () => {
+  vi.stubEnv("VITE_CLINIC_NATIVE", "1");
+  localStorage.clear();
+  let directoryReads = 0;
+  const creates: string[] = [];
+  renderWithFixtures(<PatientDirectoryPage />);
+  server.use(
+    http.get("/api/method/clinic_ui.api.session.bootstrap", () => HttpResponse.json({ message: {
+      mode: "live", sessionEpoch: "epoch", user: { id: "u", displayName: "User", roles: ["DOC"] },
+      capabilities: { "read.patient": "enabled", "write.patient.create": "enabled" }, csrfToken: "csrf",
+    } })),
+    http.get("/api/method/clinic_ui.api.directory.synthetic_patients", () => {
+      directoryReads += 1;
+      return HttpResponse.json({ message: { items: [] } });
+    }),
+    http.post("/api/method/clinic_ui.api.patients.create", () => {
+      creates.push("create");
+      // Malformed success: the browser cannot tell whether the row was written.
+      return HttpResponse.json({ message: { status: "created" } });
+    }),
+  );
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "เพิ่มผู้ป่วยจำลอง" }));
+  await user.type(screen.getByLabelText("ชื่อ"), "Test");
+  await user.type(screen.getByLabelText("นามสกุล"), "Patient");
+  await user.selectOptions(screen.getByLabelText("เพศ"), "Other");
+  await user.type(screen.getByLabelText("วันเกิด"), "2000-01-01");
+  await user.click(screen.getByRole("button", { name: "บันทึก" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("ข้อมูลผู้ป่วยล่าสุด");
+  expect(directoryReads).toBe(2);
+  expect(creates).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "บันทึก" })).toBeEnabled();
 });

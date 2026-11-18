@@ -9,7 +9,7 @@ import inspect
 import unittest
 from unittest import mock
 
-from clinic_ui.core import dto, patient_alias, patient_write
+from clinic_ui.core import config, dto, patient_alias, patient_write
 from clinic_ui.endpoints import aliases as aliases_endpoint
 from clinic_ui.endpoints import directory as directory_endpoint
 
@@ -35,6 +35,27 @@ def gateway(**overrides):
     values = {
         "site": "marley.test",
         "settings": settings(clinic_ui_synthetic_patients=ALLOWLIST),
+        "current_session": session_view(roles=("Nurse",)),
+    }
+    values.update(overrides)
+    fake = FakeGateway(**values)
+    fake.patient_authority = dict(AUTHORITY)
+    return fake
+
+
+DEV_SITE = config.APPROVED_WRITE_SITE
+
+
+def dev_gateway(**overrides):
+    """A gateway inside the converted development scope (approved site only)."""
+
+    values = {
+        "site": DEV_SITE,
+        "settings": settings(
+            clinic_ui_synthetic_site=DEV_SITE,
+            clinic_ui_synthetic_patients=ALLOWLIST,
+            clinic_ui_native_patient_write_site=DEV_SITE,
+        ),
         "current_session": session_view(roles=("Nurse",)),
     }
     values.update(overrides)
@@ -276,9 +297,9 @@ class CreatedPatientDirectoryTests(unittest.TestCase):
             ["WS-1", "WS-2", "WS-3"],
         )
 
-    def test_directory_response_never_carries_a_native_id(self):
+    def test_static_and_historical_items_keep_their_alias(self):
         fake = gateway()
-        record, _alias = self.created()
+        record, alias = self.created()
         fake.created_receipts = [record]
         fake.patient_authority["PAT-NEW"] = "Created Patient"
         payload = directory_endpoint.synthetic_patients(fake)
@@ -286,6 +307,7 @@ class CreatedPatientDirectoryTests(unittest.TestCase):
             self.assertEqual(
                 set(item), {"workspace_patient_id", "display_name"}
             )
+        self.assertNotIn("PAT-NEW", [item["workspace_patient_id"] for item in payload["items"]])
 
     def test_exact_combined_item_limit_includes_the_created_slice(self):
         fake = gateway()
@@ -404,6 +426,166 @@ class CreatedPatientDirectoryTests(unittest.TestCase):
             [item["workspace_patient_id"] for item in payload["items"]],
             ["WS-1", "WS-2", "WS-3", first_alias, second_alias],
         )
+
+
+class NativeDiscoveryTests(unittest.TestCase):
+    """Newly created patients are discovered through a bounded native list."""
+
+    def created(
+        self,
+        actor="sit.doc@example.test",
+        operation_key="op-0123456789abcdef",
+        *,
+        site="marley.test",
+    ):
+        alias = patient_alias.build_alias(
+            SECRET.encode(), site, actor, operation_key
+        )
+        receipt = patient_write.encode_receipt(
+            kind="create", alias=alias, native_patient_id="PAT-NEW"
+        )
+        return FakeCreateReceipt(actor, operation_key, receipt), alias
+
+    def test_native_list_items_are_appended_after_the_alias_sources(self):
+        fake = dev_gateway()
+        fake.readable_patients = ["PAT-9"]
+        fake.patient_authority["PAT-9"] = "Nine Patient"
+
+        payload = directory_endpoint.synthetic_patients(fake)
+
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3", "PAT-9"],
+        )
+        self.assertEqual(payload["items"][3]["display_name"], "Nine Patient")
+
+    def test_the_native_list_is_bounded(self):
+        fake = dev_gateway()
+        fake.readable_patients = ["PAT-9"]
+        fake.patient_authority["PAT-9"] = "Nine Patient"
+        directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(len(fake.readable_list_calls), 1)
+        limit = fake.readable_list_calls[0]
+        self.assertGreater(limit, 0)
+        self.assertLessEqual(limit, directory_endpoint.MAX_NATIVE_PATIENTS)
+
+    def test_a_denied_display_name_is_omitted(self):
+        fake = dev_gateway()
+        fake.readable_patients = ["PAT-9"]
+        payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3"],
+        )
+
+    def test_a_static_native_id_is_not_listed_twice(self):
+        fake = dev_gateway()
+        fake.readable_patients = ["PAT-1", "PAT-9"]
+        fake.patient_authority["PAT-1"] = "Patient One"
+        fake.patient_authority["PAT-9"] = "Nine Patient"
+        payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3", "PAT-9"],
+        )
+
+    def test_a_historically_created_native_id_keeps_its_alias(self):
+        fake = dev_gateway()
+        record, alias = self.created(site=DEV_SITE)
+        fake.created_receipts = [record]
+        fake.readable_patients = ["PAT-NEW"]
+        fake.patient_authority["PAT-NEW"] = "Created Patient"
+        payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3", alias],
+        )
+
+    def test_a_missing_native_list_keeps_the_alias_directory(self):
+        fake = dev_gateway()
+        fake.readable_patients = None
+        payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3"],
+        )
+
+    def test_the_native_slice_is_cut_to_the_remaining_directory_room(self):
+        fake = dev_gateway()
+        fake.readable_patients = ["PAT-9"]
+        fake.patient_authority["PAT-9"] = "Nine Patient"
+        with mock.patch.object(dto, "MAX_DIRECTORY_ITEMS", 3):
+            payload = directory_endpoint.synthetic_patients(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3"],
+        )
+
+    def test_the_native_slice_is_disabled_outside_the_approved_site(self):
+        for site in ("marley.test", "marley.local"):
+            with self.subTest(site=site):
+                fake = gateway(
+                    site=site,
+                    settings=settings(
+                        clinic_ui_synthetic_site=site,
+                        clinic_ui_synthetic_patients=ALLOWLIST,
+                        clinic_ui_native_patient_write_site=site,
+                    ),
+                )
+                fake.readable_patients = ["PAT-9"]
+                fake.patient_authority["PAT-9"] = "Nine Patient"
+
+                payload = directory_endpoint.synthetic_patients(fake)
+
+                self.assertEqual(
+                    [item["workspace_patient_id"] for item in payload["items"]],
+                    ["WS-1", "WS-2", "WS-3"],
+                )
+                self.assertEqual(fake.readable_list_calls, [])
+                self.assertNotIn("PAT-9", fake.patient_reads)
+
+    def test_the_native_slice_still_lists_permitted_records_when_writes_are_off(self):
+        fake = dev_gateway(
+            settings=settings(
+                clinic_ui_synthetic_site=DEV_SITE,
+                clinic_ui_synthetic_patients=ALLOWLIST,
+                clinic_ui_native_patient_write_enabled=0,
+                clinic_ui_native_patient_write_site=DEV_SITE,
+            )
+        )
+        fake.readable_patients = ["PAT-9"]
+        fake.patient_authority["PAT-9"] = "Nine Patient"
+
+        payload = directory_endpoint.synthetic_patients(fake)
+
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3", "PAT-9"],
+        )
+        self.assertEqual(len(fake.readable_list_calls), 1)
+
+    def test_the_historical_alias_slice_still_works_on_another_site(self):
+        site = "marley.local"
+        fake = gateway(
+            site=site,
+            settings=settings(
+                clinic_ui_synthetic_site=site,
+                clinic_ui_synthetic_patients=ALLOWLIST,
+            ),
+        )
+        record, alias = self.created(site=site)
+        fake.created_receipts = [record]
+        fake.readable_patients = ["PAT-9"]
+        fake.patient_authority["PAT-9"] = "Nine Patient"
+        fake.patient_authority["PAT-NEW"] = "Created Patient"
+
+        payload = directory_endpoint.synthetic_patients(fake)
+
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "WS-2", "WS-3", alias],
+        )
+        self.assertEqual(fake.readable_list_calls, [])
 
 
 if __name__ == "__main__":

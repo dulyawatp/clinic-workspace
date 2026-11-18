@@ -1,26 +1,30 @@
-"""Endpoint tests for local booking, rescheduling and same-day check-in.
+"""Endpoint tests for the converted native appointment write lane.
 
-The fake gateway proves gate ordering, strict bodies, durable budget/target
-decisions, fence-before-native ordering, commit/receipt/acknowledgement
-handling and fail-closed denials. It does not claim native permission
-semantics; the adapter tests cover the locked native calls.
+The development lane relies on Frappe/Marley permissions, validation and
+transactions only: no operation fence, no write budget, no acknowledgement and
+no deployment marker. These tests assert the native gate order, permission
+checks, CSRF, strict bodies, transaction cleanup and the agreed
+``{"status", "appointment"}`` result. They also assert that an unresolved
+historical fence can never block a converted write, while a historical sealed
+alias still resolves read-only.
 """
 
 import unittest
-from unittest import mock
 
-from clinic_ui.core import appointment_write, config, patient_write
-from clinic_ui.core.appointment_write import (
-    AppointmentBudgetExhausted,
-    AppointmentTargetNotEligible,
-    build_alias,
+from clinic_ui.core import (
+    appointment_write,
+    config,
+    patient_alias,
+    patient_write,
+    write_fence,
 )
+from clinic_ui.core.appointment_write import build_alias
 from clinic_ui.endpoints import appointments_write
 
 from .fake_gateway import (
     Denied,
-    FakeAppointmentReceipt,
     FakeGateway,
+    NativePermissionDenied,
     SECRET,
     session_view,
     settings,
@@ -29,12 +33,20 @@ from .fake_gateway import (
 SITE = config.APPROVED_WRITE_SITE
 ACTOR = "reception@example.test"
 CSRF = "csrf-token-value"
+
+
+class UnrelatedPermissionError(Exception):
+    """Same class *name* as the framework denial, unrelated type and module."""
+
+
+UnrelatedPermissionError.__name__ = "PermissionError"
 BOOK_KEY = "appt-book-key-0001-012345"
-SECOND_BOOK_KEY = "appt-book-key-0002-012345"
-RESCHEDULE_KEY = "appt-resched-key-0001-0123"
-CHECKIN_KEY = "appt-checkin-key-0001-0012"
+PATIENT_KEY = "pat-create-key-0001-0123"
 MODIFIED = "2026-11-14 09:30:00.123456"
 TODAY = "2026-11-14"
+
+NATIVE_APPT = "NATIVE-APPT-10"
+NATIVE_TODAY = "NATIVE-APPT-TODAY"
 
 
 def write_settings(**overrides):
@@ -80,44 +92,58 @@ def gateway(**overrides):
         "status": "Open",
         "modified": MODIFIED,
     }
-    fake.appointment_detail_map["NATIVE-APPT-TODAY"] = {
+    fake.appointment_detail_map[NATIVE_APPT] = {
+        "patient": "PAT-1",
+        "appointment_date": "2026-11-20",
+        "appointment_time": "09:30:00",
+        "status": "Open",
+        "modified": MODIFIED,
+    }
+    fake.appointment_detail_map[NATIVE_TODAY] = {
         "patient": "PAT-2",
         "appointment_date": TODAY,
         "appointment_time": "08:00:00",
         "status": "Open",
         "modified": MODIFIED,
     }
+    fake.appointment_view_detail = {
+        key: dict(value) for key, value in fake.appointment_detail_map.items()
+    }
+    fake.appointment_locked[NATIVE_APPT] = {
+        "patient": "PAT-1",
+        "appointment_date": "2026-11-20",
+        "status": "Open",
+    }
+    fake.appointment_locked[NATIVE_TODAY] = {
+        "patient": "PAT-2",
+        "appointment_date": TODAY,
+        "status": "Open",
+        "appointment_time": "08:00:00",
+    }
+    _install_modified(fake)
     return fake
+
+
+def _install_modified(fake):
+    """Serve the per-record versions from the same fixture map."""
+
+    fake.appointment_modified = {
+        "NATIVE-APPT-NEW": MODIFIED,
+        NATIVE_APPT: MODIFIED,
+        NATIVE_TODAY: MODIFIED,
+    }
 
 
 def alias_for(key):
     return build_alias(SECRET.encode(), SITE, ACTOR, key)
 
 
-def book_receipt(key, native_id):
-    return appointment_write.encode_receipt(
-        kind="book", alias=alias_for(key), native_appointment_id=native_id
-    )
-
-
-def committed(fake, kind, key, native_id, actor=ACTOR):
-    fake.appointment_receipt_records.append(
-        FakeAppointmentReceipt(
-            kind,
-            actor,
-            key,
-            appointment_write.encode_receipt(
-                kind=kind,
-                alias=alias_for(key),
-                native_appointment_id=native_id,
-            ),
-        )
-    )
+def sealed_patient_alias(operation_key=PATIENT_KEY):
+    return patient_alias.build_alias(SECRET.encode(), SITE, ACTOR, operation_key)
 
 
 def book_body(**overrides):
     values = {
-        "operation_key": BOOK_KEY,
         "workspace_patient_id": "WS-1",
         "appointment_date": "2026-11-20",
         "appointment_time": "09:30",
@@ -128,8 +154,7 @@ def book_body(**overrides):
 
 def reschedule_body(**overrides):
     values = {
-        "operation_key": RESCHEDULE_KEY,
-        "workspace_appointment_id": alias_for(BOOK_KEY),
+        "workspace_appointment_id": NATIVE_APPT,
         "base_modified": MODIFIED,
         "appointment_date": "2026-11-21",
         "appointment_time": "10:15",
@@ -140,30 +165,25 @@ def reschedule_body(**overrides):
 
 def checkin_body(**overrides):
     values = {
-        "operation_key": CHECKIN_KEY,
-        "workspace_appointment_id": alias_for(BOOK_KEY),
+        "workspace_appointment_id": NATIVE_TODAY,
         "base_modified": MODIFIED,
     }
     values.update(overrides)
     return values
 
 
-def ack_body(**overrides):
-    values = {
-        "operation_key": BOOK_KEY,
-        "kind": "book",
-        "ack_token": "a" * 64,
-    }
-    values.update(overrides)
-    return values
-
-
 class BookingTests(unittest.TestCase):
-    def test_books_with_server_owned_targets_and_returns_a_versioned_row(self):
+    def test_books_with_server_owned_targets_and_returns_the_native_docname(self):
         fake = gateway()
+        _install_modified(fake)
         payload = appointments_write.book(fake, book_body(), CSRF)
 
         self.assertEqual(payload["status"], "booked")
+        self.assertEqual(set(payload), {"status", "appointment"})
+        self.assertNotIn("ackToken", payload)
+        self.assertEqual(payload["appointment"]["appointment_id"], "NATIVE-APPT-NEW")
+        self.assertEqual(payload["appointment"]["workspace_patient_id"], "WS-1")
+        self.assertEqual(payload["appointment"]["modified"], MODIFIED)
         self.assertEqual(
             set(payload["appointment"]),
             {
@@ -175,62 +195,101 @@ class BookingTests(unittest.TestCase):
                 "modified",
             },
         )
-        self.assertEqual(payload["appointment"]["appointment_id"], alias_for(BOOK_KEY))
-        self.assertEqual(payload["appointment"]["workspace_patient_id"], "WS-1")
-        self.assertEqual(payload["appointment"]["modified"], MODIFIED)
-        self.assertEqual(fake.prepare_appointment_calls, [{
-            "patient": "PAT-1",
-            "company": "COMP-1",
-            "department": "MEDDEP-1",
-            "appointment_type": "APPT-TYPE-1",
-            "duration": 15,
-            "appointment_date": "2026-11-20",
-            "appointment_time": "09:30:00",
-        }])
-        self.assertEqual(fake.commit_calls, 1)
-        self.assertEqual(len(fake.appointment_fence_calls), 1)
-        self.assertEqual(fake.appointment_fence_calls[0][1], "book")
-        self.assertEqual(len(fake.appointment_fence_claim.committed), 1)
-        self.assertEqual(len(payload["ackToken"]), 64)
-        text = repr(payload)
-        for native in ("PAT-1", "NATIVE-APPT-NEW"):
-            self.assertNotIn(native, text)
-
-    def test_booking_checks_every_required_native_read_and_create_authority(self):
-        fake = gateway()
-        appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(fake.patient_read_calls, ["PAT-1", "PAT-1"])
         self.assertEqual(
-            fake.doctype_read_calls,
+            fake.prepare_appointment_calls,
             [
-                ("Company", "COMP-1"),
-                ("Appointment Type", "APPT-TYPE-1"),
-                ("Medical Department", "MEDDEP-1"),
-                ("Gender", None),
-                # Repeated after the fence, against current authority.
-                ("Company", "COMP-1"),
-                ("Appointment Type", "APPT-TYPE-1"),
-                ("Medical Department", "MEDDEP-1"),
-                ("Gender", None),
+                {
+                    "patient": "PAT-1",
+                    "company": "COMP-1",
+                    "department": "MEDDEP-1",
+                    "appointment_type": "APPT-TYPE-1",
+                    "duration": 15,
+                    "appointment_date": "2026-11-20",
+                    "appointment_time": "09:30:00",
+                }
             ],
         )
+        self.assertEqual(fake.commit_calls, 1)
+        self.assertEqual(
+            fake.appointment_source_calls[0], ("PAT-1", "APPT-TYPE-1", True)
+        )
 
-    def test_denials_happen_before_any_fence_or_native_write(self):
-        cases = {
-            "patient read": {"patient_can_read": False},
-            "appointment create": {"appointment_can_create": False},
-            "unsafe settings": {"appointment_side_effects_unsafe": True},
-        }
-        for name, override in cases.items():
-            with self.subTest(case=name):
+    def test_the_converted_lane_never_touches_the_operation_fence(self):
+        fake = gateway()
+        _install_modified(fake)
+        fake.deployment_approved = False
+        fake.fence_ready = False
+        fake.fence_error = patient_write.StoreUnavailable()
+        fake.appointment_receipt_list_error = patient_write.StoreUnavailable()
+
+        payload = appointments_write.book(fake, book_body(), CSRF)
+
+        self.assertEqual(payload["status"], "booked")
+        self.assertEqual(fake.appointment_fence_calls, [])
+        self.assertEqual(fake.appointment_receipt_calls, [])
+        self.assertEqual(fake.appointment_ack_calls, [])
+        self.assertEqual(fake.latch_calls, [])
+
+    def test_books_for_a_native_patient_docname(self):
+        fake = gateway()
+        payload = appointments_write.book(
+            fake, book_body(workspace_patient_id="PAT-1"), CSRF
+        )
+        self.assertEqual(payload["status"], "booked")
+        # An allowlisted patient keeps its stable workspace alias in the result.
+        self.assertEqual(payload["appointment"]["workspace_patient_id"], "WS-1")
+        self.assertEqual(fake.prepare_appointment_calls[0]["patient"], "PAT-1")
+
+    def test_books_for_a_readable_native_patient_outside_the_allowlist(self):
+        fake = gateway(patient_read_authority={"PAT-NEW"})
+        fake.appointment_detail_map["NATIVE-APPT-NEW"]["patient"] = "PAT-NEW"
+        payload = appointments_write.book(
+            fake, book_body(workspace_patient_id="PAT-NEW"), CSRF
+        )
+        self.assertEqual(payload["status"], "booked")
+        self.assertEqual(payload["appointment"]["workspace_patient_id"], "PAT-NEW")
+        self.assertEqual(fake.prepare_appointment_calls[0]["patient"], "PAT-NEW")
+
+    def test_a_historical_patient_alias_still_books_read_only(self):
+        alias = sealed_patient_alias()
+        fake = gateway()
+        fake.create_receipts[(ACTOR, PATIENT_KEY)] = patient_write.encode_receipt(
+            kind="create", alias=alias, native_patient_id="PAT-1"
+        )
+
+        payload = appointments_write.book(
+            fake, book_body(workspace_patient_id=alias), CSRF
+        )
+
+        self.assertEqual(payload["status"], "booked")
+        # The allowlisted patient is published under its stable workspace alias.
+        self.assertEqual(payload["appointment"]["workspace_patient_id"], "WS-1")
+        self.assertEqual(fake.prepare_appointment_calls[0]["patient"], "PAT-1")
+        self.assertEqual(fake.created_receipts, [])
+
+    def test_a_patient_the_user_cannot_read_is_denied_before_any_write(self):
+        fake = gateway(patient_can_read=False)
+        with self.assertRaises(Denied):
+            appointments_write.book(
+                fake, book_body(workspace_patient_id="PAT-UNKNOWN"), CSRF
+            )
+        self.assertEqual(fake.prepare_appointment_calls, [])
+        self.assertEqual(fake.insert_appointment_calls, [])
+
+    def test_native_create_and_patient_read_authority_are_required(self):
+        for override in (
+            {"patient_can_read": False},
+            {"appointment_can_create": False},
+        ):
+            with self.subTest(override=override):
                 fake = gateway(**override)
+                _install_modified(fake)
                 with self.assertRaises(Denied):
                     appointments_write.book(fake, book_body(), CSRF)
-                self.assertEqual(fake.appointment_fence_calls, [])
                 self.assertEqual(fake.prepare_appointment_calls, [])
                 self.assertEqual(fake.insert_appointment_calls, [])
 
-    def test_linked_doctype_read_denial_denies(self):
+    def test_linked_doctype_read_denial_denies_before_any_write(self):
         for doctype in (
             "Company",
             "Appointment Type",
@@ -239,97 +298,23 @@ class BookingTests(unittest.TestCase):
         ):
             with self.subTest(doctype=doctype):
                 fake = gateway(doctype_reads={doctype: False})
+                _install_modified(fake)
                 with self.assertRaises(Denied):
                     appointments_write.book(fake, book_body(), CSRF)
-                self.assertEqual(fake.appointment_fence_calls, [])
+                self.assertEqual(fake.insert_appointment_calls, [])
 
-    def test_boundary_drift_denies_before_any_read_or_write(self):
+    def test_boundary_drift_and_unsafe_settings_deny_before_any_write(self):
         fake = gateway(appointment_boundary_problem="healthcare source drift")
+        _install_modified(fake)
         with self.assertRaises(Denied):
             appointments_write.book(fake, book_body(), CSRF)
         self.assertEqual(fake.appointment_source_calls, [])
-        self.assertEqual(fake.appointment_fence_calls, [])
 
-    def test_booking_locks_sources_and_revalidates_after_insert(self):
-        fake = gateway()
-        payload = appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(payload["status"], "booked")
-        self.assertEqual(
-            fake.appointment_source_calls,
-            [("PAT-1", "APPT-TYPE-1", True)],
-        )
-        self.assertEqual(
-            fake.appointment_insert_verify_calls,
-            [
-                (
-                    "NATIVE-APPT-NEW",
-                    {
-                        "patient": "PAT-1",
-                        "company": "COMP-1",
-                        "department": "MEDDEP-1",
-                        "appointment_type": "APPT-TYPE-1",
-                        "duration": 15,
-                        "appointment_date": "2026-11-20",
-                        "appointment_time": "09:30:00",
-                        **fake.appointment_sources,
-                    },
-                    fake.appointment_sources,
-                    TODAY,
-                )
-            ],
-        )
-
-    def test_booking_fences_then_resets_the_snapshot_then_locks_dependencies(self):
-        fake = gateway()
-        appointments_write.book(fake, book_body(), CSRF)
-        order = fake.call_order
-        self.assertEqual(fake.snapshot_resets, 1)
-        self.assertLess(order.index("fence"), order.index("snapshot_reset"))
-        self.assertLess(order.index("snapshot_reset"), order.index("sources"))
-        self.assertLess(order.index("sources"), order.index("insert"))
-
-    def test_boundary_drift_after_the_fence_denies_before_dependency_locks(self):
-        fake = gateway()
-        fake.appointment_boundary_problem_sequence = [None, "metadata drift"]
+        fake = gateway(appointment_side_effects_unsafe=True)
+        _install_modified(fake)
         with self.assertRaises(Denied):
             appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(len(fake.appointment_fence_calls), 1)
-        self.assertEqual(fake.snapshot_resets, 1)
-        self.assertEqual(fake.appointment_source_calls, [])
         self.assertEqual(fake.insert_appointment_calls, [])
-        self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(fake.rollback_calls, 1)
-
-    def test_a_config_change_after_the_fence_denies_before_insert(self):
-        fake = gateway()
-        fake.setting_sequences = {
-            "clinic_ui_synthetic_patients": [
-                [
-                    {"workspace_patient_id": "WS-1", "native_patient_id": "PAT-1"},
-                    {"workspace_patient_id": "WS-2", "native_patient_id": "PAT-2"},
-                ],
-                [
-                    {"workspace_patient_id": "WS-2", "native_patient_id": "PAT-2"},
-                ],
-            ]
-        }
-        with self.assertRaises(Denied):
-            appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(len(fake.appointment_fence_calls), 1)
-        self.assertEqual(fake.appointment_source_calls, [])
-        self.assertEqual(fake.insert_appointment_calls, [])
-        self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(fake.rollback_calls, 1)
-
-    def test_source_fetch_failure_denies_after_the_fence_before_any_write(self):
-        fake = gateway(appointment_sources_error=patient_write.UnsafeSideEffect("sex"))
-        with self.assertRaises(Denied):
-            appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(fake.prepare_appointment_calls, [])
-        self.assertEqual(len(fake.appointment_fence_calls), 1)
-        self.assertEqual(fake.insert_appointment_calls, [])
-        self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(fake.rollback_calls, 1)
 
     def test_an_unreviewed_appointment_type_mode_denies(self):
         fake = gateway(
@@ -339,833 +324,594 @@ class BookingTests(unittest.TestCase):
                 "allow_booking_for": "Practitioner",
             }
         )
+        _install_modified(fake)
         with self.assertRaises(Denied):
             appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(fake.appointment_fence_calls, [])
+        self.assertEqual(fake.insert_appointment_calls, [])
 
-    def test_post_insert_revalidation_failure_is_unknown_and_rolls_back(self):
+    def test_a_past_destination_is_a_validation_refusal(self):
+        fake = gateway()
+        _install_modified(fake)
+        payload = appointments_write.book(
+            fake, book_body(appointment_date="2026-11-13"), CSRF
+        )
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.write_responses[0][0], 422)
+        self.assertEqual(fake.insert_appointment_calls, [])
+
+    def test_strict_body_rejections_do_not_dispatch(self):
+        for body in (
+            book_body(status="Open"),
+            book_body(native_appointment_id="NATIVE-1"),
+            book_body(operation_key="short"),
+            book_body(appointment_date="20-11-2026"),
+            book_body(appointment_time="9:30"),
+            book_body(workspace_patient_id=""),
+            book_body(workspace_patient_id=" WS-1"),
+        ):
+            with self.subTest(body=body):
+                fake = gateway()
+                _install_modified(fake)
+                payload = appointments_write.book(fake, body, CSRF)
+                self.assertEqual(payload, {"code": "VALIDATION"})
+                self.assertEqual(fake.write_responses[0][0], 422)
+                self.assertEqual(fake.insert_appointment_calls, [])
+                self.assertEqual(fake.commit_calls, 0)
+
+    def test_a_legacy_operation_key_is_accepted_and_ignored(self):
+        fake = gateway()
+        _install_modified(fake)
+        payload = appointments_write.book(
+            fake, book_body(operation_key=BOOK_KEY), CSRF
+        )
+        self.assertEqual(payload["status"], "booked")
+        self.assertEqual(fake.commit_calls, 1)
+
+    def test_post_insert_revalidation_failure_is_uncertain(self):
         fake = gateway(
             appointment_insert_verify_error=patient_write.WriteUncertain()
         )
+        _install_modified(fake)
         payload = appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(fake.rollback_calls, 1)
-        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
-        self.assertEqual(len(fake.appointment_fence_claim.committed), 0)
-
-    def test_a_missing_positive_type_duration_denies(self):
-        for duration in (None, 0, -5):
-            with self.subTest(duration=duration):
-                fake = gateway(appointment_type_duration=duration)
-                with self.assertRaises(Denied):
-                    appointments_write.book(fake, book_body(), CSRF)
-                self.assertEqual(fake.prepare_appointment_calls, [])
-                self.assertEqual(fake.appointment_fence_calls, [])
-
-    def test_the_prepared_document_side_effect_guard_denies_before_any_write(self):
-        fake = gateway()
-        fake.prepare_appointment_error = patient_write.UnsafeSideEffect("practitioner")
-        with self.assertRaises(Denied):
-            appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(fake.insert_appointment_calls, [])
-        self.assertEqual(len(fake.appointment_fence_calls), 1)
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
         self.assertEqual(fake.commit_calls, 0)
         self.assertEqual(fake.rollback_calls, 1)
 
-    def test_an_unallowlisted_patient_is_denied(self):
+    def test_commit_failure_is_uncertain(self):
         fake = gateway()
-        with self.assertRaises(Denied):
-            appointments_write.book(
-                fake, book_body(workspace_patient_id="WS-9"), CSRF
-            )
-        self.assertEqual(fake.appointment_fence_calls, [])
-
-    def test_a_past_or_malformed_date_is_refused(self):
-        for body in (
-            book_body(appointment_date="2026-11-13"),
-            book_body(appointment_date="2026-02-30"),
-            book_body(appointment_time="25:00"),
-        ):
-            with self.subTest(body=body):
-                fake = gateway()
-                payload = appointments_write.book(fake, body, CSRF)
-                self.assertEqual(payload, {"code": "VALIDATION"})
-                self.assertEqual(fake.appointment_fence_calls, [])
-                self.assertEqual(fake.insert_appointment_calls, [])
-
-    def test_strict_bodies_never_reach_the_fence(self):
-        for body in (
-            book_body(patient="PAT-1"),
-            book_body(department="MEDDEP-1"),
-            book_body(company="COMP-1"),
-            book_body(duration=15),
-            book_body(status="Open"),
-            book_body(practitioner="PRACT-1"),
-            book_body(native_appointment_id="NATIVE-APPT-1"),
-            book_body(operation_key="short"),
-        ):
-            with self.subTest(body=body):
-                fake = gateway()
-                payload = appointments_write.book(fake, body, CSRF)
-                self.assertEqual(payload, {"code": "VALIDATION"})
-                self.assertEqual(fake.appointment_fence_calls, [])
-
-    def test_an_alias_matching_a_static_workspace_id_is_a_conflict(self):
-        fake = gateway(
-            settings=write_settings(
-                clinic_ui_synthetic_appointments=[
-                    {
-                        "workspace_appointment_id": alias_for(SECOND_BOOK_KEY),
-                        "native_appointment_id": "NATIVE-APPT-1",
-                    },
-                ]
-            )
-        )
-        payload = appointments_write.book(
-            fake, book_body(operation_key=SECOND_BOOK_KEY), CSRF
-        )
-        self.assertEqual(payload, {"code": "OPERATION_CONFLICT"})
-        self.assertEqual(fake.appointment_fence_calls, [])
-
-    def test_budget_allows_two_bookings_and_refuses_the_third(self):
-        fake = gateway()
-        committed(fake, "book", BOOK_KEY, "NATIVE-APPT-A")
-        committed(fake, "book", SECOND_BOOK_KEY, "NATIVE-APPT-B", actor="other@example.test")
-        payload = appointments_write.book(
-            fake, book_body(operation_key="appt-book-key-0003-012345"), CSRF
-        )
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(fake.appointment_fence_calls, [])
-        self.assertEqual(fake.insert_appointment_calls, [])
-
-    def test_a_receipt_failure_before_commit_keeps_the_key_locked(self):
-        """A real alias the fence codec rejects never reaches the native commit."""
-
-        fake = gateway()
-        fake.created_appointment_id = "X" * 141
-        payload = appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(fake.rollback_calls, 1)
-        self.assertEqual(len(fake.appointment_fence_claim.committed), 0)
-        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
-
-    def test_commit_failure_marks_unknown_and_rolls_back(self):
-        fake = gateway()
+        _install_modified(fake)
 
         def boom():
-            raise RuntimeError("commit failed")
+            raise RuntimeError("commit outcome unknown")
 
         fake.commit = boom
         payload = appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
         self.assertEqual(fake.rollback_calls, 1)
 
-    def test_rollback_failure_propagates_and_keeps_the_lock(self):
+    def test_an_unrelated_permission_named_failure_at_commit_is_uncertain(self):
         fake = gateway()
 
-        def commit_boom():
-            raise RuntimeError("commit failed")
+        def boom():
+            raise UnrelatedPermissionError("denied")
 
-        def rollback_boom():
+        fake.commit = boom
+        payload = appointments_write.book(fake, book_body(), CSRF)
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.appointment_receipt_records, [])
+
+    def test_a_native_permission_failure_during_the_insert_is_uncertain(self):
+        fake = gateway(
+            insert_appointment_error=NativePermissionDenied("denied")
+        )
+        payload = appointments_write.book(fake, book_body(), CSRF)
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.appointment_receipt_records, [])
+
+    def test_failed_rollback_propagates(self):
+        fake = gateway(insert_appointment_error=RuntimeError("native failure"))
+
+        def rollback_failure():
             raise RuntimeError("rollback failed")
 
-        fake.commit = commit_boom
-        fake.rollback = rollback_boom
+        fake.rollback = rollback_failure
         with self.assertRaises(appointments_write.RollbackFailed):
             appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
+        self.assertEqual(fake.write_responses, [])
 
-    def test_a_post_commit_response_failure_latches_the_deployment(self):
+    def test_missing_post_commit_detail_is_uncertain_without_a_latch(self):
         fake = gateway()
-        fake.appointment_detail_map.pop("NATIVE-APPT-NEW")
+        _install_modified(fake)
+        fake.appointment_detail_map.clear()
         payload = appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(fake.latch_calls, [
-            "post-commit booked response construction failed"
-        ])
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.write_responses[0][0], 409)
+        self.assertEqual(fake.latch_calls, [])
+        self.assertEqual(fake.operation_latch_calls, [])
 
-    def test_latch_failure_falls_back_to_the_operation_unknown(self):
+    def test_success_strips_message_channels(self):
         fake = gateway()
-        fake.appointment_detail_map.pop("NATIVE-APPT-NEW")
+        _install_modified(fake)
+        appointments_write.book(fake, book_body(), CSRF)
+        self.assertEqual(fake.strip_calls, 1)
 
-        def latch_boom(reason):
-            raise RuntimeError("latch unavailable")
 
-        fake.latch_manual_investigation = latch_boom
-        payload = appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(len(fake.operation_latch_calls), 1)
-
-    def test_both_latch_failures_escape_instead_of_returning_a_response(self):
+class RescheduleTests(unittest.TestCase):
+    def test_reschedules_a_native_docname(self):
         fake = gateway()
-        fake.appointment_detail_map.pop("NATIVE-APPT-NEW")
+        _install_modified(fake)
+        payload = appointments_write.reschedule(fake, reschedule_body(), CSRF)
 
-        def boom(*args, **kwargs):
-            raise RuntimeError("latch unavailable")
+        self.assertEqual(payload["status"], "rescheduled")
+        self.assertEqual(set(payload), {"status", "appointment"})
+        self.assertNotIn("ackToken", payload)
+        self.assertEqual(payload["appointment"]["appointment_id"], NATIVE_APPT)
+        self.assertEqual(len(fake.save_reschedule_calls), 1)
+        state, fields, today = fake.save_reschedule_calls[0]
+        self.assertEqual(
+            fields,
+            {"appointment_date": "2026-11-21", "appointment_time": "10:15:00"},
+        )
+        self.assertEqual(today, TODAY)
+        self.assertEqual(fake.commit_calls, 1)
+        self.assertEqual(fake.appointment_fence_calls, [])
 
-        fake.latch_manual_investigation = boom
-        fake.latch_operation_uncertain = boom
-        with self.assertRaises(appointments_write.ManualInvestigationRequired):
-            appointments_write.book(fake, book_body(), CSRF)
+    def test_reschedules_a_native_patient_outside_the_static_allowlist(self):
+        fake = gateway(patient_read_authority={"PAT-NEW"})
+        fake.appointment_detail_map[NATIVE_APPT]["patient"] = "PAT-NEW"
+        fake.appointment_locked[NATIVE_APPT]["patient"] = "PAT-NEW"
 
-    def test_the_receipt_is_encoded_before_the_commit_and_the_terminal_claim(self):
-        """The receipt is validated while the native write is still uncommitted.
+        payload = appointments_write.reschedule(fake, reschedule_body(), CSRF)
 
-        A receipt the fence would reject cannot be an established outcome, so it
-        must be refused before the one native commit rather than after it.
-        """
+        self.assertEqual(payload["status"], "rescheduled")
+        expected = fake.appointment_lock_calls[-1][2]
+        self.assertEqual(expected["patient"], "PAT-NEW")
+        self.assertNotIn("patients", expected)
+        self.assertEqual(len(fake.save_reschedule_calls), 1)
 
-        fake = gateway()
-        real_encode = appointment_write.encode_receipt
-        committed_at_commit = []
-
-        def recording_encode(**kwargs):
-            fake.call_order.append("encode_receipt")
-            return real_encode(**kwargs)
-
-        def recording_commit():
-            committed_at_commit.append(len(fake.appointment_fence_claim.committed))
-            fake.call_order.append("commit")
-            fake.commit_calls += 1
-
-        with mock.patch.object(appointment_write, "encode_receipt", recording_encode):
-            with mock.patch.object(fake, "commit", recording_commit):
-                payload = appointments_write.book(fake, book_body(), CSRF)
-
-        self.assertEqual(payload["status"], "booked")
-        order = fake.call_order
-        self.assertLess(order.index("insert"), order.index("encode_receipt"))
-        self.assertLess(order.index("encode_receipt"), order.index("commit"))
-        # The terminal claim is appended after the commit, never before it.
-        self.assertEqual(committed_at_commit, [0])
-        self.assertEqual(len(fake.appointment_fence_claim.committed), 1)
-
-    def test_a_receipt_encode_failure_never_reaches_the_native_commit(self):
-        """The receipt is encoded before the commit, so a refusal is deterministic.
-
-        The dispatched key stays locked: the site commit is never called, the
-        native transaction is rolled back and no ``COMMITTED`` receipt exists.
-        """
-
-        fake = gateway()
-
-        with mock.patch.object(
-            appointment_write,
-            "encode_receipt",
-            side_effect=appointment_write.AppointmentWriteError("invalid alias"),
+    def test_a_historical_receipt_failure_is_a_denial_not_an_error(self):
+        for error in (
+            patient_write.StoreUnavailable(),
+            patient_write.WriteUncertain(),
+            patient_write.WriteLocked(),
         ):
-            payload = appointments_write.book(fake, book_body(), CSRF)
+            with self.subTest(error=type(error).__name__):
+                fake = gateway()
+                fake.appointment_receipts[(ACTOR, "book", BOOK_KEY)] = error
+                with self.assertRaises(Denied):
+                    appointments_write.reschedule(
+                        fake,
+                        reschedule_body(workspace_appointment_id=alias_for(BOOK_KEY)),
+                        CSRF,
+                    )
+                self.assertEqual(fake.appointment_lock_calls, [])
+                self.assertEqual(fake.save_reschedule_calls, [])
+                self.assertEqual(fake.commit_calls, 0)
+                self.assertEqual(fake.appointment_receipt_records, [])
 
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+    def test_a_native_target_never_consults_the_historical_ledger(self):
+        fake = gateway()
+        fake.appointment_receipts[(ACTOR, "book", BOOK_KEY)] = (
+            patient_write.StoreUnavailable()
+        )
+        fake.appointment_receipt_list_error = patient_write.StoreUnavailable()
+
+        payload = appointments_write.reschedule(fake, reschedule_body(), CSRF)
+
+        self.assertEqual(payload["status"], "rescheduled")
+        self.assertEqual(fake.appointment_receipt_calls, [])
+
+    def test_a_historical_booking_alias_still_reschedules_read_only(self):
+        alias = alias_for(BOOK_KEY)
+        fake = gateway()
+        _install_modified(fake)
+        fake.appointment_receipts[(ACTOR, "book", BOOK_KEY)] = (
+            appointment_write.encode_receipt(
+                kind="book", alias=alias, native_appointment_id=NATIVE_APPT
+            )
+        )
+
+        payload = appointments_write.reschedule(
+            fake, reschedule_body(workspace_appointment_id=alias), CSRF
+        )
+
+        self.assertEqual(payload["status"], "rescheduled")
+        self.assertEqual(payload["appointment"]["appointment_id"], alias)
+        self.assertEqual(len(fake.save_reschedule_calls), 1)
+        # The historical read never writes the ledger.
+        self.assertEqual(fake.appointment_receipt_calls, [])
+
+    def test_the_static_fixture_is_never_writable(self):
+        fake = gateway()
+        _install_modified(fake)
+        with self.assertRaises(Denied):
+            appointments_write.reschedule(
+                fake, reschedule_body(workspace_appointment_id="APPT-1"), CSRF
+            )
+        self.assertEqual(fake.appointment_lock_calls, [])
+        self.assertEqual(fake.save_reschedule_calls, [])
+
+    def test_an_alias_without_a_committed_booking_is_refused(self):
+        fake = gateway()
+        _install_modified(fake)
+        with self.assertRaises(Denied):
+            appointments_write.reschedule(
+                fake,
+                reschedule_body(workspace_appointment_id=alias_for(BOOK_KEY)),
+                CSRF,
+            )
+        self.assertEqual(fake.save_reschedule_calls, [])
+
+    def test_an_alias_is_never_reinterpreted_as_a_native_docname(self):
+        fake = gateway()
+        _install_modified(fake)
+        with self.assertRaises(Denied):
+            appointments_write.reschedule(
+                fake,
+                reschedule_body(workspace_appointment_id="wsa1_" + "0" * 32 + "_" + "0" * 16 + "_" + BOOK_KEY),
+                CSRF,
+            )
+        self.assertEqual(fake.appointment_lock_calls, [])
+
+    def test_another_actors_booking_alias_is_refused(self):
+        other = "doctor@example.test"
+        alias = build_alias(SECRET.encode(), SITE, other, BOOK_KEY)
+        fake = gateway()
+        _install_modified(fake)
+        with self.assertRaises(Denied):
+            appointments_write.reschedule(
+                fake, reschedule_body(workspace_appointment_id=alias), CSRF
+            )
+        self.assertEqual(fake.save_reschedule_calls, [])
+
+    def test_native_write_authority_is_required(self):
+        fake = gateway()
+        _install_modified(fake)
+        fake.appointment_write_authority = set()
+        with self.assertRaises(Denied):
+            appointments_write.reschedule(fake, reschedule_body(), CSRF)
+        self.assertEqual(fake.save_reschedule_calls, [])
+
+    def test_a_stale_base_version_is_refused_before_the_lock(self):
+        fake = gateway()
+        _install_modified(fake)
+        payload = appointments_write.reschedule(
+            fake, reschedule_body(base_modified="2026-11-14 09:30:01.000000"), CSRF
+        )
+        self.assertEqual(payload, {"code": "STALE_VERSION"})
+        self.assertEqual(fake.write_responses[0][0], 409)
+        self.assertEqual(fake.appointment_lock_calls, [])
+
+    def test_a_missing_native_version_denies(self):
+        fake = gateway()
+        fake.appointment_modified = {}
+        with self.assertRaises(Denied):
+            appointments_write.reschedule(fake, reschedule_body(), CSRF)
+
+    def test_unsafe_settings_and_target_denial_fail_closed(self):
+        fake = gateway(appointment_side_effects_unsafe=True)
+        _install_modified(fake)
+        with self.assertRaises(Denied):
+            appointments_write.reschedule(fake, reschedule_body(), CSRF)
+
+        fake = gateway()
+        _install_modified(fake)
+        fake.appointment_target_problems[NATIVE_APPT] = "unreviewed link"
+        with self.assertRaises(Denied):
+            appointments_write.reschedule(fake, reschedule_body(), CSRF)
+        self.assertEqual(fake.save_reschedule_calls, [])
+
+    def test_the_designated_checkin_record_cannot_be_rescheduled(self):
+        fake = gateway()
+        _install_modified(fake)
+        fake.appointment_locked[NATIVE_TODAY] = {
+            "patient": "PAT-2",
+            "appointment_date": TODAY,
+            "status": "Open",
+        }
+        payload = appointments_write.reschedule(
+            fake, reschedule_body(workspace_appointment_id=NATIVE_TODAY), CSRF
+        )
+        self.assertEqual(payload, {"code": "OPERATION_CONFLICT"})
+        self.assertEqual(fake.write_responses[0][0], 409)
+        self.assertEqual(fake.save_reschedule_calls, [])
         self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(fake.appointment_fence_claim.committed, [])
-        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
+
+    def test_a_destination_that_went_past_under_the_lock_is_refused(self):
+        fake = gateway()
+        _install_modified(fake)
+        fake.site_today_values = [TODAY, "2026-11-22"]
+        payload = appointments_write.reschedule(fake, reschedule_body(), CSRF)
+        self.assertEqual(payload, {"code": "OPERATION_CONFLICT"})
+        self.assertEqual(fake.save_reschedule_calls, [])
+        self.assertEqual(fake.commit_calls, 0)
+
+    def test_a_native_stale_version_under_the_lock_is_reported(self):
+        fake = gateway()
+        _install_modified(fake)
+        fake.appointment_lock_error = patient_write.StaleVersion()
+        payload = appointments_write.reschedule(fake, reschedule_body(), CSRF)
+        self.assertEqual(payload, {"code": "STALE_VERSION"})
+        self.assertEqual(fake.save_reschedule_calls, [])
         self.assertEqual(fake.rollback_calls, 1)
 
-    def test_a_native_commit_failure_appends_no_committed_receipt(self):
+    def test_a_native_failure_after_dispatch_is_uncertain(self):
+        fake = gateway()
+        _install_modified(fake)
+        fake.save_reschedule_error = RuntimeError("native failure")
+        payload = appointments_write.reschedule(fake, reschedule_body(), CSRF)
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_an_unrelated_permission_named_failure_at_commit_is_uncertain(self):
         fake = gateway()
 
-        def failing_commit():
-            fake.call_order.append("commit")
-            raise RuntimeError("native commit failed")
+        def boom():
+            raise UnrelatedPermissionError("denied")
 
-        with mock.patch.object(fake, "commit", failing_commit):
-            payload = appointments_write.book(fake, book_body(), CSRF)
-
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(fake.appointment_fence_claim.committed, [])
-        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
+        fake.commit = boom
+        payload = appointments_write.reschedule(fake, reschedule_body(), CSRF)
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
         self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.appointment_receipt_records, [])
+
+    def test_a_native_permission_denial_before_mutation_is_a_403_without_commit(
+        self,
+    ):
+        fake = gateway()
+        fake.appointment_lock_error = NativePermissionDenied("denied")
+        with self.assertRaises(Denied):
+            appointments_write.reschedule(fake, reschedule_body(), CSRF)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.save_reschedule_calls, [])
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(fake.appointment_receipt_records, [])
+
+    def test_a_native_permission_failure_during_the_save_is_uncertain(self):
+        fake = gateway()
+        fake.save_reschedule_error = NativePermissionDenied("denied")
+        payload = appointments_write.reschedule(fake, reschedule_body(), CSRF)
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.appointment_receipt_records, [])
+
+    def test_failed_rollback_propagates(self):
+        fake = gateway()
+        _install_modified(fake)
+        fake.save_reschedule_error = RuntimeError("native failure")
+
+        def rollback_failure():
+            raise RuntimeError("rollback failed")
+
+        fake.rollback = rollback_failure
+        with self.assertRaises(appointments_write.RollbackFailed):
+            appointments_write.reschedule(fake, reschedule_body(), CSRF)
+
+    def test_strict_body_rejections_do_not_dispatch(self):
+        for body in (
+            reschedule_body(appointment_date="not-a-date"),
+            reschedule_body(base_modified="not-a-date"),
+            reschedule_body(status="Open"),
+            reschedule_body(workspace_appointment_id=""),
+        ):
+            with self.subTest(body=body):
+                fake = gateway()
+                _install_modified(fake)
+                payload = appointments_write.reschedule(fake, body, CSRF)
+                self.assertEqual(payload, {"code": "VALIDATION"})
+                self.assertEqual(fake.appointment_lock_calls, [])
+                self.assertEqual(fake.commit_calls, 0)
+
+
+class CheckinTests(unittest.TestCase):
+    def test_checks_in_the_dedicated_same_day_record(self):
+        fake = gateway()
+
+        payload = appointments_write.checkin(fake, checkin_body(), CSRF)
+
+        self.assertEqual(payload["status"], "checked_in")
+        self.assertEqual(set(payload), {"status", "appointment"})
+        self.assertNotIn("ackToken", payload)
+        self.assertEqual(payload["appointment"]["appointment_id"], NATIVE_TODAY)
+        self.assertEqual(len(fake.checkin_calls), 1)
+        self.assertEqual(fake.commit_calls, 1)
+        self.assertEqual(fake.appointment_fence_calls, [])
+
+    def test_a_static_fixture_is_never_checkable(self):
+        fake = gateway()
+        _install_modified(fake)
+        with self.assertRaises(Denied):
+            appointments_write.checkin(
+                fake, checkin_body(workspace_appointment_id="APPT-1"), CSRF
+            )
+        self.assertEqual(fake.checkin_calls, [])
+
+    def test_a_record_on_another_date_is_refused(self):
+        fake = gateway()
+        fake.appointment_detail_map[NATIVE_TODAY]["appointment_date"] = "2026-11-20"
+        payload = appointments_write.checkin(fake, checkin_body(), CSRF)
+        self.assertEqual(payload, {"code": "OPERATION_CONFLICT"})
+        self.assertEqual(fake.checkin_calls, [])
+
+    def test_checkin_does_not_scan_for_cross_record_uniqueness(self):
+        fake = gateway()
+        fake.readable_appointments = [NATIVE_TODAY, "NATIVE-APPT-TODAY-2"]
+        fake.appointment_view_detail["NATIVE-APPT-TODAY-2"] = {
+            "patient": "PAT-2",
+            "appointment_date": TODAY,
+            "appointment_time": "11:00:00",
+            "status": "Open",
+            "modified": MODIFIED,
+        }
+
+        payload = appointments_write.checkin(fake, checkin_body(), CSRF)
+
+        # The target-scoped native lifecycle decides; no truncated page is used
+        # to claim uniqueness across records.
+        self.assertEqual(payload["status"], "checked_in")
+        self.assertEqual(fake.readable_appointment_calls, [])
+        self.assertEqual(len(fake.checkin_calls), 1)
+
+    def test_a_second_checkin_of_the_same_record_is_refused(self):
+        fake = gateway()
+        fake.appointment_detail_map[NATIVE_TODAY]["status"] = "Checked In"
+        fake.appointment_locked[NATIVE_TODAY]["status"] = "Checked In"
+        payload = appointments_write.checkin(fake, checkin_body(), CSRF)
+        self.assertEqual(payload, {"code": "OPERATION_CONFLICT"})
+        self.assertEqual(fake.checkin_calls, [])
+        self.assertEqual(fake.commit_calls, 0)
+
+    def test_a_patient_read_denial_under_the_row_lock_denies_and_rolls_back(self):
+        fake = gateway()
+        fake.patient_read_sequence = [True, False]
+        with self.assertRaises(Denied):
+            appointments_write.checkin(fake, checkin_body(), CSRF)
+        self.assertEqual(fake.checkin_calls, [])
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.write_responses, [])
+
+    def test_a_target_for_another_patient_is_refused(self):
+        fake = gateway()
+        fake.appointment_detail_map[NATIVE_TODAY]["patient"] = "PAT-1"
+        payload = appointments_write.checkin(fake, checkin_body(), CSRF)
+        self.assertEqual(payload, {"code": "OPERATION_CONFLICT"})
+        self.assertEqual(fake.checkin_calls, [])
+
+    def test_a_date_changed_under_the_lock_is_refused(self):
+        fake = gateway()
+        fake.appointment_locked[NATIVE_TODAY] = {
+            "patient": "PAT-2",
+            "appointment_date": TODAY,
+            "status": "Open",
+        }
+        fake.site_today_values = [TODAY, "2026-11-15"]
+        payload = appointments_write.checkin(fake, checkin_body(), CSRF)
+        self.assertEqual(payload, {"code": "OPERATION_CONFLICT"})
+        self.assertEqual(fake.checkin_calls, [])
+
+    def test_a_stale_version_is_refused(self):
+        fake = gateway()
+        payload = appointments_write.checkin(
+            fake, checkin_body(base_modified="2026-11-14 09:30:01.000000"), CSRF
+        )
+        self.assertEqual(payload, {"code": "STALE_VERSION"})
+        self.assertEqual(fake.checkin_calls, [])
+
+    def test_patient_read_authority_is_required(self):
+        fake = gateway(patient_can_read=False)
+        with self.assertRaises(Denied):
+            appointments_write.checkin(fake, checkin_body(), CSRF)
+        self.assertEqual(fake.checkin_calls, [])
+
+    def test_a_native_failure_after_checkin_is_uncertain(self):
+        fake = gateway()
+        fake.checkin_error = RuntimeError("native failure")
+        payload = appointments_write.checkin(fake, checkin_body(), CSRF)
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_commit_failure_is_uncertain(self):
+        fake = gateway()
+
+        def boom():
+            raise RuntimeError("commit outcome unknown")
+
+        fake.commit = boom
+        payload = appointments_write.checkin(fake, checkin_body(), CSRF)
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_native_permission_failure_during_checkin_is_uncertain(self):
+        fake = gateway()
+        fake.checkin_error = NativePermissionDenied("denied")
+        payload = appointments_write.checkin(fake, checkin_body(), CSRF)
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_boundary_drift_denies(self):
+        fake = gateway(appointment_boundary_problem="drift")
+        _install_modified(fake)
+        with self.assertRaises(Denied):
+            appointments_write.checkin(fake, checkin_body(), CSRF)
 
 
 class WriteGateTests(unittest.TestCase):
     def test_appointment_writes_are_default_off(self):
-        fake = gateway(settings=write_settings(
-            clinic_ui_native_appointment_write_enabled=0
-        ))
+        fake = gateway(
+            settings=write_settings(clinic_ui_native_appointment_write_enabled=0)
+        )
+        _install_modified(fake)
         with self.assertRaises(Denied):
             appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(fake.appointment_fence_calls, [])
+        self.assertEqual(fake.insert_appointment_calls, [])
 
-    def test_csrf_and_deployment_marker_are_required(self):
-        fake = gateway()
-        with self.assertRaises(Denied):
-            appointments_write.book(fake, book_body(), None)
-        fake = gateway()
-        fake.deployment_approved = False
-        with self.assertRaises(Denied):
-            appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(fake.appointment_fence_calls, [])
+    def test_missing_or_wrong_csrf_is_denied_before_dispatch(self):
+        for supplied in (None, "", "wrong-token"):
+            with self.subTest(supplied=supplied):
+                fake = gateway()
+                _install_modified(fake)
+                with self.assertRaises(Denied):
+                    appointments_write.book(fake, book_body(), supplied)
+                self.assertEqual(fake.insert_appointment_calls, [])
 
     def test_a_role_outside_reception_and_doctor_is_denied(self):
         fake = gateway(
             current_session=session_view(user=ACTOR, roles=("Nurse",))
         )
+        _install_modified(fake)
         with self.assertRaises(Denied):
             appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(fake.appointment_fence_calls, [])
+        self.assertEqual(fake.insert_appointment_calls, [])
 
-
-class RescheduleTests(unittest.TestCase):
-    def fake_with_booking(self, **overrides):
-        fake = gateway(**overrides)
-        committed(fake, "book", BOOK_KEY, "NATIVE-APPT-NEW")
-        fake.appointment_modified["NATIVE-APPT-NEW"] = MODIFIED
-        fake.appointment_view_detail["NATIVE-APPT-NEW"] = {
-            "patient": "PAT-1",
-            "appointment_date": "2026-11-20",
-            "appointment_time": "09:30:00",
-            "status": "Open",
-        }
-        fake.appointment_locked["NATIVE-APPT-NEW"] = {
-            "patient": "PAT-1",
-            "appointment_date": "2026-11-20",
-            "appointment_time": "09:30:00",
-            "status": "Open",
-        }
-        return fake
-
-    def test_reschedules_only_date_and_time(self):
-        fake = self.fake_with_booking()
-        payload = appointments_write.reschedule(fake, reschedule_body(), CSRF)
-        self.assertEqual(payload["status"], "rescheduled")
-        self.assertEqual(
-            fake.appointment_lock_calls,
-            [
-                (
-                    "NATIVE-APPT-NEW",
-                    MODIFIED,
-                    {
-                        "patient": None,
-                        "patients": ("PAT-1", "PAT-2"),
-                        "company": "COMP-1",
-                        "appointment_type": "APPT-TYPE-1",
-                        "department": "MEDDEP-1",
-                    },
-                )
-            ],
+    def test_another_site_and_a_mismatched_write_site_are_refused(self):
+        other = gateway(
+            site="marley.local",
+            settings=write_settings(clinic_ui_synthetic_site="marley.local"),
         )
-        self.assertEqual(
-            [
-                (state.patient, fields)
-                for state, fields, _today in fake.save_reschedule_calls
-            ],
-            [
-                (
-                    "PAT-1",
-                    {
-                        "appointment_date": "2026-11-21",
-                        "appointment_time": "10:15:00",
-                    },
-                )
-            ],
-        )
-        self.assertEqual(fake.appointment_fence_calls[0][1], "reschedule")
-        self.assertEqual(fake.commit_calls, 1)
-        self.assertEqual(len(payload["ackToken"]), 64)
-
-    def test_the_existing_static_fixture_is_never_writable(self):
-        fake = gateway()
-        fake.appointment_modified["NATIVE-APPT-1"] = MODIFIED
-        body = reschedule_body(workspace_appointment_id="APPT-1")
-        self.assertEqual(
-            appointments_write.reschedule(fake, body, CSRF),
-            {"code": "VALIDATION"},
-        )
-        self.assertEqual(fake.appointment_fence_calls, [])
-        self.assertEqual(fake.save_reschedule_calls, [])
-
-    def test_an_alias_without_a_committed_booking_receipt_is_refused(self):
-        fake = gateway()
-        fake.appointment_receipts[(ACTOR, "book", BOOK_KEY)] = patient_write.WriteLocked()
-        self.assertEqual(
-            appointments_write.reschedule(fake, reschedule_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.save_reschedule_calls, [])
-
-    def test_another_actors_booking_alias_is_refused(self):
-        fake = gateway()
-        committed(fake, "book", BOOK_KEY, "NATIVE-APPT-NEW", actor="other@example.test")
-        self.assertEqual(
-            appointments_write.reschedule(fake, reschedule_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.save_reschedule_calls, [])
-
-    def test_stale_version_is_refused_before_dispatch(self):
-        fake = self.fake_with_booking()
-        fake.appointment_modified["NATIVE-APPT-NEW"] = "2026-11-14 10:30:00.000001"
-        self.assertEqual(
-            appointments_write.reschedule(fake, reschedule_body(), CSRF),
-            {"code": "STALE_VERSION"},
-        )
-        self.assertEqual(fake.appointment_fence_calls, [])
-
-    def test_write_authority_and_target_safety_are_required(self):
-        fake = self.fake_with_booking(
-            appointment_write_authority=set()
-        )
+        _install_modified(other)
         with self.assertRaises(Denied):
-            appointments_write.reschedule(fake, reschedule_body(), CSRF)
-        self.assertEqual(fake.appointment_lock_calls, [])
-        self.assertEqual(fake.save_reschedule_calls, [])
+            appointments_write.book(other, book_body(), CSRF)
+        self.assertEqual(other.insert_appointment_calls, [])
 
-        fake = self.fake_with_booking(
-            appointment_target_problems={"NATIVE-APPT-NEW": "notes populated"}
-        )
-        with self.assertRaises(Denied):
-            appointments_write.reschedule(fake, reschedule_body(), CSRF)
-        self.assertEqual(fake.appointment_lock_calls, [])
-        self.assertEqual(fake.save_reschedule_calls, [])
-
-    def test_the_designated_checkin_record_cannot_be_rescheduled(self):
-        fake = gateway()
-        committed(fake, "book", BOOK_KEY, "NATIVE-APPT-TODAY")
-        fake.appointment_modified["NATIVE-APPT-TODAY"] = MODIFIED
-        fake.appointment_view_detail["NATIVE-APPT-TODAY"] = {
-            "patient": "PAT-2",
-            "appointment_date": TODAY,
-            "appointment_time": "08:00:00",
-            "status": "Open",
-        }
-        fake.appointment_locked["NATIVE-APPT-TODAY"] = {
-            "patient": "PAT-2",
-            "appointment_date": TODAY,
-            "appointment_time": "08:00:00",
-            "status": "Open",
-        }
-        self.assertEqual(
-            appointments_write.reschedule(fake, reschedule_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.save_reschedule_calls, [])
-        self.assertEqual(fake.rollback_calls, 1)
-        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 0)
-
-    def test_a_concurrent_native_writer_under_the_lock_is_refused(self):
-        fake = self.fake_with_booking()
-        fake.appointment_lock_error = patient_write.StaleVersion()
-        self.assertEqual(
-            appointments_write.reschedule(fake, reschedule_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.save_reschedule_calls, [])
-        self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(fake.rollback_calls, 1)
-        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
-
-    def test_boundary_drift_denies_reschedule(self):
-        fake = self.fake_with_booking(
-            appointment_boundary_problem="override drift"
-        )
-        with self.assertRaises(Denied):
-            appointments_write.reschedule(fake, reschedule_body(), CSRF)
-        self.assertEqual(fake.appointment_fence_calls, [])
-
-    def test_a_destination_that_goes_past_after_midnight_is_refused(self):
-        fake = self.fake_with_booking()
-        fake.site_today_values = [TODAY, "2026-11-22"]
-        self.assertEqual(
-            appointments_write.reschedule(fake, reschedule_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.save_reschedule_calls, [])
-        self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(fake.rollback_calls, 1)
-
-    def test_reschedule_uses_the_post_lock_site_date_for_the_dedicated_check(self):
-        fake = gateway()
-        committed(fake, "book", BOOK_KEY, "NATIVE-APPT-TODAY")
-        fake.appointment_modified["NATIVE-APPT-TODAY"] = MODIFIED
-        fake.appointment_view_detail["NATIVE-APPT-TODAY"] = {
-            "patient": "PAT-2",
-            "appointment_date": "2026-11-15",
-            "appointment_time": "08:00:00",
-            "status": "Open",
-        }
-        fake.appointment_locked["NATIVE-APPT-TODAY"] = {
-            "patient": "PAT-2",
-            "appointment_date": "2026-11-15",
-            "appointment_time": "08:00:00",
-            "status": "Open",
-        }
-        fake.site_today_values = [TODAY, "2026-11-15"]
-        self.assertEqual(
-            appointments_write.reschedule(fake, reschedule_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.save_reschedule_calls, [])
-        self.assertEqual(fake.rollback_calls, 1)
-
-    def test_the_durable_reschedule_budget_is_one(self):
-        fake = self.fake_with_booking()
-        committed(fake, "reschedule", RESCHEDULE_KEY, "NATIVE-APPT-NEW")
-        self.assertEqual(
-            appointments_write.reschedule(fake, reschedule_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.appointment_fence_calls, [])
-        self.assertEqual(fake.appointment_lock_calls, [])
-        self.assertEqual(fake.save_reschedule_calls, [])
-
-    def test_budget_exhaustion_inside_the_fence_does_not_mutate(self):
-        fake = self.fake_with_booking()
-        calls = {"count": 0}
-        original = fake.list_committed_appointment_receipts
-
-        def race(*args, **kwargs):
-            calls["count"] += 1
-            if calls["count"] > 1:
-                raise AppointmentBudgetExhausted()
-            return original(*args, **kwargs)
-
-        fake.list_committed_appointment_receipts = race
-        self.assertEqual(
-            appointments_write.reschedule(fake, reschedule_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.appointment_lock_calls, [])
-        self.assertEqual(fake.save_reschedule_calls, [])
-        self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(calls["count"], 2)
-
-
-class CheckinTests(unittest.TestCase):
-    def fake_with_same_day_booking(self, **overrides):
-        fake = gateway(**overrides)
-        committed(fake, "book", BOOK_KEY, "NATIVE-APPT-TODAY")
-        fake.appointment_modified["NATIVE-APPT-TODAY"] = MODIFIED
-        fake.appointment_view_detail["NATIVE-APPT-TODAY"] = {
-            "patient": "PAT-2",
-            "appointment_date": TODAY,
-            "appointment_time": "08:00:00",
-            "status": "Open",
-        }
-        fake.appointment_locked["NATIVE-APPT-TODAY"] = {
-            "patient": "PAT-2",
-            "appointment_date": TODAY,
-            "appointment_time": "08:00:00",
-            "status": "Open",
-        }
-        return fake
-
-    def test_checks_in_the_dedicated_same_day_record(self):
-        fake = self.fake_with_same_day_booking()
-        payload = appointments_write.checkin(fake, checkin_body(), CSRF)
-        self.assertEqual(payload["status"], "checked_in")
-        self.assertEqual(
-            fake.appointment_lock_calls,
-            [
-                (
-                    "NATIVE-APPT-TODAY",
-                    MODIFIED,
-                    {
-                        "patient": "PAT-2",
-                        "patients": ("PAT-1", "PAT-2"),
-                        "company": "COMP-1",
-                        "appointment_type": "APPT-TYPE-1",
-                        "department": "MEDDEP-1",
-                    },
-                )
-            ],
-        )
-        self.assertEqual(
-            [state.patient for state, today in fake.checkin_calls], ["PAT-2"]
-        )
-        self.assertEqual([today for _state, today in fake.checkin_calls], [TODAY])
-        self.assertEqual(fake.appointment_fence_calls[0][1], "checkin")
-        self.assertEqual(fake.commit_calls, 1)
-        self.assertEqual(len(payload["ackToken"]), 64)
-
-    def test_a_static_fixture_is_never_checkable(self):
-        fake = gateway()
-        fake.appointment_modified["NATIVE-APPT-1"] = MODIFIED
-        body = checkin_body(workspace_appointment_id="APPT-1")
-        self.assertEqual(
-            appointments_write.checkin(fake, body, CSRF), {"code": "VALIDATION"}
-        )
-        self.assertEqual(fake.checkin_calls, [])
-
-    def test_a_record_on_another_date_is_not_checkable(self):
-        fake = self.fake_with_same_day_booking()
-        fake.appointment_view_detail["NATIVE-APPT-TODAY"] = {
-            "patient": "PAT-2",
-            "appointment_date": "2026-11-20",
-            "appointment_time": "08:00:00",
-            "status": "Open",
-        }
-        self.assertEqual(
-            appointments_write.checkin(fake, checkin_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.checkin_calls, [])
-
-    def test_an_ambiguous_same_day_target_is_refused(self):
-        fake = self.fake_with_same_day_booking()
-        committed(fake, "book", SECOND_BOOK_KEY, "NATIVE-APPT-TODAY-2")
-        fake.appointment_view_detail["NATIVE-APPT-TODAY-2"] = {
-            "patient": "PAT-2",
-            "appointment_date": TODAY,
-            "appointment_time": "09:00:00",
-            "status": "Open",
-        }
-        self.assertEqual(
-            appointments_write.checkin(fake, checkin_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.checkin_calls, [])
-
-    def test_non_eligible_status_is_refused(self):
-        fake = self.fake_with_same_day_booking()
-        fake.appointment_view_detail["NATIVE-APPT-TODAY"] = {
-            "patient": "PAT-2",
-            "appointment_date": TODAY,
-            "appointment_time": "08:00:00",
-            "status": "Checked In",
-        }
-        self.assertEqual(
-            appointments_write.checkin(fake, checkin_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.checkin_calls, [])
-
-    def test_the_adapter_target_rejection_maps_to_a_locked_result(self):
-        fake = self.fake_with_same_day_booking()
-        fake.checkin_error = AppointmentTargetNotEligible()
-        self.assertEqual(
-            appointments_write.checkin(fake, checkin_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.rollback_calls, 1)
-        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 0)
-
-    def test_a_date_changed_under_the_lock_is_refused(self):
-        fake = self.fake_with_same_day_booking()
-        fake.appointment_locked["NATIVE-APPT-TODAY"] = {
-            "patient": "PAT-2",
-            "appointment_date": "2026-11-20",
-            "appointment_time": "08:00:00",
-            "status": "Open",
-        }
-        self.assertEqual(
-            appointments_write.checkin(fake, checkin_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.checkin_calls, [])
-        self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(fake.rollback_calls, 1)
-
-    def test_a_concurrent_native_writer_under_the_lock_is_refused(self):
-        fake = self.fake_with_same_day_booking()
-        fake.appointment_lock_error = patient_write.StaleVersion()
-        self.assertEqual(
-            appointments_write.checkin(fake, checkin_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.checkin_calls, [])
-        self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(fake.rollback_calls, 1)
-        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
-
-    def test_boundary_drift_denies_checkin(self):
-        fake = self.fake_with_same_day_booking(
-            appointment_boundary_problem="metadata drift"
-        )
-        with self.assertRaises(Denied):
-            appointments_write.checkin(fake, checkin_body(), CSRF)
-        self.assertEqual(fake.appointment_fence_calls, [])
-
-    def test_midnight_after_the_lock_refuses_the_same_day_checkin(self):
-        fake = self.fake_with_same_day_booking()
-        fake.site_today_values = [TODAY, TODAY, "2026-11-15"]
-        self.assertEqual(
-            appointments_write.checkin(fake, checkin_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.checkin_calls, [])
-        self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(fake.rollback_calls, 1)
-
-    def test_a_target_problem_denies_before_the_fence(self):
-        fake = self.fake_with_same_day_booking(
-            appointment_target_problems={
-                "NATIVE-APPT-TODAY": "notes is populated"
-            }
-        )
-        with self.assertRaises(Denied):
-            appointments_write.checkin(fake, checkin_body(), CSRF)
-        self.assertEqual(fake.appointment_fence_calls, [])
-
-    def test_the_durable_checkin_budget_is_one(self):
-        fake = self.fake_with_same_day_booking()
-        committed(fake, "checkin", CHECKIN_KEY, "NATIVE-APPT-TODAY")
-        self.assertEqual(
-            appointments_write.checkin(fake, checkin_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(fake.appointment_fence_calls, [])
-        self.assertEqual(fake.checkin_calls, [])
-
-    def test_a_stale_version_is_refused(self):
-        fake = self.fake_with_same_day_booking()
-        fake.appointment_modified["NATIVE-APPT-TODAY"] = "2026-11-14 11:00:00.000001"
-        self.assertEqual(
-            appointments_write.checkin(fake, checkin_body(), CSRF),
-            {"code": "STALE_VERSION"},
-        )
-        self.assertEqual(fake.checkin_calls, [])
-
-    def test_commit_failure_after_checkin_marks_unknown_and_rolls_back(self):
-        fake = self.fake_with_same_day_booking()
-
-        def boom():
-            raise RuntimeError("commit failed")
-
-        fake.commit = boom
-        self.assertEqual(
-            appointments_write.checkin(fake, checkin_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
-        self.assertEqual(fake.rollback_calls, 1)
-
-
-class AcknowledgementTests(unittest.TestCase):
-    def test_acknowledges_only_the_appointment_codec(self):
-        fake = gateway()
-        payload = appointments_write.ack(fake, ack_body(), CSRF)
-        self.assertEqual(payload, {"acknowledged": True})
-        self.assertEqual(
-            fake.appointment_ack_calls,
-            [(ACTOR, "book", BOOK_KEY, "a" * 64)],
-        )
-
-    def test_invalid_or_locked_acknowledgements_stay_locked(self):
-        fake = gateway()
-        fake.appointment_ack_status = "invalid"
-        self.assertEqual(
-            appointments_write.ack(fake, ack_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        fake = gateway()
-        fake.appointment_ack_error = patient_write.StoreUnavailable()
-        self.assertEqual(
-            appointments_write.ack(fake, ack_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-
-    def test_ack_body_is_strict(self):
-        for body in (
-            ack_body(kind="create"),
-            ack_body(kind="cancel"),
-            ack_body(ack_token="short"),
-            ack_body(extra=1),
-        ):
-            with self.subTest(body=body):
-                fake = gateway()
-                self.assertEqual(
-                    appointments_write.ack(fake, body, CSRF),
-                    {"code": "VALIDATION"},
-                )
-                self.assertEqual(fake.appointment_ack_calls, [])
-
-    def test_ack_obeys_the_write_gate(self):
-        fake = gateway()
-        with self.assertRaises(Denied):
-            appointments_write.ack(fake, ack_body(), None)
-        self.assertEqual(fake.appointment_ack_calls, [])
-
-
-class OrderingAndIsolationTests(unittest.TestCase):
-    def test_the_fence_is_acquired_before_the_native_row_lock(self):
-        fake = gateway()
-        committed(fake, "book", BOOK_KEY, "NATIVE-APPT-NEW")
-        fake.appointment_modified["NATIVE-APPT-NEW"] = MODIFIED
-        fake.appointment_view_detail["NATIVE-APPT-NEW"] = {
-            "patient": "PAT-1",
-            "appointment_date": "2026-11-20",
-            "appointment_time": "09:30:00",
-            "status": "Open",
-        }
-        fake.appointment_locked["NATIVE-APPT-NEW"] = {
-            "patient": "PAT-1",
-            "appointment_date": "2026-11-20",
-            "appointment_time": "09:30:00",
-            "status": "Open",
-        }
-        order = []
-        real_fence = fake.appointment_write_fence
-        real_lock = fake.lock_appointment_target
-        real_save = fake.save_appointment_reschedule
-
-        def fence(*args):
-            order.append("fence")
-            return real_fence(*args)
-
-        def lock(*args, **kwargs):
-            order.append("native_lock")
-            return real_lock(*args, **kwargs)
-
-        def save(*args, **kwargs):
-            order.append("native_save")
-            return real_save(*args, **kwargs)
-
-        fake.appointment_write_fence = fence
-        fake.lock_appointment_target = lock
-        fake.save_appointment_reschedule = save
-
-        appointments_write.reschedule(fake, reschedule_body(), CSRF)
-        self.assertEqual(order, ["fence", "native_lock", "native_save"])
-
-    def test_checkin_independently_requires_patient_read(self):
-        fake = gateway()
-        committed(fake, "book", BOOK_KEY, "NATIVE-APPT-TODAY")
-        fake.appointment_modified["NATIVE-APPT-TODAY"] = MODIFIED
-        fake.appointment_view_detail["NATIVE-APPT-TODAY"] = {
-            "patient": "PAT-2",
-            "appointment_date": TODAY,
-            "appointment_time": "08:00:00",
-            "status": "Open",
-        }
-        fake.patient_can_read = False
-        with self.assertRaises(Denied):
-            appointments_write.checkin(fake, checkin_body(), CSRF)
-        self.assertEqual(fake.checkin_calls, [])
-        self.assertEqual(fake.appointment_fence_calls, [])
-
-
-class CrossKindIsolationTests(unittest.TestCase):
-    def test_appointment_writes_never_touch_the_patient_fence(self):
-        fake = gateway()
-        appointments_write.book(fake, book_body(), CSRF)
-        self.assertEqual(fake.fence_calls, [])
-        self.assertEqual(len(fake.appointment_fence_calls), 1)
-        self.assertEqual(fake.appointment_fence_calls[0][1], "book")
-
-    def test_a_patient_receipt_is_not_a_booking_receipt(self):
-        fake = gateway()
-        fake.appointment_receipts[(ACTOR, "book", BOOK_KEY)] = (
-            patient_write.encode_receipt(
-                kind="create",
-                alias="WPA-1",
-                native_patient_id="PAT-1",
+        mismatched = gateway(
+            settings=write_settings(
+                clinic_ui_native_appointment_write_site="marley.local"
             )
         )
-        self.assertEqual(
-            appointments_write.reschedule(fake, reschedule_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
+        _install_modified(mismatched)
+        with self.assertRaises(Denied):
+            appointments_write.book(mismatched, book_body(), CSRF)
+        self.assertEqual(mismatched.insert_appointment_calls, [])
+
+    def test_the_reserved_latch_identity_cannot_write(self):
+        fake = gateway(
+            current_session=session_view(
+                user=write_fence.LATCH_ACTOR, roles=("Clinic Reception",)
+            )
         )
-        self.assertEqual(fake.save_reschedule_calls, [])
+        _install_modified(fake)
+        with self.assertRaises(Denied):
+            appointments_write.book(fake, book_body(), CSRF)
+        self.assertEqual(fake.insert_appointment_calls, [])
 
 
-class EndpointShapeTests(unittest.TestCase):
-    def test_ack_stays_available_while_cancel_does_not_exist(self):
-        self.assertFalse(hasattr(appointments_write, "cancel"))
-        self.assertFalse(hasattr(appointments_write, "set_status"))
+class HistoricalIsolationTests(unittest.TestCase):
+    def test_an_unreadable_historical_ledger_never_blocks_a_native_write(self):
+        fake = gateway()
+        _install_modified(fake)
+        fake.appointment_receipt_list_error = patient_write.StoreUnavailable()
+
+        payload = appointments_write.reschedule(fake, reschedule_body(), CSRF)
+
+        self.assertEqual(payload["status"], "rescheduled")
+        self.assertEqual(len(fake.save_reschedule_calls), 1)
 
 
 if __name__ == "__main__":

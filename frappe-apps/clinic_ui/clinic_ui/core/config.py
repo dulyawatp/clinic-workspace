@@ -377,8 +377,9 @@ def _write_enabled(getter, site):
     The site must be exactly ``APPROVED_WRITE_SITE`` and the configured name
     must equal it as well. A malformed, absent or copied configuration never
     disables the read-only surfaces; it only leaves ``write_enabled`` false.
-    This is intent only: the runtime still requires the private deployment
-    marker bound to the fence anchor before any write is accepted.
+    This is configuration intent only: every request still performs its own
+    native permission checks. The converted patient lane no longer requires the
+    historical private deployment marker or fence anchor.
     """
 
     if site != APPROVED_WRITE_SITE or site in DISALLOWED_WRITE_SITES:

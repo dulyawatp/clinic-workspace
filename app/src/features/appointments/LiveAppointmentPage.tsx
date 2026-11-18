@@ -16,7 +16,6 @@ import {
 } from "../../transport/native/appointment-write";
 import { useLiveAppointment } from "./live-appointment";
 import { ReturnVisitLink } from "./ReturnVisitLink";
-import { useAppointmentWriteLock } from "./useAppointmentWriteLock";
 
 const TERMINAL_STATUSES = new Set(["Closed", "Cancelled", "No Show", "Checked Out"]);
 
@@ -40,7 +39,6 @@ export function LiveAppointmentPage({ id }: { id: string }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const detail = useLiveAppointment(id);
-  const { locked, refreshLock } = useAppointmentWriteLock();
   const [open, setOpen] = useState(false);
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
@@ -78,6 +76,16 @@ export function LiveAppointmentPage({ id }: { id: string }) {
   // server remains the authority and refuses every ineligible target.
   const transitionUnavailable = TERMINAL_STATUSES.has(appointment.status);
 
+  /** Best-effort record refresh; it never changes a decided write outcome. */
+  async function refreshRecords() {
+    try {
+      await queryClient.invalidateQueries({ queryKey: ["live-appointments"] });
+      await queryClient.invalidateQueries({ queryKey: ["live-appointment"] });
+    } catch {
+      // A failed refresh leaves reconciliation to the reader's next view.
+    }
+  }
+
   function openForm() {
     setDate(appointment.appointment_date);
     setTime(appointment.appointment_time.slice(0, 5));
@@ -88,7 +96,7 @@ export function LiveAppointmentPage({ id }: { id: string }) {
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (saving || locked) return;
+    if (saving) return;
     if (
       !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
       !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)
@@ -114,16 +122,17 @@ export function LiveAppointmentPage({ id }: { id: string }) {
         }),
       );
       setOpen(false);
-      void queryClient.invalidateQueries({ queryKey: ["live-appointments"] });
-      void queryClient.invalidateQueries({ queryKey: ["live-appointment"] });
     } catch (error) {
+      // A deterministic refusal is a known failure; anything else (lost,
+      // unreadable) is an unknown outcome. Nothing is retried automatically.
       setFailure(
         error instanceof NativeAppointmentWriteError ? error.code : "uncertain",
       );
-    } finally {
-      refreshLock();
-      setSaving(false);
     }
+    // Best-effort refresh only: it is not a reconciliation guarantee, and an
+    // unknown outcome still requires the reader to check current records.
+    await refreshRecords();
+    setSaving(false);
   }
 
   function openTransition(kind: "cancel" | "no_show") {
@@ -135,12 +144,12 @@ export function LiveAppointmentPage({ id }: { id: string }) {
 
   /**
    * One-shot cancel/no-show submit. The confirmation step is explicit, the
-   * lock is shared with every other appointment write, and the reason is
-   * required: the server records it verbatim on the appointment.
+   * in-flight guard blocks a double submit, and the reason is required: the
+   * server records it verbatim on the appointment.
    */
   async function submitTransition(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (saving || locked || transition === null) return;
+    if (saving || transition === null) return;
     if (reason.trim() === "" || reason.trim() !== reason) {
       setFailure("validation");
       return;
@@ -166,16 +175,17 @@ export function LiveAppointmentPage({ id }: { id: string }) {
       );
       setTransition(null);
       setReason("");
-      void queryClient.invalidateQueries({ queryKey: ["live-appointments"] });
-      void queryClient.invalidateQueries({ queryKey: ["live-appointment"] });
     } catch (error) {
+      // A deterministic refusal is a known failure; anything else (lost,
+      // unreadable) is an unknown outcome. Nothing is retried automatically.
       setFailure(
         error instanceof NativeAppointmentWriteError ? error.code : "uncertain",
       );
-    } finally {
-      refreshLock();
-      setSaving(false);
     }
+    // Best-effort refresh only: it is not a reconciliation guarantee, and an
+    // unknown outcome still requires the reader to check current records.
+    await refreshRecords();
+    setSaving(false);
   }
 
   return (
@@ -230,14 +240,7 @@ export function LiveAppointmentPage({ id }: { id: string }) {
               </p>
             ) : (
               <WriteGate capability="write.appointment.reschedule">
-                <Button
-                  variant="secondary"
-                  disabled={locked}
-                  disabledReason={
-                    locked ? t("appointmentWrite.locked") : undefined
-                  }
-                  onClick={openForm}
-                >
+                <Button variant="secondary" onClick={openForm}>
                   {t("action.reschedule")}
                 </Button>
               </WriteGate>
@@ -254,10 +257,6 @@ export function LiveAppointmentPage({ id }: { id: string }) {
                 <WriteGate capability="write.appointment.cancel">
                   <Button
                     variant="secondary"
-                    disabled={locked}
-                    disabledReason={
-                      locked ? t("appointmentWrite.locked") : undefined
-                    }
                     onClick={() => openTransition("cancel")}
                   >
                     {t("appointment.cancel")}
@@ -266,10 +265,6 @@ export function LiveAppointmentPage({ id }: { id: string }) {
                 <WriteGate capability="write.appointment.no_show">
                   <Button
                     variant="secondary"
-                    disabled={locked}
-                    disabledReason={
-                      locked ? t("appointmentWrite.locked") : undefined
-                    }
                     onClick={() => openTransition("no_show")}
                   >
                     {t("appointment.noShow")}
@@ -315,13 +310,11 @@ export function LiveAppointmentPage({ id }: { id: string }) {
               <div className="appointment-write-actions">
                 <Button
                   type="submit"
-                  disabled={saving || locked || reason.trim() === ""}
+                  disabled={saving || reason.trim() === ""}
                   disabledReason={
-                    locked
-                      ? t("appointmentWrite.locked")
-                      : reason.trim() === ""
-                        ? t("appointmentWrite.reasonRequired")
-                        : undefined
+                    reason.trim() === ""
+                      ? t("appointmentWrite.reasonRequired")
+                      : undefined
                   }
                 >
                   {saving
@@ -346,11 +339,6 @@ export function LiveAppointmentPage({ id }: { id: string }) {
             </form>
           )}
 
-          {locked && (
-            <p role="alert" className="appointment-write-alert">
-              {t("appointmentWrite.locked")}
-            </p>
-          )}
           {success !== null && (
             <p role="status" className="appointment-write-success">
               {success}
@@ -396,10 +384,7 @@ export function LiveAppointmentPage({ id }: { id: string }) {
               <div className="appointment-write-actions">
                 <Button
                   type="submit"
-                  disabled={saving || locked}
-                  disabledReason={
-                    locked ? t("appointmentWrite.locked") : undefined
-                  }
+                  disabled={saving}
                 >
                   {saving
                     ? t("appointmentWrite.saving")

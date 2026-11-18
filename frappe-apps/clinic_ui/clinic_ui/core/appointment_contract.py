@@ -827,13 +827,19 @@ def checkin_target_eligible(
     patient,
     dedicated_patient,
     has_receipt,
-    is_unique_eligible,
 ):
-    """Shared unique dedicated same-day check-in eligibility."""
+    """Target-scoped dedicated same-day check-in eligibility.
+
+    There is deliberately no cross-record uniqueness condition: the installed
+    ``check_in_appointment`` entry point has no such rule, and a bounded page
+    cannot establish one. A second check-in of the *same* record is refused by
+    the status lifecycle (``Checked In`` is not an eligible status), which the
+    adapter rechecks under the row lock.
+    """
 
     if status not in CHECKIN_STATUSES:
         return False
-    if has_receipt or not is_unique_eligible:
+    if has_receipt:
         return False
     if appointment_date is None or today is None:
         return False

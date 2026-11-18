@@ -19,7 +19,6 @@ EXPECTED_ENDPOINTS = {
     "clinic_ui.api.appointments.book",
     "clinic_ui.api.appointments.reschedule",
     "clinic_ui.api.appointments.checkin",
-    "clinic_ui.api.appointments.ack",
     "clinic_ui.api.appointments_cancel_write.cancel",
     "clinic_ui.api.appointments_cancel_write.no_show",
     "clinic_ui.api.encounters_write.save_draft",
@@ -47,7 +46,6 @@ EXPECTED_ENDPOINTS = {
     "clinic_ui.api.patients.view",
     "clinic_ui.api.patients.create",
     "clinic_ui.api.patients.update",
-    "clinic_ui.api.patients.ack",
 }
 
 EXPECTED_METHODS = {
@@ -58,7 +56,6 @@ EXPECTED_METHODS = {
     "clinic_ui.api.appointments.book": ["POST"],
     "clinic_ui.api.appointments.reschedule": ["POST"],
     "clinic_ui.api.appointments.checkin": ["POST"],
-    "clinic_ui.api.appointments.ack": ["POST"],
     "clinic_ui.api.appointments_cancel_write.cancel": ["POST"],
     "clinic_ui.api.appointments_cancel_write.no_show": ["POST"],
     "clinic_ui.api.encounters_write.save_draft": ["POST"],
@@ -86,7 +83,6 @@ EXPECTED_METHODS = {
     "clinic_ui.api.patients.view": ["GET"],
     "clinic_ui.api.patients.create": ["POST"],
     "clinic_ui.api.patients.update": ["POST"],
-    "clinic_ui.api.patients.ack": ["POST"],
 }
 
 # Guest dispatch exists only so an anonymous/expired caller receives an explicit

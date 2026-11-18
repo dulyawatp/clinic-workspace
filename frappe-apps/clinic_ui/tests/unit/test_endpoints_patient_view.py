@@ -10,7 +10,7 @@ import inspect
 import unittest
 from unittest import mock
 
-from clinic_ui.core import patient_alias, patient_write
+from clinic_ui.core import config, patient_alias, patient_write
 from clinic_ui.endpoints import aliases as aliases_endpoint
 from clinic_ui.endpoints import patients as patients_endpoint
 
@@ -43,6 +43,27 @@ def gateway(**overrides):
     values = {
         "site": "marley.test",
         "settings": settings(clinic_ui_synthetic_patients=ALLOWLIST),
+        "current_session": session_view(roles=("Physician",)),
+    }
+    values.update(overrides)
+    fake = FakeGateway(**values)
+    fake.patient_view_detail = {"PAT-1": dict(DETAIL)}
+    return fake
+
+
+DEV_SITE = config.APPROVED_WRITE_SITE
+
+
+def dev_gateway(**overrides):
+    """A gateway inside the converted development scope (approved site only)."""
+
+    values = {
+        "site": DEV_SITE,
+        "settings": settings(
+            clinic_ui_synthetic_site=DEV_SITE,
+            clinic_ui_synthetic_patients=ALLOWLIST,
+            clinic_ui_native_patient_write_site=DEV_SITE,
+        ),
         "current_session": session_view(roles=("Physician",)),
     }
     values.update(overrides)
@@ -159,11 +180,15 @@ class PatientViewDenialTests(unittest.TestCase):
             with self.subTest(view=view):
                 self.assertDenied(gateway(current_session=view))
 
-    def test_unknown_alias_is_denied_without_a_native_read(self):
+    def test_unknown_identifier_is_denied_without_a_native_read(self):
+        # Outside the converted development scope a non-alias value is never
+        # offered to the native permission check.
         self.assertDenied(gateway(), "WS-UNKNOWN")
 
-    def test_native_docname_in_place_of_an_alias_is_denied(self):
-        self.assertDenied(gateway(), "PAT-1")
+    def test_a_native_docname_without_read_authority_is_denied(self):
+        fake = dev_gateway()
+        fake.patient_can_read = False
+        self.assertDenied(fake, "PAT-1")
 
     def test_malformed_alias_is_denied_without_a_native_read(self):
         for alias in (None, "", "   ", 5, ["WS-1"], "WS-1\x00", "W" * 257):
@@ -208,6 +233,86 @@ class PatientViewDenialTests(unittest.TestCase):
         self.assertEqual(fake.denials, [])
         self.assertGreaterEqual(fake.traceback_suppressions, 1)
 
+
+class NativeDocnameReadTests(unittest.TestCase):
+    """Converted creates return a native docname; the read path must accept it."""
+
+    def test_a_readable_native_docname_returns_canonical_detail(self):
+        fake = dev_gateway()
+        payload = patients_endpoint.view(fake, "PAT-1")
+        self.assertEqual(payload["workspace_patient_id"], "PAT-1")
+        self.assertEqual(payload["display_name"], "Patient One")
+        self.assertTrue(payload["editable"])
+        self.assertEqual(fake.patient_read_calls, ["PAT-1"])
+        self.assertEqual(fake.patient_views, ["PAT-1"])
+
+    def test_a_native_docname_does_not_widen_editability(self):
+        fake = dev_gateway()
+        fake.write_authority = set()
+        self.assertFalse(patients_endpoint.view(fake, "PAT-1")["editable"])
+
+    def test_a_non_clinical_role_never_reaches_the_native_check(self):
+        fake = dev_gateway(current_session=session_view(roles=("Accounts User",)))
+        with self.assertRaises(Denied):
+            patients_endpoint.view(fake, "PAT-1")
+        self.assertEqual(fake.patient_read_calls, [])
+
+    def test_a_native_docname_is_refused_outside_the_approved_site(self):
+        # Legacy site behavior is unchanged: only configured aliases resolve.
+        for site in ("marley.test", "marley.local"):
+            with self.subTest(site=site):
+                fake = gateway(
+                    site=site,
+                    settings=settings(
+                        clinic_ui_synthetic_site=site,
+                        clinic_ui_synthetic_patients=ALLOWLIST,
+                        clinic_ui_native_patient_write_site=site,
+                    ),
+                )
+                with self.assertRaises(Denied):
+                    patients_endpoint.view(fake, "PAT-1")
+                self.assertEqual(fake.patient_read_calls, [])
+
+    def test_the_static_alias_still_resolves_outside_the_approved_site(self):
+        fake = gateway(
+            site="marley.local",
+            settings=settings(
+                clinic_ui_synthetic_site="marley.local",
+                clinic_ui_synthetic_patients=ALLOWLIST,
+            ),
+        )
+        payload = patients_endpoint.view(fake, "WS-1")
+        self.assertEqual(payload["workspace_patient_id"], "WS-1")
+        self.assertEqual(payload["display_name"], "Patient One")
+
+    def test_a_native_docname_stays_readable_when_development_writes_are_off(self):
+        site = config.APPROVED_WRITE_SITE
+        fake = dev_gateway(
+            settings=settings(
+                clinic_ui_synthetic_site=site,
+                clinic_ui_synthetic_patients=ALLOWLIST,
+                clinic_ui_native_patient_write_enabled=0,
+                clinic_ui_native_patient_write_site=site,
+            )
+        )
+
+        payload = patients_endpoint.view(fake, "PAT-1")
+
+        self.assertEqual(payload["workspace_patient_id"], "PAT-1")
+        self.assertEqual(payload["display_name"], "Patient One")
+        # Read authority is still required; the flag only disabled writes.
+        fake = dev_gateway(
+            settings=settings(
+                clinic_ui_synthetic_site=site,
+                clinic_ui_synthetic_patients=ALLOWLIST,
+                clinic_ui_native_patient_write_enabled=0,
+                clinic_ui_native_patient_write_site=site,
+            )
+        )
+        fake.patient_can_read = False
+        with self.assertRaises(Denied):
+            patients_endpoint.view(fake, "PAT-1")
+        self.assertEqual(fake.patient_views, [])
 
 class PatientViewSealedAliasTests(unittest.TestCase):
     def gateway(self, **overrides):

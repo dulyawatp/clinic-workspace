@@ -208,13 +208,19 @@ def _base_modified(value):
 
 
 def validate_create(body):
-    """Return the normalized create payload or raise ``WriteInputError``."""
+    """Return the normalized create payload or raise ``WriteInputError``.
+
+    ``operation_key`` is accepted for transport compatibility with the
+    historical fenced lane but is no longer required: the converted lane uses
+    native permissions, validation and transactions instead of an operation
+    ledger.
+    """
 
     body = _require_mapping(body)
     unknown = set(body) - CREATE_KEYS
     if unknown:
         raise WriteInputError("unknown create field")
-    required = frozenset({"operation_key", "first_name", "sex"})
+    required = frozenset({"first_name", "sex"})
     if required - set(body):
         raise WriteInputError("missing create field")
 
@@ -228,21 +234,26 @@ def validate_create(body):
         "sex": _require_text(body["sex"], field="sex", max_length=MAX_SEX_LENGTH),
         "dob": _date_of_birth(body.get("dob")),
     }
-    return {
+    payload = {
         "kind": "create",
-        "operation_key": _operation_key(body["operation_key"]),
         "fields": fields,
     }
+    if "operation_key" in body:
+        payload["operation_key"] = _operation_key(body["operation_key"])
+    return payload
 
 
 def validate_update(body):
-    """Return the normalized update payload or raise ``WriteInputError``."""
+    """Return the normalized update payload or raise ``WriteInputError``.
+
+    As with create, ``operation_key`` is optional and carries no authority.
+    """
 
     body = _require_mapping(body)
     unknown = set(body) - UPDATE_KEYS
     if unknown:
         raise WriteInputError("unknown update field")
-    for required in ("operation_key", "workspace_patient_id", "base_modified"):
+    for required in ("workspace_patient_id", "base_modified"):
         if required not in body:
             raise WriteInputError(f"missing update field {required}")
 
@@ -266,9 +277,8 @@ def validate_update(body):
     if "dob" in supplied:
         fields["dob"] = _date_of_birth(body["dob"])
 
-    return {
+    payload = {
         "kind": "update",
-        "operation_key": _operation_key(body["operation_key"]),
         "workspace_patient_id": _require_text(
             body["workspace_patient_id"],
             field="workspace_patient_id",
@@ -277,6 +287,9 @@ def validate_update(body):
         "base_modified": _base_modified(body["base_modified"]),
         "fields": fields,
     }
+    if "operation_key" in body:
+        payload["operation_key"] = _operation_key(body["operation_key"])
+    return payload
 
 
 def canonical_payload(payload):

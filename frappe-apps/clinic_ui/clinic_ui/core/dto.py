@@ -24,14 +24,20 @@ Directory::
 Write success::
 
     {"status": "created" | "updated",
-     "ackToken": "<64 lowercase hex>",
      "patient": {"workspace_patient_id": "...", "display_name": "...",
                  "first_name": "...", "last_name": ..., "sex": ...,
-                 "dob": ..., "status": ..., "modified": "..."}},
+                 "dob": ..., "status": ..., "modified": "..."}}
 
-Acknowledgement success::
+Appointment write success::
 
-    {"acknowledged": true}
+    {"status": "booked" | "rescheduled" | "checked_in" | "cancelled"
+               | "no_show",
+     "appointment": {"workspace_patient_id": "...", "appointment_id": "...",
+                     "appointment_date": "...", "appointment_time": "...",
+                     "status": "...", "modified": "..."}}
+
+The converted development lanes have no acknowledgement step; ``ackToken`` and
+the ``acknowledged`` payload belong to the historical fenced lanes only.
 """
 
 import re
@@ -51,8 +57,9 @@ MAX_APPOINTMENT_ITEMS = 1000
 MAX_CSRF_TOKEN_LENGTH = MAX_TEXT_LENGTH
 
 # Appointment rows carry exactly the five fields the existing live contract
-# already publishes. The appointment id is the server-owned workspace
-# reference, never the native Patient Appointment docname.
+# already publishes. The appointment id is the identifier the request addressed:
+# a historical workspace alias or, on the approved development site, the native
+# ``Patient Appointment`` docname of a converted-lane record.
 APPOINTMENT_ITEM_KEYS = frozenset(
     {
         "workspace_patient_id",
@@ -251,21 +258,20 @@ def patient_detail(workspace_patient_id, detail, *, editable=False):
     return payload
 
 
-def patient_write_result(status, workspace_patient_id, detail, ack_token):
+def patient_write_result(status, workspace_patient_id, detail):
     """Build the create/edit success payload or raise ``ValueError``.
 
     Success status is exactly ``created`` or ``updated``. The nested patient is
-    the same allowlisted detail shape as the view, now including the
-    authoritative ``modified`` token. ``ackToken`` is the opaque acknowledgement
-    token the client must return before another write is admitted.
+    the same allowlisted detail shape as the view, including the authoritative
+    ``modified`` token. The converted development lane has no acknowledgement
+    step: the native write is reported once and an ambiguous response is never
+    retried automatically.
     """
 
     if status not in ("created", "updated"):
         raise ValueError("invalid write status")
-    if not is_valid_ack_token(ack_token):
-        raise ValueError("invalid acknowledgement token")
     patient = patient_detail(workspace_patient_id, detail)
-    return {"status": status, "patient": patient, "ackToken": ack_token}
+    return {"status": status, "patient": patient}
 
 
 def build_directory(items):
@@ -303,8 +309,11 @@ def appointment_item(
     """Build one appointment row or raise ``ValueError``.
 
     Only the five existing live-contract fields are accepted. ``appointment_id``
-    is the configured workspace appointment reference; the native appointment
-    docname and native patient id never appear here.
+    is the identifier the request addressed — a historical workspace alias or,
+    on the approved development site, the native ``Patient Appointment``
+    docname. ``workspace_patient_id`` is a static alias, or the native ``Patient``
+    docname after the current user's own Patient read check. Neither native
+    value is invented here.
     """
 
     if not is_valid_text(workspace_patient_id):
@@ -362,8 +371,8 @@ def appointment_detail(
     """Build the versioned appointment detail or raise ``ValueError``.
 
     This is the separate detail contract: the same five list fields plus the
-    authoritative ``modified`` optimistic-concurrency token. It never carries a
-    native appointment docname or native patient id.
+    authoritative ``modified`` optimistic-concurrency token. It never invents an
+    identifier: ``appointment_id`` is the reference the request addressed.
     """
 
     item = appointment_item(
@@ -383,8 +392,8 @@ def appointment_read(detail, *, can_reschedule=False, can_checkin=False):
     """Return the detail plus explicit, server-computed action eligibility.
 
     Both flags default to ``False`` and are only ever booleans; the endpoint is
-    the sole place that may compute ``True`` after its own target, permission and
-    budget checks. A readable static fixture therefore stays read-only.
+    the sole place that may compute ``True`` after its own target and native
+    permission checks. A readable static fixture therefore stays read-only.
     """
 
     if not isinstance(detail, dict) or set(detail) != APPOINTMENT_DETAIL_KEYS:
@@ -397,22 +406,22 @@ def appointment_read(detail, *, can_reschedule=False, can_checkin=False):
     return payload
 
 
-def appointment_write_result(status, detail, ack_token):
+def appointment_write_result(status, detail):
     """Build the booking/reschedule/check-in/cancel/no-show success payload.
 
     ``status`` is exactly ``booked``, ``rescheduled``, ``checked_in``,
     ``cancelled`` or ``no_show``. The nested appointment is the versioned detail
-    shape and ``ackToken`` is the opaque acknowledgement token the client must
-    return before another write is admitted. No native identifier is included.
+    shape. The converted development lane has no acknowledgement step, so there
+    is no ``ackToken``: the native write is reported once and an ambiguous
+    response is never retried automatically. No native identifier beyond the
+    addressed appointment id is included.
     """
 
     if status not in APPOINTMENT_WRITE_STATUSES:
         raise ValueError("invalid appointment write status")
-    if not is_valid_ack_token(ack_token):
-        raise ValueError("invalid acknowledgement token")
     if not isinstance(detail, dict) or set(detail) != APPOINTMENT_DETAIL_KEYS:
         raise ValueError("invalid appointment detail")
-    return {"status": status, "appointment": dict(detail), "ackToken": ack_token}
+    return {"status": status, "appointment": dict(detail)}
 
 
 def encounter_detail(

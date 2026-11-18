@@ -138,8 +138,6 @@ class AppointmentCapabilityTests(unittest.TestCase):
                 clinic_ui_synthetic_site=APPROVED_WRITE_SITE,
                 clinic_ui_native_appointment_write_enabled=0,
             )},
-            "no marker": {"deployment_approved": False},
-            "fence not ready": {"fence_ready": False},
             "unsafe settings": {"appointment_side_effects_unsafe": True},
             "no create authority": {"appointment_can_create": False},
             "no write authority": {"appointment_can_write": False},
@@ -171,6 +169,14 @@ class AppointmentCapabilityTests(unittest.TestCase):
                 self.assertEqual(
                     capabilities["write.appointment.checkin"], "read_only"
                 )
+
+    def test_the_historical_fence_does_not_gate_appointment_writes(self):
+        fake = self.appointment_gateway()
+        fake.deployment_approved = False
+        fake.fence_ready = False
+        self.assertEqual(
+            self.capabilities(fake)["write.appointment.book"], "enabled"
+        )
 
     def test_a_doctor_session_can_receive_the_same_surface(self):
         fake = self.appointment_gateway(
@@ -389,15 +395,21 @@ class BootstrapWriteCapabilityTests(unittest.TestCase):
         )
         self.assert_all_read_only(payload)
 
-    def test_missing_deployment_marker_stays_read_only(self):
+    def test_a_missing_deployment_marker_no_longer_blocks_patient_writes(self):
+        # The converted development lane relies on native authority, not the
+        # historical fence anchor.
         fake = self.write_gateway()
         fake.deployment_approved = False
-        self.assert_all_read_only(session_endpoint.bootstrap(fake))
+        self.assert_only_patient_writes_enabled(
+            session_endpoint.bootstrap(fake)
+        )
 
-    def test_uninitialized_fence_stays_read_only(self):
+    def test_an_unresolved_fence_no_longer_blocks_patient_writes(self):
         fake = self.write_gateway()
         fake.fence_ready = False
-        self.assert_all_read_only(session_endpoint.bootstrap(fake))
+        self.assert_only_patient_writes_enabled(
+            session_endpoint.bootstrap(fake)
+        )
 
     def test_unsafe_healthcare_settings_stay_read_only(self):
         fake = self.write_gateway()
@@ -424,7 +436,7 @@ class BootstrapWriteCapabilityTests(unittest.TestCase):
         def boom():
             raise RuntimeError("gate check failed")
 
-        fake.write_deployment_approved = boom
+        fake.healthcare_settings_side_effects_unsafe = boom
         self.assert_all_read_only(session_endpoint.bootstrap(fake))
 
     def test_enabling_writes_does_not_read_any_patient_record(self):

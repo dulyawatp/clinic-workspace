@@ -1,24 +1,29 @@
 """Read and discovery helpers for the synthetic appointment surface.
 
-The list keeps its existing five-field contract and the static, site-owned
-allowlist. Newly booked records are added only through *verified* committed
-``book`` receipts in the external fence: each alias is re-derived from the
-recorded actor, site and operation key, the receipt is decoded with the
-appointment codec (which refuses every patient receipt) and the native row is
-then read with the current user's own document and field-level permission
-checks. The native appointment docname and native patient id never leave the
-server.
+The list keeps its existing five-field contract. It has three disjoint sources:
 
-Discovery is bounded by the approved booking budget. An over-full page, a
-duplicate alias/native record, a tampered receipt or a patient outside the
-explicit synthetic allowlist fails the whole response instead of returning a
-partial or ambiguous list.
+* the static, site-owned allowlist (unchanged historical aliases),
+* verified committed ``book`` receipts in the external fence, read only, so a
+  historical workspace alias keeps resolving without any ledger mutation, and
+* a bounded, permission-aware native ``Patient Appointment`` list for the
+  current user on the exact approved development site, so appointments created
+  by the converted lane are discoverable by their native docname.
+
+Every native row is read with the current user's own document and field-level
+permission checks. A native patient outside the static allowlist is published
+by its native ``Patient`` docname only after the current user's own native
+Patient read check succeeds.
+
+A duplicate native record is listed once, preferring its historical alias so
+existing links stay stable. A row whose patient the current user cannot read is
+omitted from the list and fails the detail read closed. An unavailable
+historical ledger omits that source; a malformed or ambiguous receipt still
+fails the read closed, as before.
 
 The separate detail contract adds only the authoritative ``modified`` version
-and explicit action eligibility. A readable static fixture is never writable;
-only the creator's own committed booking can be rescheduled, and only the
-dedicated same-day booking for the configured synthetic patient can be checked
-in.
+and explicit action eligibility. A readable static fixture is never writable; a
+historical booking is writable by its creator; a native record is writable when
+the current user holds the native ``Patient Appointment`` write permission.
 """
 
 from dataclasses import dataclass
@@ -26,14 +31,19 @@ from dataclasses import dataclass
 from clinic_ui.core import appointment_contract, appointment_write, dto, patient_write
 from clinic_ui.core.policy import APPOINTMENT_ROLE_CODES
 from clinic_ui.core.text import is_valid_text
-from clinic_ui.endpoints import common
+from clinic_ui.endpoints import aliases, common
 
 SOURCE_STATIC = "static"
 SOURCE_BOOKED = "booked"
+SOURCE_NATIVE = "native"
 
 OPEN_STATUSES = frozenset({"Open", "Confirmed"})
 RESCHEDULE_STATUSES = frozenset({"Scheduled", "Open", "Confirmed"})
+# Read-only enumeration cap for the historical ledger. It is not a write budget:
+# the converted lane never consumes or checks one.
 MAX_BOOK_RECEIPTS = appointment_write.budget("book")
+# Hard bound on the permission-aware native discovery page.
+MAX_NATIVE_APPOINTMENTS = 200
 
 
 class _ReceiptRecord:
@@ -77,6 +87,42 @@ def workspace_patient_for(settings, native_patient_id):
     """Public wrapper: the allowlisted workspace id, or ``None``."""
 
     return _workspace_patient_for(settings, native_patient_id)
+
+
+def patient_reference(gateway, settings, native_patient_id):
+    """The client-facing patient identifier, or ``None`` without denying.
+
+    A patient reference is published only after the current user's own native
+    ``Patient`` read permission succeeds: a configured workspace alias is never
+    permission to read its patient. A static allowlist patient then keeps its
+    stable workspace alias; any other patient is published by its native
+    ``Patient`` docname, and only on the approved development read scope.
+    """
+
+    if not is_valid_text(
+        native_patient_id, appointment_write.MAX_APPOINTMENT_ID_LENGTH
+    ):
+        return None
+    if gateway.native_patient_can_read(native_patient_id) is not True:
+        return None
+    workspace_patient_id = _workspace_patient_for(settings, native_patient_id)
+    if workspace_patient_id is not None:
+        return workspace_patient_id
+    if aliases.native_read_scope_enabled(gateway):
+        return native_patient_id
+    return None
+
+
+def native_write_scope_enabled(gateway, settings):
+    """True only for the appointment write configuration on the approved site."""
+
+    try:
+        return (
+            aliases.native_read_scope_enabled(gateway)
+            and settings.appointment_write_enabled is True
+        )
+    except Exception:
+        return False
 
 
 def _static_lookup(settings, workspace_appointment_id):
@@ -155,6 +201,10 @@ def own_booking(gateway, settings, actor, workspace_appointment_id):
     backed by that actor's terminal ``book`` receipt, resolves. The static
     allowlist and every other actor's booking are deliberately absent, so a
     readable fixture or another clinician's record can never become writable.
+
+    An unavailable, locked or uncertain historical ledger resolves nothing: the
+    caller denies, no 500 escapes and the ledger is never written or repaired.
+    A non-alias value returns before any ledger access at all.
     """
 
     operation_key = appointment_write.parse_alias(
@@ -162,7 +212,17 @@ def own_booking(gateway, settings, actor, workspace_appointment_id):
     )
     if operation_key is None:
         return None
-    receipt = gateway.lookup_appointment_receipt(actor, "book", operation_key)
+    try:
+        receipt = gateway.lookup_appointment_receipt(
+            actor, "book", operation_key
+        )
+    except (
+        patient_write.WriteLocked,
+        patient_write.WriteConflict,
+        patient_write.StoreUnavailable,
+        patient_write.WriteUncertain,
+    ):
+        return None
     if receipt is None:
         return None
     record = _ReceiptRecord(actor=actor, operation_key=operation_key, receipt=receipt)
@@ -176,13 +236,72 @@ def own_booking(gateway, settings, actor, workspace_appointment_id):
     return target
 
 
+def resolve_write(gateway, settings, actor, workspace_appointment_id):
+    """The native appointment this request may write, or ``None``.
+
+    A static allowlist id — and therefore its readable fixture — is never
+    writable. A historical sealed alias resolves only through the actor's own
+    committed booking receipt, read-only. A value that is not alias-shaped may
+    resolve as a native ``Patient Appointment`` docname, but only on the approved
+    development site with the appointment write configuration and the current
+    user's native document write permission. ``None`` means the caller denies;
+    nothing is written and no historical ledger state is read for a native value.
+    """
+
+    if _static_lookup(settings, workspace_appointment_id) is not None:
+        return None
+
+    own = own_booking(gateway, settings, actor, workspace_appointment_id)
+    if own is not None:
+        return own
+
+    if appointment_write.is_alias_shaped(workspace_appointment_id):
+        # An alias-shaped value is never reinterpreted as a native docname.
+        return None
+    if not native_write_scope_enabled(gateway, settings):
+        return None
+    if gateway.native_appointment_can_write(workspace_appointment_id) is not True:
+        return None
+    return ResolvedAppointment(
+        native_appointment_id=workspace_appointment_id,
+        workspace_appointment_id=workspace_appointment_id,
+        source=SOURCE_NATIVE,
+    )
+
+
+def resolve_patient(gateway, settings, actor, role, workspace_patient_id):
+    """The native patient this request may name, or ``None``.
+
+    Resolution is the converted lane's own: the static allowlist, a historical
+    sealed create alias through its read-only committed receipt, or a native
+    ``Patient`` docname the current user may read. Booking additionally requires
+    the current user's native ``Patient Appointment`` create authority, which the
+    endpoint checks separately.
+    """
+
+    try:
+        resolved = aliases.resolve_read(
+            gateway, settings, actor, role, workspace_patient_id
+        )
+    except (
+        appointment_write.AppointmentWriteError,
+        patient_write.StoreUnavailable,
+        patient_write.WriteUncertain,
+        patient_write.WriteLocked,
+    ):
+        return None
+    return resolved.native_patient_id
+
+
 def resolve_read(gateway, settings, actor, workspace_appointment_id):
     """Resolve one readable appointment without granting write authority.
 
     The static allowlist resolves as before. A booked alias resolves for its
     creator through the actor-bound receipt, or for a different clinician only
-    through exactly one verified committed booking receipt. ``None`` means the
-    value is unknown; the caller denies.
+    through exactly one verified committed booking receipt. On the approved
+    development site a native docname resolves too; the read itself still
+    requires the current user's document and field-level permission. ``None``
+    means the value is unknown; the caller denies.
     """
 
     native_appointment_id = _static_lookup(settings, workspace_appointment_id)
@@ -196,6 +315,15 @@ def resolve_read(gateway, settings, actor, workspace_appointment_id):
     own = own_booking(gateway, settings, actor, workspace_appointment_id)
     if own is not None:
         return own
+
+    if not appointment_write.is_alias_shaped(workspace_appointment_id):
+        if aliases.native_read_scope_enabled(gateway):
+            return ResolvedAppointment(
+                native_appointment_id=workspace_appointment_id,
+                workspace_appointment_id=workspace_appointment_id,
+                source=SOURCE_NATIVE,
+            )
+        return None
 
     matches = [
         record
@@ -215,45 +343,25 @@ def checkin_patient_native_id(settings):
     return native_patient_for(settings, settings.appointment_checkin_patient)
 
 
-def eligible_checkin_targets(gateway, settings, actor):
-    """Return the actor's booked records that are valid same-day check-ins.
+def _native_target_ids(gateway):
+    """Bounded, permission-aware native appointment ids, or ``None``."""
 
-    Eligibility is re-read from the native record for the current user: the
-    configured dedicated patient, the site's current date and an Open/Confirmed
-    status. The caller must require exactly one match equal to the requested
-    target. Any read or ledger failure propagates so the caller fails closed.
-    """
-
-    native_patient_id = checkin_patient_native_id(settings)
-    if native_patient_id is None:
-        return []
-    today = gateway.site_today()
-    if today is None:
-        return []
-
-    eligible = []
-    for target in discover_booked(gateway, settings):
-        if target.creator != actor:
-            continue
-        detail = gateway.native_appointment_view(target.native_appointment_id)
-        if detail is None:
-            raise appointment_write.AppointmentWriteError("unreadable target")
-        if (
-            detail["patient"] == native_patient_id
-            and detail["appointment_date"] == today
-            and detail["status"] in OPEN_STATUSES
-        ):
-            eligible.append(target.native_appointment_id)
-    return eligible
+    if not aliases.native_read_scope_enabled(gateway):
+        return None
+    names = gateway.list_readable_appointments(MAX_NATIVE_APPOINTMENTS)
+    if not isinstance(names, (list, tuple)):
+        return None
+    return names
 
 
 def write_gate_open(gateway, settings, native_appointment_id):
-    """True only when the whole effective appointment write gate is open.
+    """True only when the converted appointment write gate is open.
 
-    The detail action flags must intersect this gate: configuration, the private
-    deployment marker, a ready fence store, safe controller settings, the
-    current user's document write authority and the linked-document reads. Any
-    failure or exception is ``False``.
+    The detail action flags must intersect this gate: the appointment write
+    configuration, the executable native boundary, safe controller settings, the
+    current user's document write authority and the linked-document reads. No
+    historical fence or deployment marker is consulted. Any failure or exception
+    is ``False``.
     """
 
     try:
@@ -264,10 +372,6 @@ def write_gate_open(gateway, settings, native_appointment_id):
         if settings.appointment_medical_department is None:
             return False
         if settings.appointment_type is None:
-            return False
-        if gateway.write_deployment_approved() is not True:
-            return False
-        if gateway.write_fence_ready() is not True:
             return False
         if gateway.healthcare_appointment_side_effects_unsafe() is not False:
             return False
@@ -298,46 +402,50 @@ def write_gate_open(gateway, settings, native_appointment_id):
 
 
 def appointment_config_identity(settings, patient=None):
-    """Exact configured synthetic identity enforced on locked detail/targets."""
+    """Expected configured identity for one resolved target.
 
-    return {
-        "patient": patient,
-        "patients": tuple(native for _workspace, native in settings.allowlist),
+    With an exact ``patient`` — the resolved target's own native id — only that
+    patient is accepted. Without one, the configured synthetic allowlist set is
+    accepted, which is the read-only detail default. Company, appointment type
+    and medical department are always the exact configured values.
+    """
+
+    identity = {
         "company": settings.appointment_company,
         "appointment_type": settings.appointment_type,
         "department": settings.appointment_medical_department,
     }
+    if patient is None:
+        identity["patients"] = tuple(
+            native for _workspace, native in settings.allowlist
+        )
+    else:
+        identity["patient"] = patient
+    return identity
 
 
 def _action_flags(gateway, settings, actor, resolved, detail):
     """Return ``(can_reschedule, can_checkin)`` for one detail read.
 
-    Every ``True`` intersects the whole effective gate, the non-mutating
-    closed-world target check and the same shared eligibility rules the write
-    endpoints use under the row lock.
+    Every ``True`` intersects the converted gate, the non-mutating closed-world
+    target check and the same shared eligibility rules the write endpoints use
+    under the row lock. A native record is eligible for the caller who holds its
+    native write permission; a historical booking is eligible for its creator.
     """
 
-    if resolved.source != SOURCE_BOOKED or resolved.creator != actor:
+    if resolved.source == SOURCE_STATIC:
+        return False, False
+    if resolved.source == SOURCE_BOOKED and resolved.creator != actor:
         return False, False
     if not write_gate_open(gateway, settings, resolved.native_appointment_id):
         return False, False
     if (
         gateway.native_appointment_target_problem(
             resolved.native_appointment_id,
-            expected=appointment_config_identity(settings),
+            expected=appointment_config_identity(settings, patient=detail["patient"]),
         )
         is not None
     ):
-        return False, False
-
-    try:
-        reschedules = gateway.list_committed_appointment_receipts(
-            appointment_write.budget("reschedule"), kind="reschedule"
-        )
-        checkins = gateway.list_committed_appointment_receipts(
-            appointment_write.budget("checkin"), kind="checkin"
-        )
-    except appointment_write.AppointmentBudgetExhausted:
         return False, False
 
     today = gateway.site_today()
@@ -350,31 +458,27 @@ def _action_flags(gateway, settings, actor, resolved, detail):
         patient=detail["patient"],
         today=today,
         dedicated_patient=native_patient_id,
-        has_receipt=bool(reschedules),
+        has_receipt=False,
     )
     can_checkin = False
     if can_reschedule is False and detail["status"] in OPEN_STATUSES:
-        try:
-            eligible = eligible_checkin_targets(gateway, settings, actor)
-        except Exception:
-            return can_reschedule, False
+        # Target-scoped only: there is no cross-record uniqueness scan, because
+        # a bounded page cannot establish uniqueness and native
+        # ``check_in_appointment`` has no such rule. The locked status check in
+        # the adapter is what refuses a second check-in of the same record.
         can_checkin = appointment_contract.checkin_target_eligible(
             status=detail["status"],
             appointment_date=detail["appointment_date"],
             today=today,
             patient=detail["patient"],
             dedicated_patient=native_patient_id,
-            has_receipt=bool(checkins),
-            is_unique_eligible=(
-                len(eligible) == 1
-                and eligible[0] == resolved.native_appointment_id
-            ),
+            has_receipt=False,
         )
     return can_reschedule, can_checkin
 
 
 def _item_for(settings, gateway, workspace_appointment_id, native_appointment_id):
-    """Read one native row for the list; ``None`` fails the whole response."""
+    """Read one native row for the list; ``None`` omits an unmappable patient."""
 
     detail = gateway.native_appointment_view(native_appointment_id)
     if detail is None:
@@ -387,7 +491,7 @@ def _item_for(settings, gateway, workspace_appointment_id, native_appointment_id
     except (KeyError, TypeError):
         gateway.deny()
 
-    workspace_patient_id = _workspace_patient_for(settings, patient)
+    workspace_patient_id = patient_reference(gateway, settings, patient)
     if workspace_patient_id is None:
         return None
     try:
@@ -433,13 +537,18 @@ def synthetic_appointments(gateway):
         patient_write.StoreUnavailable,
         patient_write.WriteUncertain,
     ):
-        # The fence is unavailable, so no booked record can be verified. The
-        # existing static read contract is preserved without inventing rows.
+        # The historical ledger is unavailable, so no booked record can be
+        # verified. The converted native slice and the static read contract are
+        # preserved without inventing rows.
         booked = []
 
-    seen_native = set()
+    seen_native = {
+        native_appointment_id
+        for _workspace, native_appointment_id in settings.appointment_allowlist
+    }
     for target in booked:
         if target.native_appointment_id in seen_native:
+            # Ambiguous historical evidence fails the whole read closed.
             gateway.deny()
         seen_native.add(target.native_appointment_id)
         item = _item_for(
@@ -449,8 +558,30 @@ def synthetic_appointments(gateway):
             target.native_appointment_id,
         )
         if item is None:
-            gateway.deny()
+            # The current user cannot read the patient behind this booking; an
+            # inaccessible appointment is omitted rather than described.
+            continue
         items.append(item)
+
+    available = dto.MAX_APPOINTMENT_ITEMS - len(items)
+    native_ids = _native_target_ids(gateway) if available > 0 else None
+    if native_ids is not None:
+        for native_appointment_id in native_ids[:available]:
+            if not is_valid_text(
+                native_appointment_id, appointment_write.MAX_APPOINTMENT_ID_LENGTH
+            ):
+                continue
+            if native_appointment_id in seen_native:
+                # A historical alias or a static row already represents it; the
+                # native docname is not listed a second time.
+                continue
+            item = _item_for(
+                settings, gateway, native_appointment_id, native_appointment_id
+            )
+            if item is None:
+                continue
+            seen_native.add(native_appointment_id)
+            items.append(item)
 
     try:
         return dto.build_appointments(items)
@@ -497,7 +628,7 @@ def appointment_detail(gateway, workspace_appointment_id=None):
     if gateway.native_patient_can_read(patient) is not True:
         gateway.deny()
 
-    workspace_patient_id = _workspace_patient_for(settings, patient)
+    workspace_patient_id = patient_reference(gateway, settings, patient)
     if workspace_patient_id is None:
         gateway.deny()
 

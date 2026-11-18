@@ -16,6 +16,15 @@ class Denied(Exception):
     """Stand-in for the framework permission error raised by the gateway."""
 
 
+class NativePermissionDenied(Exception):
+    """Stands in for the framework's own permission exception *type*.
+
+    Endpoints must recognise a definite denial by this type identity, never by
+    the class name: an unrelated exception named ``PermissionError`` must stay
+    an uncertain outcome.
+    """
+
+
 class FakeCreateReceipt:
     """One committed create row as the gateway would enumerate it."""
 
@@ -167,11 +176,17 @@ class FakeGateway:
         self.receipt_list_calls = []
         self.receipt_list_error = None
         self.write_authority = None
+        self.readable_patients = []
+        self.readable_list_calls = []
+        self.readable_appointments = []
+        self.readable_appointment_calls = []
 
         # -- appointment write surface ------------------------------------
         self.appointment_detail_map = {}
         self.appointment_detail_error = None
         self.patient_can_read = True
+        self.patient_read_authority = None
+        self.patient_read_sequence = []
         self.patient_read_calls = []
         self.doctype_reads = {}
         self.doctype_read_calls = []
@@ -543,6 +558,11 @@ class FakeGateway:
         self.denials.append(code)
         raise Denied(code)
 
+    def is_native_permission_denial(self, exc):
+        """Identity-based recognition, mirroring the real adapter."""
+
+        return isinstance(exc, NativePermissionDenied)
+
     def native_patient_display_name(self, native_patient_id):
         self.patient_reads.append(native_patient_id)
         if self.patient_read_error is not None:
@@ -669,10 +689,26 @@ class FakeGateway:
         self.fence_calls.append((actor, kind, operation_key, payload_digest))
         return FakeFence(self.fence_claim, self.fence_error)
 
+    def list_readable_patients(self, limit):
+        self.readable_list_calls.append(limit)
+        if self.readable_patients is None:
+            return None
+        return list(self.readable_patients)[:limit]
+
+    def list_readable_appointments(self, limit):
+        self.readable_appointment_calls.append(limit)
+        if self.readable_appointments is None:
+            return None
+        return list(self.readable_appointments)[:limit]
+
     # -- local synthetic appointment write path -------------------------
 
     def native_patient_can_read(self, native_patient_id):
         self.patient_read_calls.append(native_patient_id)
+        if self.patient_read_sequence:
+            return self.patient_read_sequence.pop(0)
+        if self.patient_read_authority is not None:
+            return native_patient_id in self.patient_read_authority
         return self.patient_can_read
 
     def native_doctype_can_read(self, doctype, doc=None):

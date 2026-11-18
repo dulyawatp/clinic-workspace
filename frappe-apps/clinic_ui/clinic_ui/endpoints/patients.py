@@ -1,13 +1,15 @@
 """``GET /api/method/clinic_ui.api.patients.view``.
 
-Reads the allowlisted display fields of one synthetic patient. The client
-supplies only the server-owned workspace alias; it never supplies, receives or
-influences a native docname.
+Reads the allowlisted display fields of one record. The client supplies a
+workspace identifier: a configured static alias, a historical sealed alias, or
+a native ``Patient`` docname returned by the converted create lane. The native
+docname is accepted only after the current user's own native Patient read
+permission check.
 
 Gate order is the shared one: no-store, session validity, site configuration,
 clinic role, then the native read permission check for the *current* user on
-the exact Patient. A refused native check, a missing or malformed alias and a
-malformed record all end as the framework's generic 403; nothing partial is
+the exact Patient. A refused native check, a missing or malformed identifier and
+a malformed record all end as the framework's generic 403; nothing partial is
 returned. REC holds no Patient permission on the isolated site, so a REC view
 is denied even though the clinic role gate admits the role code.
 
@@ -15,7 +17,7 @@ The detail includes the authoritative ``modified`` token so an edit can submit
 ``base_modified``. It is read only after the same field-level read permission
 checks as every other detail field.
 
-A DOC or NUR caller may read another clinician's locally created Patient, but
+A DOC or NUR caller may read another clinician's historical created Patient, but
 only when a terminal committed create receipt re-derives to the exact alias and
 the current user separately passes the native read check. The response carries
 ``editable``: ``False`` by default and for every non-creator created alias, and

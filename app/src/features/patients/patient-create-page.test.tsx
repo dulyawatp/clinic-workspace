@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClient } from "@tanstack/react-query";
 import { HttpResponse, http } from "msw";
 import { Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
@@ -13,10 +14,11 @@ import {
   setViewport,
 } from "../../test/render";
 import { clearNativeCsrfToken } from "../../transport/native/session";
+import { PatientWriteRejectedError } from "../../transport/native/patient-write";
 
-const nativeWrite = vi.hoisted(() => ({ save: vi.fn(), locked: false }));
-vi.mock("../../transport/native/patient-write", () => ({
-  patientWriteLocked: () => nativeWrite.locked,
+const nativeWrite = vi.hoisted(() => ({ save: vi.fn() }));
+vi.mock("../../transport/native/patient-write", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../transport/native/patient-write")>(),
   saveNativePatient: nativeWrite.save,
 }));
 import {
@@ -36,8 +38,8 @@ afterEach(() => {
   localStorage.removeItem(CREATE_DRAFT_KEY);
   localStorage.removeItem(CREATE_SAMPLES_KEY);
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
   nativeWrite.save.mockReset();
-  nativeWrite.locked = false;
   clearNativeCsrfToken();
 });
 
@@ -385,13 +387,13 @@ it("navigates from the directory register action when the capability is enabled"
   ).toBeVisible();
 });
 
-it("keeps the native write closed after an uncertain result", async () => {
+it("keeps a confirmed native registration when the record refresh fails", async () => {
   vi.stubEnv("VITE_CLINIC_NATIVE", "1");
   const user = userEvent.setup();
-  nativeWrite.save.mockImplementation(async () => {
-    nativeWrite.locked = true;
-    throw new Error("uncertain");
-  });
+  vi.spyOn(QueryClient.prototype, "invalidateQueries").mockRejectedValue(
+    new Error("refresh failed"),
+  );
+  nativeWrite.save.mockResolvedValue(undefined);
   server.use(
     http.get(NATIVE_BOOTSTRAP, () =>
       nativeSession({
@@ -416,15 +418,101 @@ it("keeps the native write closed after an uncertain result", async () => {
   });
   await fillValidForm(user);
   await user.click(screen.getByRole("button", { name: "ตรวจสอบและลงทะเบียน" }));
+  await user.click(
+    await screen.findByRole("button", { name: "ลงทะเบียนผู้ป่วย" }),
+  );
+  expect(await screen.findByText("สร้างข้อมูลผู้ป่วยแล้ว")).toBeVisible();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(nativeWrite.save).toHaveBeenCalledTimes(1);
+});
+
+it("renders a known stale refusal instead of an unknown outcome", async () => {
+  vi.stubEnv("VITE_CLINIC_NATIVE", "1");
+  const user = userEvent.setup();
+  nativeWrite.save.mockRejectedValue(
+    new PatientWriteRejectedError("stale", 409, "STALE_VERSION"),
+  );
+  server.use(
+    http.get(NATIVE_BOOTSTRAP, () =>
+      nativeSession({
+        "read.patient": "enabled",
+        "write.patient.create": "enabled",
+      }),
+    ),
+    http.get(NATIVE_DIRECTORY, () =>
+      HttpResponse.json({
+        message: {
+          items: [{ workspace_patient_id: "WS-1", display_name: "Native Patient" }],
+        },
+      }),
+    ),
+  );
+  renderWithFixtures(<PatientCreatePage />, {
+    sessionMode: "live",
+    caps: {
+      "read.patient": "enabled",
+      "write.patient.create": "enabled",
+    },
+  });
+  await fillValidForm(user);
+  await user.click(screen.getByRole("button", { name: "ตรวจสอบและลงทะเบียน" }));
+  await user.click(
+    await screen.findByRole("button", { name: "ลงทะเบียนผู้ป่วย" }),
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "ข้อมูลผู้ป่วยมีการเปลี่ยนแปลงตั้งแต่เปิดรายการนี้",
+  );
+  expect(nativeWrite.save).toHaveBeenCalledTimes(1);
+  expect(
+    screen.getByRole("button", { name: "ลงทะเบียนผู้ป่วย" }),
+  ).toBeEnabled();
+});
+
+it("reports an unknown outcome and refreshes the directory before a repeat", async () => {
+  vi.stubEnv("VITE_CLINIC_NATIVE", "1");
+  const user = userEvent.setup();
+  let directoryReads = 0;
+  nativeWrite.save.mockImplementation(async () => {
+    throw new Error("uncertain");
+  });
+  server.use(
+    http.get(NATIVE_BOOTSTRAP, () =>
+      nativeSession({
+        "read.patient": "enabled",
+        "write.patient.create": "enabled",
+      }),
+    ),
+    http.get(NATIVE_DIRECTORY, () => {
+      directoryReads += 1;
+      return HttpResponse.json({
+        message: {
+          items: [{ workspace_patient_id: "WS-1", display_name: "Native Patient" }],
+        },
+      });
+    }),
+  );
+  renderWithFixtures(<PatientCreatePage />, {
+    sessionMode: "live",
+    caps: {
+      "read.patient": "enabled",
+      "write.patient.create": "enabled",
+    },
+  });
+  await fillValidForm(user);
+  await user.click(screen.getByRole("button", { name: "ตรวจสอบและลงทะเบียน" }));
   const register = await screen.findByRole("button", {
     name: "ลงทะเบียนผู้ป่วย",
   });
   await user.click(register);
-  expect(await screen.findByRole("alert")).toHaveTextContent("อย่าลองอีกครั้ง");
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "ข้อมูลผู้ป่วยล่าสุด",
+  );
+  expect(directoryReads).toBe(2);
+  expect(nativeWrite.save).toHaveBeenCalledTimes(1);
+  // The repeat is the reader's explicit action, never an automatic retry.
   expect(
     screen.getByRole("button", { name: "ลงทะเบียนผู้ป่วย" }),
-  ).toBeDisabled();
-  expect(nativeWrite.save).toHaveBeenCalledTimes(1);
+  ).toBeEnabled();
 });
 
 it("drops the confirm step as soon as a reviewed field changes", async () => {

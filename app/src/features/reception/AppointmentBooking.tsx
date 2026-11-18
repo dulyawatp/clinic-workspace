@@ -8,13 +8,10 @@ import { Button } from "../../ui/Button";
 import { StatePanel } from "../../ui/StatePanel";
 import { WriteGate } from "../../ui/WriteGate";
 import {
-  appointmentWriteLocked,
   bookNativeAppointment,
   NativeAppointmentWriteError,
 } from "../../transport/native/appointment-write";
 import { nativeTransportEnabled } from "../../transport/native/flag";
-import { useLiveAppointments } from "../appointments/live-appointments";
-import { useAppointmentWriteLock } from "../appointments/useAppointmentWriteLock";
 import { useCapabilities } from "../shell/CapabilityProvider";
 import { useLivePatients } from "../patients/live-directory";
 
@@ -65,21 +62,12 @@ function AppointmentBookingForm() {
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [booked, setBooked] = useState<string | null>(null);
-  const { locked, refreshLock } = useAppointmentWriteLock();
-  const appointments = useLiveAppointments();
   const directory = useLivePatients();
 
-  // Patient choices are the intersection of the server's readable directory
-  // and the appointment allowlist, so an alias the server would refuse can
-  // never be selected.
-  const candidates = useMemo(() => {
-    const allowed = new Set(
-      (appointments.data ?? []).map((row) => row.workspace_patient_id),
-    );
-    return (directory.data ?? []).filter((patient) =>
-      allowed.has(patient.workspace_patient_id),
-    );
-  }, [appointments.data, directory.data]);
+  // Patient choices are the readable directory only. The converted lane lets
+  // the server's native write authority decide eligibility, so a readable
+  // patient is no longer narrowed by the appointment list.
+  const candidates = useMemo(() => directory.data ?? [], [directory.data]);
 
   useEffect(() => {
     if (selected !== "" && candidates.some((item) => item.workspace_patient_id === selected))
@@ -118,7 +106,7 @@ function AppointmentBookingForm() {
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!enabled || saving || locked || appointmentWriteLocked()) return;
+    if (!enabled || saving) return;
     if (
       !candidates.some((item) => item.workspace_patient_id === selected) ||
       !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
@@ -142,15 +130,21 @@ function AppointmentBookingForm() {
       setTime("");
       setSelected("");
       setOpen(false);
-      void queryClient.invalidateQueries({ queryKey: ["live-appointments"] });
     } catch (error) {
+      // A deterministic refusal is a known failure; anything else (lost,
+      // unreadable) is an unknown outcome. Nothing is retried automatically.
       setFailure(
         error instanceof NativeAppointmentWriteError ? error.code : "uncertain",
       );
-    } finally {
-      refreshLock();
-      setSaving(false);
     }
+    // Best-effort refresh only: it is not a reconciliation guarantee, and an
+    // unknown outcome still requires the reader to check current records.
+    try {
+      await queryClient.invalidateQueries({ queryKey: ["live-appointments"] });
+    } catch {
+      // A failed refresh leaves reconciliation to the reader's next view.
+    }
+    setSaving(false);
   }
 
   return (
@@ -171,18 +165,11 @@ function AppointmentBookingForm() {
         <WriteGate capability="write.appointment.book">
           <Button
             variant="secondary"
-            disabled={
-              locked ||
-              appointments.isPending ||
-              directory.isPending ||
-              candidates.length === 0
-            }
+            disabled={directory.isPending || candidates.length === 0}
             disabledReason={
-              locked
-                ? t("appointmentWrite.locked")
-                : candidates.length === 0
-                  ? t("appointmentWrite.noPatients")
-                  : undefined
+              candidates.length === 0
+                ? t("appointmentWrite.noPatients")
+                : undefined
             }
             onClick={() => setOpen(true)}
           >
@@ -195,17 +182,12 @@ function AppointmentBookingForm() {
           {t("appointmentWrite.booked", { reference: booked })}
         </p>
       )}
-      {locked && (
-        <p role="alert" className="appointment-write-alert">
-          {t("appointmentWrite.locked")}
-        </p>
-      )}
-      {!open && (appointments.isError || directory.isError) && (
+      {!open && directory.isError && (
         <p role="alert" className="appointment-write-alert">
           {t("errors.UPSTREAM_UNAVAILABLE")}
         </p>
       )}
-      {failure !== null && failure !== "uncertain" && (
+      {failure !== null && (
         <p role="alert" className="appointment-write-alert">
           {t(messageKey(failure))}
         </p>
@@ -213,12 +195,9 @@ function AppointmentBookingForm() {
       {open && enabled && (
         <form className="appointment-write-form" onSubmit={(event) => void submit(event)} noValidate>
           <p>{t("appointmentWrite.patientRestriction")}</p>
-          {directory.isError || appointments.isError ? (
+          {directory.isError ? (
             <StatePanel kind="error" title={t("errors.UPSTREAM_UNAVAILABLE")} />
-          ) : directory.isPending ||
-            appointments.isPending ||
-            !directory.isFetchedAfterMount ||
-            !appointments.isFetchedAfterMount ? (
+          ) : directory.isPending || !directory.isFetchedAfterMount ? (
             <StatePanel kind="loading" title={t("common.loading")} />
           ) : candidates.length === 0 ? (
             <p role="status">{t("appointmentWrite.noPatients")}</p>
@@ -268,12 +247,7 @@ function AppointmentBookingForm() {
           <div className="appointment-write-actions">
             <Button
               type="submit"
-              disabled={
-                locked ||
-                saving ||
-                candidates.length === 0
-              }
-              disabledReason={locked ? t("appointmentWrite.locked") : undefined}
+              disabled={saving || candidates.length === 0}
             >
               {saving
                 ? t("appointmentWrite.saving")

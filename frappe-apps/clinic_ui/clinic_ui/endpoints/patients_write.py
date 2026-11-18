@@ -1,38 +1,37 @@
-"""Local synthetic Patient create/edit orchestration.
+"""Local synthetic Patient create/edit orchestration (converted lane).
+
+This is the converted development lane: it relies on Frappe/Marley document
+permissions, validation, controller lifecycle and native transactions instead
+of the historical operation fence, deployment marker, write budget and
+acknowledgement barrier. Unresolved entries in that historical ledger are never
+read, changed or used to block a converted write.
 
 Order is fixed and test-asserted:
 
 1. shared read gate (no-store, session, site configuration, clinic role),
 2. explicit same-session CSRF token check (ignores framework bypasses),
-3. separate default-off native-write capability for the approved site,
-4. private deployment marker bound to the fence store,
-5. strict body validation,
-6. native Patient create/write authority **before** any fence or alias access,
-7. live Gender check and healthcare side-effect/target checks,
-8. create-only: construct the Patient, apply controller defaults, and reject
+3. default-off native-write capability for the exact approved site,
+4. strict body validation,
+5. native Patient create/write authority,
+6. live Gender check and healthcare side-effect/target checks,
+7. create-only: construct the Patient, apply controller defaults, and reject
    any customer/contact/address/email/phone/user/invite trigger before insert,
-9. persistent operation fence (site-wide unresolved block),
-10. native ``Patient`` insert/save with no ``ignore_permissions``,
-11. the terminal receipt encoded while the native transaction is still
-    uncommitted, so a receipt refusal (an invalid alias or native id) is
-    deterministic and ends ``UNKNOWN`` with no commit,
-12. one explicit site DB commit, then the terminal receipt appended to the
-    fence,
-13. success DTO construction; if it fails after the committed terminal, write a
-    durable site-wide manual-investigation latch under the same fence.
+8. native ``Patient`` insert/save with no ``ignore_permissions``,
+9. one explicit site DB commit,
+10. the canonical ``{"status", "patient"}`` result, read back under the
+    current user's native read authority.
 
-A post-dispatch failure of any kind is uncertain: the key stays locked and the
-response is ``409 {"code": "WRITE_LOCKED"}``. There is no automatic retry, no
-inferred no-commit and no success claim after a failed receipt. The endpoint
-rolls back the partial transaction; a rollback failure raises
-``RollbackFailed`` instead of returning a normal error. A commit that may have
-landed without its terminal append is uncertain, not retryable. A post-commit
-success construction failure latches the whole deployment; if neither latch nor
-its fallback can be recorded, ``ManualInvestigationRequired`` is raised to
-Frappe cleanup rather than returning a normal response.
+A post-dispatch failure of any kind is uncertain: the endpoint rolls back the
+partial transaction (a rollback failure raises ``RollbackFailed`` so Frappe
+cleanup handles it) and returns ``409 {"code": "WRITE_UNCERTAIN"}``. Nothing
+after a native save or insert is ever reported as no-change, because a rollback
+cannot establish that a controller hook caused no external side effect. The one
+definite pre-dispatch refusal recognised is the framework's own permission type
+during create preparation, which returns 403. The endpoint never retries
+automatically and never claims success it has not read back.
 """
 
-from clinic_ui.core import dto, patient_alias, patient_write
+from clinic_ui.core import dto, patient_write
 from clinic_ui.core.policy import PATIENT_WRITE_ROLE_CODES
 from clinic_ui.endpoints import aliases, common
 
@@ -41,40 +40,25 @@ HTTP_UNPROCESSABLE = 422
 HTTP_CONFLICT = 409
 
 VALIDATION_CODE = "VALIDATION"
-LOCKED_CODE = "WRITE_LOCKED"
-CONFLICT_CODE = "OPERATION_CONFLICT"
 STALE_CODE = "STALE_VERSION"
+UNCERTAIN_CODE = "WRITE_UNCERTAIN"
 
 
 def _respond_error(gateway, status, code):
     return gateway.respond_write(status, {"code": code})
 
 
-def _mark_unknown(claim, reason):
-    """Append an UNKNOWN terminal when possible; never raise from this helper."""
-
-    try:
-        claim.unknown(reason)
-    except Exception:
-        return
-
-
 class RollbackFailed(RuntimeError):
-    """The failed write could not be rolled back; the request must fail loudly.
+    """The failed native write could not be rolled back; fail loudly.
 
-    Returning a normal 409 would let Frappe's end-of-request commit for an
+    Returning a normal response would let Frappe's end-of-request commit for an
     unsafe method persist a partial native write. The caller propagates this to
-    Frappe cleanup instead; the fence key stays ``UNKNOWN``/``DISPATCHED``.
+    Frappe cleanup instead.
     """
 
 
 def _rollback_or_raise(gateway):
-    """Discard the partial transaction; a rollback failure must escape.
-
-    Do not swallow this: a normal error response could trigger Frappe's implicit
-    request-end commit. The caller has already marked the operation ``UNKNOWN``,
-    so the lock is retained even when rollback itself fails.
-    """
+    """Discard the partial transaction; a rollback failure must escape."""
 
     try:
         gateway.rollback()
@@ -84,57 +68,44 @@ def _rollback_or_raise(gateway):
         ) from exc
 
 
-class SuccessUncertain(Exception):
-    """The native write committed but the success response could not be built."""
+def _permission_denial(gateway, exc):
+    """True only for a definite refusal raised before any native mutation.
 
-
-class ManualInvestigationRequired(RuntimeError):
-    """Both the site latch and the operation fallback could not be persisted.
-
-    Raised to Frappe cleanup instead of returning a response that could be
-    mistaken for success or a retryable conflict. The write is already
-    committed; an operator must inspect the deployment.
+    Only the create-preparation step uses this: it constructs the document and
+    applies controller defaults without touching the database. The runtime
+    adapter owns the framework-identity check
+    (``Gateway.is_native_permission_denial``), so a class that merely shares
+    the name is not accepted. When the adapter cannot answer, the caller does
+    not claim a denial.
     """
 
+    try:
+        check = getattr(gateway, "is_native_permission_denial", None)
+        if not callable(check):
+            return False
+        return check(exc) is True
+    except Exception:
+        return False
 
-def _success(gateway, status, alias, native_patient_id, ack_token):
-    """Build the success response; any failure is post-commit uncertainty."""
+
+def _success(gateway, status, workspace_patient_id, native_patient_id):
+    """Read the committed record back and build the canonical result."""
 
     try:
         detail = gateway.native_patient_view(native_patient_id)
         if detail is None:
             raise ValueError("native detail is missing after commit")
-        payload = dto.patient_write_result(status, alias, detail, ack_token)
-        gateway.strip_message_channels()
-        return gateway.respond_write(HTTP_OK, payload)
-    except Exception as exc:
-        raise SuccessUncertain() from exc
-
-
-def _latch_or_raise(gateway, actor, kind, operation_key, reason):
-    """Persist a site-wide latch; fall back to marking the operation UNKNOWN.
-
-    The reserved latch is the primary durable block. If it cannot be written,
-    a derived reserved latch key is written under the same lock, which also
-    makes the deployment-wide unresolved check block every new key. If both
-    records fail, raise to Frappe cleanup: no success is returned.
-    """
-
-    try:
-        gateway.latch_manual_investigation(reason)
-        return
+        payload = dto.patient_write_result(status, workspace_patient_id, detail)
     except Exception:
-        try:
-            gateway.latch_operation_uncertain(
-                actor, kind, operation_key, reason
-            )
-            return
-        except Exception as exc:
-            raise ManualInvestigationRequired(reason) from exc
+        # The native write already committed; its outcome is not established.
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
+
+    gateway.strip_message_channels()
+    return gateway.respond_write(HTTP_OK, payload)
 
 
 def create(gateway, body, csrf_token=None):
-    settings, view, _role = common.authorize_write(
+    _settings, _view, _role = common.authorize_patient_write(
         gateway, PATIENT_WRITE_ROLE_CODES, csrf_token
     )
 
@@ -143,7 +114,6 @@ def create(gateway, body, csrf_token=None):
     except patient_write.WriteInputError:
         return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
 
-    actor = view.user
     if not gateway.native_patient_can_create():
         gateway.deny()
     if not gateway.native_gender_exists(payload["fields"]["sex"]):
@@ -155,80 +125,36 @@ def create(gateway, body, csrf_token=None):
         prepared = gateway.prepare_native_patient_create(payload["fields"])
     except patient_write.UnsafeSideEffect:
         gateway.deny()
+    except Exception as exc:
+        # Preparation performs no native mutation, so the framework's own
+        # permission refusal is a definite 403. Any other failure keeps its
+        # existing pre-mutation failure rather than being reported as a write.
+        if _permission_denial(gateway, exc):
+            gateway.deny()
+        raise
 
     try:
-        alias = patient_alias.build_alias(
-            settings.epoch_secret,
-            gateway.site,
-            actor,
-            payload["operation_key"],
-        )
-        digest = patient_write.operation_digest(settings.epoch_secret, payload)
-    except (patient_alias.AliasError, patient_write.WriteInputError):
-        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
-
-    if any(alias == allowed for allowed, _native in settings.allowlist):
-        return _respond_error(gateway, HTTP_CONFLICT, CONFLICT_CODE)
-
-    native_patient_id = None
-    try:
-        with gateway.patient_write_fence(
-            actor, "create", payload["operation_key"], digest
-        ) as claim:
-            try:
-                native_patient_id = gateway.insert_native_patient(prepared)
-                receipt = patient_write.encode_receipt(
-                    kind="create",
-                    alias=alias,
-                    native_patient_id=native_patient_id,
-                )
-                gateway.commit()
-                claim.commit(receipt)
-            except (
-                patient_write.WriteLocked,
-                patient_write.WriteConflict,
-                patient_write.StoreUnavailable,
-                patient_write.StaleVersion,
-                patient_write.WriteUncertain,
-            ):
-                _rollback_or_raise(gateway)
-                raise
-            except Exception:
-                _mark_unknown(claim, "native Patient create outcome not established")
-                _rollback_or_raise(gateway)
-                raise patient_write.WriteUncertain() from None
-    except patient_write.WriteLocked:
-        return _respond_error(gateway, HTTP_CONFLICT, LOCKED_CODE)
-    except patient_write.WriteConflict:
-        return _respond_error(gateway, HTTP_CONFLICT, CONFLICT_CODE)
-    except patient_write.StoreUnavailable:
-        return _respond_error(gateway, HTTP_CONFLICT, LOCKED_CODE)
-    except patient_write.WriteUncertain:
-        return _respond_error(gateway, HTTP_CONFLICT, LOCKED_CODE)
+        native_patient_id = gateway.insert_native_patient(prepared)
+    except patient_write.UnsafeSideEffect:
+        _rollback_or_raise(gateway)
+        gateway.deny()
+    except Exception:
+        # The insert may have reached the controller; never claim no change.
+        _rollback_or_raise(gateway)
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
 
     try:
-        ack_token = patient_write.ack_token(
-            settings.epoch_secret,
-            gateway.site,
-            actor,
-            "create",
-            payload["operation_key"],
-            receipt,
-        )
-        return _success(gateway, "created", alias, native_patient_id, ack_token)
-    except (SuccessUncertain, patient_write.WriteInputError):
-        _latch_or_raise(
-            gateway,
-            actor,
-            "create",
-            payload["operation_key"],
-            "post-commit create response construction failed",
-        )
-        return _respond_error(gateway, HTTP_CONFLICT, LOCKED_CODE)
+        gateway.commit()
+    except Exception:
+        _rollback_or_raise(gateway)
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
+
+    # A newly created synthetic patient is addressed by its native docname.
+    return _success(gateway, "created", native_patient_id, native_patient_id)
 
 
 def update(gateway, body, csrf_token=None):
-    settings, view, _role = common.authorize_write(
+    settings, view, _role = common.authorize_patient_write(
         gateway, PATIENT_WRITE_ROLE_CODES, csrf_token
     )
 
@@ -237,24 +163,20 @@ def update(gateway, body, csrf_token=None):
     except patient_write.WriteInputError:
         return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
 
-    actor = view.user
     if not gateway.native_patient_can_write():
         gateway.deny()
 
-    try:
-        native_patient_id = aliases.resolve(
-            gateway, settings, actor, payload["workspace_patient_id"]
-        )
-    except (
-        patient_write.WriteLocked,
-        patient_write.WriteConflict,
-        patient_write.StoreUnavailable,
-        patient_write.WriteUncertain,
-    ):
-        return _respond_error(gateway, HTTP_CONFLICT, LOCKED_CODE)
+    native_patient_id = aliases.resolve(
+        gateway, settings, view.user, payload["workspace_patient_id"]
+    )
 
     if not gateway.native_patient_can_write(native_patient_id):
         gateway.deny()
+    if "sex" in payload["fields"] and not gateway.native_gender_exists(
+        payload["fields"]["sex"]
+    ):
+        # Same pre-mutation refusal as create: never a post-dispatch 409.
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
     if gateway.healthcare_settings_side_effects_unsafe():
         gateway.deny()
     if gateway.native_patient_target_unsafe(native_patient_id):
@@ -269,111 +191,29 @@ def update(gateway, body, csrf_token=None):
         return _respond_error(gateway, HTTP_CONFLICT, STALE_CODE)
 
     try:
-        digest = patient_write.operation_digest(settings.epoch_secret, payload)
-    except patient_write.WriteInputError:
-        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
-
-    try:
-        with gateway.patient_write_fence(
-            actor, "update", payload["operation_key"], digest
-        ) as claim:
-            try:
-                gateway.native_patient_update(
-                    native_patient_id,
-                    payload["fields"],
-                    payload["base_modified"],
-                )
-                receipt = patient_write.encode_receipt(
-                    kind="update",
-                    alias=payload["workspace_patient_id"],
-                    native_patient_id=native_patient_id,
-                )
-                gateway.commit()
-                claim.commit(receipt)
-            except patient_write.StaleVersion:
-                _mark_unknown(claim, "stale version at commit")
-                _rollback_or_raise(gateway)
-                raise patient_write.WriteUncertain() from None
-            except (
-                patient_write.WriteLocked,
-                patient_write.WriteConflict,
-                patient_write.StoreUnavailable,
-                patient_write.WriteUncertain,
-            ):
-                _rollback_or_raise(gateway)
-                raise
-            except Exception:
-                _mark_unknown(claim, "native Patient update outcome not established")
-                _rollback_or_raise(gateway)
-                raise patient_write.WriteUncertain() from None
-    except patient_write.WriteLocked:
-        return _respond_error(gateway, HTTP_CONFLICT, LOCKED_CODE)
-    except patient_write.WriteConflict:
-        return _respond_error(gateway, HTTP_CONFLICT, CONFLICT_CODE)
-    except patient_write.StoreUnavailable:
-        return _respond_error(gateway, HTTP_CONFLICT, LOCKED_CODE)
-    except patient_write.WriteUncertain:
-        return _respond_error(gateway, HTTP_CONFLICT, LOCKED_CODE)
-
-    try:
-        ack_token = patient_write.ack_token(
-            settings.epoch_secret,
-            gateway.site,
-            actor,
-            "update",
-            payload["operation_key"],
-            receipt,
-        )
-        return _success(
-            gateway,
-            "updated",
-            payload["workspace_patient_id"],
+        gateway.native_patient_update(
             native_patient_id,
-            ack_token,
+            payload["fields"],
+            payload["base_modified"],
         )
-    except (SuccessUncertain, patient_write.WriteInputError):
-        _latch_or_raise(
-            gateway,
-            actor,
-            "update",
-            payload["operation_key"],
-            "post-commit update response construction failed",
-        )
-        return _respond_error(gateway, HTTP_CONFLICT, LOCKED_CODE)
+    except patient_write.StaleVersion:
+        # Raised under the row lock before any field is applied.
+        _rollback_or_raise(gateway)
+        return _respond_error(gateway, HTTP_CONFLICT, STALE_CODE)
+    except Exception:
+        # The update may already have reached ``doc.save`` and its hooks. A
+        # rollback discards the site transaction but cannot establish that no
+        # external side effect happened, so every failure here stays uncertain.
+        _rollback_or_raise(gateway)
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
 
+    try:
+        gateway.commit()
+    except Exception:
+        # The native write was dispatched; the commit outcome is unknown.
+        _rollback_or_raise(gateway)
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
 
-def ack(gateway, body, csrf_token=None):
-    """Explicitly acknowledge confirmed success and release the write barrier.
-
-    The actor comes from the session, and the token is verified against the
-    durable committed receipt for that actor/kind/key. A missing, malformed,
-    wrong-actor or non-committed acknowledgement returns ``409 WRITE_LOCKED``
-    and leaves the barrier in place. This endpoint never retries itself.
-    """
-
-    settings, view, _role = common.authorize_write(
-        gateway, PATIENT_WRITE_ROLE_CODES, csrf_token
+    return _success(
+        gateway, "updated", payload["workspace_patient_id"], native_patient_id
     )
-
-    try:
-        payload = patient_write.validate_ack(body)
-    except patient_write.WriteInputError:
-        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
-
-    try:
-        status = gateway.acknowledge_write(
-            settings.epoch_secret,
-            view.user,
-            payload["kind"],
-            payload["operation_key"],
-            payload["ack_token"],
-        )
-    except (
-        patient_write.StoreUnavailable,
-        patient_write.WriteUncertain,
-    ):
-        return _respond_error(gateway, HTTP_CONFLICT, LOCKED_CODE)
-
-    if status in ("acked", "already"):
-        return gateway.respond_write(HTTP_OK, {"acknowledged": True})
-    return _respond_error(gateway, HTTP_CONFLICT, LOCKED_CODE)

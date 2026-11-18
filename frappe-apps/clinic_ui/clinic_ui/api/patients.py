@@ -1,11 +1,16 @@
 """Patient read and local synthetic write methods.
 
-``GET /api/method/clinic_ui.api.patients.view`` reads one allowlisted detail.
-``POST /api/method/clinic_ui.api.patients.create``, ``...update`` and ``...ack``
-are the separate, default-off local experiment. Frappe performs the POST CSRF
-check before any write or ack method runs, and the endpoint repeats an explicit
-same-session token check that does not honour ``ignore_csrf`` or an allowed
-referrer. This module never sets ``ignore_csrf``.
+``GET /api/method/clinic_ui.api.patients.view`` reads one record: a static
+workspace alias, a historical sealed alias or a native ``Patient`` docname the
+current user may read.
+
+``POST /api/method/clinic_ui.api.patients.create`` and ``...update`` are the
+converted development write lane. They rely on Frappe/Marley permissions,
+validation and transactions; there is no operation fence, acknowledgement or
+deployment marker. Frappe performs the POST CSRF check before the method runs,
+and the endpoint repeats an explicit same-session token check that does not
+honour ``ignore_csrf`` or an allowed referrer. This module never sets
+``ignore_csrf``.
 
 Frappe wraps every returned mapping as ``{"message": ...}``.
 """
@@ -64,12 +69,5 @@ def create(**form):
 @frappe.whitelist(methods=["POST"])
 def update(**form):
     return patients_write_endpoint.update(
-        Gateway(), _body(form), _csrf_token(form)
-    )
-
-
-@frappe.whitelist(methods=["POST"])
-def ack(**form):
-    return patients_write_endpoint.ack(
         Gateway(), _body(form), _csrf_token(form)
     )

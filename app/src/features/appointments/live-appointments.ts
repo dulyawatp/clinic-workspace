@@ -2,7 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { useSession } from "../../app/SessionProvider";
 import type { AppError } from "../../domain/errors";
 import { mapHttpError } from "../../transport/error-map";
-import { fetchNativeAppointmentsBody } from "../../transport/native/appointment";
+import {
+  fetchNativeAppointmentsBody,
+  readNativeAppointmentItem,
+} from "../../transport/native/appointment";
 import { nativeTransportEnabled } from "../../transport/native/flag";
 import { assertLegacyRoute } from "../../transport/native/legacy";
 
@@ -14,42 +17,10 @@ export interface LiveAppointment {
   status: string;
 }
 
-const APPOINTMENT_KEYS = [
-  "workspace_patient_id",
-  "appointment_id",
-  "appointment_date",
-  "appointment_time",
-  "status",
-] as const;
-
 const unavailable = (): AppError => ({
   code: "UPSTREAM_UNAVAILABLE",
   retryable: true,
 });
-const safeId = (value: unknown): value is string =>
-  typeof value === "string" &&
-  value.trim() === value &&
-  value.length > 0 &&
-  value.length <= 256 &&
-  ![...value].some((char) => {
-    const code = char.charCodeAt(0);
-    return code < 32 || code === 127;
-  });
-
-function validDate(value: unknown): value is string {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value))
-    return false;
-  const [year, month, day] = value.split("-").map(Number);
-  if (year === undefined || month === undefined || day === undefined)
-    return false;
-  const date = new Date(0);
-  date.setUTCFullYear(year, month - 1, day);
-  return (
-    date.getUTCFullYear() === year &&
-    date.getUTCMonth() === month - 1 &&
-    date.getUTCDate() === day
-  );
-}
 
 async function fetchProxyAppointmentsBody(
   signal: AbortSignal,
@@ -77,9 +48,9 @@ async function fetchProxyAppointmentsBody(
 }
 
 /**
- * Accepts exactly the five existing live-contract fields. A native row that
- * carries any extra field (such as a native patient id) is refused, so the
- * transport can never widen what the server was reviewed to publish.
+ * Accepts the canonical native fields and the historical workspace aliases.
+ * Unknown extra fields are ignored, and the duplicate-reference check keeps the
+ * one-row-per-appointment contract.
  */
 function parseLiveAppointments(body: unknown): LiveAppointment[] {
   if (
@@ -92,30 +63,10 @@ function parseLiveAppointments(body: unknown): LiveAppointment[] {
     throw unavailable();
   const seen = new Set<string>();
   return body.items.map((item: unknown) => {
-    if (!item || typeof item !== "object" || Array.isArray(item))
-      throw unavailable();
-    const row = item as Record<string, unknown>;
-    if (
-      Object.keys(row).length !== APPOINTMENT_KEYS.length ||
-      !APPOINTMENT_KEYS.every((key) => Object.hasOwn(row, key)) ||
-      !safeId(row.workspace_patient_id) ||
-      !safeId(row.appointment_id) ||
-      !validDate(row.appointment_date) ||
-      typeof row.appointment_time !== "string" ||
-      !/^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(row.appointment_time) ||
-      typeof row.status !== "string" ||
-      !/^[A-Za-z][A-Za-z0-9 _-]{0,63}$/.test(row.status) ||
-      seen.has(row.appointment_id)
-    )
-      throw unavailable();
+    const row = readNativeAppointmentItem(item);
+    if (seen.has(row.appointment_id)) throw unavailable();
     seen.add(row.appointment_id);
-    return {
-      workspace_patient_id: row.workspace_patient_id,
-      appointment_id: row.appointment_id,
-      appointment_date: row.appointment_date,
-      appointment_time: row.appointment_time,
-      status: row.status,
-    };
+    return row;
   });
 }
 

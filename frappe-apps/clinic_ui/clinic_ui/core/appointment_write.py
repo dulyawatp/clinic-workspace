@@ -488,12 +488,21 @@ def _appointment_time(value):
 
 def _workspace_id(value):
     text = _require_text(value, "workspace_appointment_id", MAX_WORKSPACE_ID_LENGTH)
-    # Only a server-derived appointment alias can name a writable record. A
-    # configured workspace id or a native docname is refused here, before any
-    # resolution attempt, so the static read allowlist never becomes writable.
-    if ALIAS_RE.fullmatch(text) is None:
-        raise AppointmentWriteError("workspace_appointment_id is invalid")
+    # The converted lane addresses a new appointment by its native docname and a
+    # historical one by its sealed alias. Resolution, not this shape check,
+    # decides authority: the static read allowlist and its fixtures are refused
+    # in the endpoint before any native call.
     return text
+
+
+def is_alias_shaped(value):
+    """True when the value has the sealed appointment-alias shape.
+
+    Used only to keep an alias-shaped value from being reinterpreted as a
+    native ``Patient Appointment`` docname. Shape alone is never authority.
+    """
+
+    return isinstance(value, str) and ALIAS_RE.fullmatch(value) is not None
 
 
 def _base_modified(value):
@@ -504,14 +513,19 @@ def _base_modified(value):
 
 
 def validate_book(body):
-    """Return the normalized booking payload or raise ``AppointmentWriteError``."""
+    """Return the normalized booking payload or raise ``AppointmentWriteError``.
+
+    ``operation_key`` is accepted for transport compatibility with the
+    historical fenced lane but carries no authority and is not required: the
+    converted lane uses native permissions, validation and transactions.
+    """
+
     body = _require_mapping(body, BOOK_KEYS)
-    for key in BOOK_KEYS:
-        if key not in body:
-            raise AppointmentWriteError(f"missing field {key}")
-    return {
+    required = frozenset({"workspace_patient_id", "appointment_date", "appointment_time"})
+    if required - set(body):
+        raise AppointmentWriteError("missing field")
+    payload = {
         "kind": "book",
-        "operation_key": require_operation_key(body["operation_key"]),
         "workspace_patient_id": _require_text(
             body["workspace_patient_id"], "workspace_patient_id", MAX_WORKSPACE_ID_LENGTH
         ),
@@ -520,17 +534,27 @@ def validate_book(body):
             "appointment_time": _appointment_time(body["appointment_time"]),
         },
     }
+    if "operation_key" in body:
+        payload["operation_key"] = require_operation_key(body["operation_key"])
+    return payload
 
 
 def validate_reschedule(body):
     """Return the normalized reschedule payload (date and time only)."""
+
     body = _require_mapping(body, RESCHEDULE_KEYS)
-    for key in RESCHEDULE_KEYS:
-        if key not in body:
-            raise AppointmentWriteError(f"missing field {key}")
-    return {
+    required = frozenset(
+        {
+            "workspace_appointment_id",
+            "base_modified",
+            "appointment_date",
+            "appointment_time",
+        }
+    )
+    if required - set(body):
+        raise AppointmentWriteError("missing field")
+    payload = {
         "kind": "reschedule",
-        "operation_key": require_operation_key(body["operation_key"]),
         "workspace_appointment_id": _workspace_id(body["workspace_appointment_id"]),
         "base_modified": _base_modified(body["base_modified"]),
         "fields": {
@@ -538,30 +562,37 @@ def validate_reschedule(body):
             "appointment_time": _appointment_time(body["appointment_time"]),
         },
     }
+    if "operation_key" in body:
+        payload["operation_key"] = require_operation_key(body["operation_key"])
+    return payload
 
 
 def validate_checkin(body):
     """Return the normalized same-day check-in payload (no mutable fields)."""
+
     body = _require_mapping(body, CHECKIN_KEYS)
-    for key in CHECKIN_KEYS:
-        if key not in body:
-            raise AppointmentWriteError(f"missing field {key}")
-    return {
+    required = frozenset({"workspace_appointment_id", "base_modified"})
+    if required - set(body):
+        raise AppointmentWriteError("missing field")
+    payload = {
         "kind": "checkin",
-        "operation_key": require_operation_key(body["operation_key"]),
         "workspace_appointment_id": _workspace_id(body["workspace_appointment_id"]),
         "base_modified": _base_modified(body["base_modified"]),
         "fields": {},
     }
+    if "operation_key" in body:
+        payload["operation_key"] = require_operation_key(body["operation_key"])
+    return payload
 
 
 # -- cancel and manual no-show bodies --------------------------------------
 #
-# Both transitions name the target through the server-derived workspace alias
-# and carry the operator's reason. The patient is the workspace patient the
-# caller claims; the endpoint proves it equals the resolved appointment's
-# allowlisted patient before any fence claim. Status, notes preimage, native
-# identifiers and timestamps are server-owned and refused from the client.
+# Both transitions name the target through a historical sealed alias or the
+# native docname returned by booking, and carry the operator's reason. The
+# patient is the patient identifier the caller names; the endpoint proves it
+# resolves to the same native patient as the target before any native write.
+# Status, notes preimage, native identifiers and timestamps are server-owned and
+# refused from the client.
 
 CANCEL_KEYS = frozenset({"patient", "appointment_id", "operation_key", "reason"})
 
@@ -575,18 +606,20 @@ def _reason(value):
 
 def _cancel_payload(body, kind):
     body = _require_mapping(body, CANCEL_KEYS)
-    for key in CANCEL_KEYS:
-        if key not in body:
-            raise AppointmentWriteError(f"missing field {key}")
-    return {
+    required = frozenset({"patient", "appointment_id", "reason"})
+    if required - set(body):
+        raise AppointmentWriteError("missing field")
+    payload = {
         "kind": kind,
-        "operation_key": require_operation_key(body["operation_key"]),
         "workspace_patient_id": _require_text(
             body["patient"], "patient", MAX_WORKSPACE_ID_LENGTH
         ),
         "workspace_appointment_id": _workspace_id(body["appointment_id"]),
         "reason": _reason(body["reason"]),
     }
+    if "operation_key" in body:
+        payload["operation_key"] = require_operation_key(body["operation_key"])
+    return payload
 
 
 def validate_cancel(body):

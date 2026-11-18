@@ -37,23 +37,20 @@ from clinic_ui.core.policy import (
 from clinic_ui.endpoints import common
 
 def _patient_write_flags(gateway, settings, role):
-    """Return ``(create, update)`` after the full reviewed local write gate.
+    """Return ``(create, update)`` after the converted native write gate.
 
-    All conditions must pass: the exact-site write configuration, the private
-    deployment marker, a safely initialized fence store, Healthcare Settings
-    without automatic side effects, and the caller's native Patient permission.
-    Any false result, non-boolean result or raised error fails both capabilities
-    closed. No patient record is read.
+    The converted development lane relies on Frappe/Marley permissions instead
+    of the historical deployment marker and persistent fence readiness. All
+    remaining conditions must pass: the exact-site write configuration,
+    Healthcare Settings without automatic side effects, and the caller's native
+    Patient permission. Any false result, non-boolean result or raised error
+    fails both capabilities closed. No patient record is read.
     """
 
     if role not in PATIENT_WRITE_ROLE_CODES:
         return False, False
     try:
         if not settings.write_enabled:
-            return False, False
-        if gateway.write_deployment_approved() is not True:
-            return False, False
-        if gateway.write_fence_ready() is not True:
             return False, False
         if gateway.healthcare_settings_side_effects_unsafe() is not False:
             return False, False
@@ -68,11 +65,11 @@ def _patient_write_flags(gateway, settings, role):
 def _appointment_write_flags(gateway, settings, role):
     """Return ``(book, reschedule, cancel, no_show, checkin)`` after the gate.
 
-    The gate is independent of the patient write flag: the exact approved site,
-    the appointment flag, the private deployment marker, a ready fence store,
-    safe appointment settings and the caller's own native Patient Appointment
-    and linked-doctype reads. Per-record targets and budgets are decided by the
-    write endpoints; these flags only advertise that the surface exists.
+    The gate is independent of the patient write flag and of the historical
+    deployment marker and fence store. It requires the exact approved site, the
+    appointment flag, safe appointment settings and the caller's own native
+    Patient Appointment and linked-doctype reads. Per-record targets are decided
+    by the write endpoints; these flags only advertise that the surface exists.
     """
 
     disabled = (False, False, False, False, False)
@@ -88,10 +85,6 @@ def _appointment_write_flags(gateway, settings, role):
         if settings.appointment_type is None:
             return disabled
         if settings.appointment_company is None:
-            return disabled
-        if gateway.write_deployment_approved() is not True:
-            return disabled
-        if gateway.write_fence_ready() is not True:
             return disabled
         if gateway.healthcare_appointment_side_effects_unsafe() is not False:
             return disabled

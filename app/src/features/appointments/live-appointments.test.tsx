@@ -130,7 +130,7 @@ it("reconciles an expired session behind a pre-whitelist 403", async () => {
   expect(proxy).not.toHaveBeenCalled();
 });
 
-it("fails closed on a native row with an extra patient identifier", async () => {
+it("rejects a row with an unexpected native identifier field", async () => {
   vi.stubEnv("VITE_CLINIC_NATIVE", "1");
   server.use(
     http.get(NATIVE_BOOTSTRAP, () =>
@@ -148,4 +148,40 @@ it("fails closed on a native row with an extra patient identifier", async () => 
   expect(await screen.findByRole("alert")).toBeVisible();
   expect(screen.queryByText("native-1")).toBeNull();
   expect(screen.queryByRole("table")).toBeNull();
+});
+
+it("accepts native identifier values in the canonical fields", async () => {
+  vi.stubEnv("VITE_CLINIC_NATIVE", "1");
+  server.use(
+    http.get(NATIVE_BOOTSTRAP, () =>
+      HttpResponse.json({ message: nativeSession() }),
+    ),
+    http.get(NATIVE_APPOINTMENTS, () =>
+      HttpResponse.json({
+        message: {
+          items: [
+            {
+              workspace_patient_id: "patient-native",
+              appointment_id: "appt-native",
+              appointment_date: "2026-11-20",
+              appointment_time: "09:30:00",
+              status: "Open",
+            },
+          ],
+        },
+      }),
+    ),
+  );
+
+  renderWithFixtures(<CalendarPage />, { role: "REC", sessionMode: "live" });
+
+  const table = await screen.findByRole("table");
+  for (const value of [
+    "appt-native",
+    "patient-native",
+    "2026-11-20",
+    "09:30:00",
+    "Open",
+  ])
+    expect(within(table).getByText(value)).toBeVisible();
 });

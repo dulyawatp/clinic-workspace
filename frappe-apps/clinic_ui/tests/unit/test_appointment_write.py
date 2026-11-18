@@ -434,14 +434,14 @@ class CancelBodyTests(unittest.TestCase):
         with self.assertRaises(AppointmentWriteError):
             appointment_write.validate_cancel(body)
 
-    def test_appointment_id_must_be_a_server_derived_alias(self):
-        for value in (
-            "APPT-1",
-            "NATIVE-APPT-1",
-            "wsa1_short",
-            "",
-            None,
-        ):
+    def test_appointment_id_accepts_an_alias_or_a_native_docname(self):
+        for value in ("wsa1_short", "APPT-1", "NATIVE-APPT-1"):
+            with self.subTest(value=str(value)[:16]):
+                payload = appointment_write.validate_cancel(
+                    dict(CANCEL_BODY, appointment_id=value)
+                )
+                self.assertEqual(payload["workspace_appointment_id"], value)
+        for value in ("", None, " APPT-1", "x" * 193):
             with self.subTest(value=str(value)[:16]):
                 with self.assertRaises(AppointmentWriteError):
                     appointment_write.validate_cancel(
@@ -484,6 +484,12 @@ class BookBodyTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_the_legacy_operation_key_is_optional(self):
+        body = {k: v for k, v in BOOK_BODY.items() if k != "operation_key"}
+        payload = appointment_write.validate_book(body)
+        self.assertNotIn("operation_key", payload)
+        self.assertEqual(payload["workspace_patient_id"], "WS-1")
 
     def test_time_is_normalized_to_seconds(self):
         payload = appointment_write.validate_book(
@@ -559,13 +565,13 @@ class RescheduleBodyTests(unittest.TestCase):
                         dict(RESCHEDULE_BODY, **{key: "x"})
                     )
 
-    def test_rejects_malformed_base_version_and_alias(self):
+    def test_rejects_malformed_base_version_and_empty_target(self):
         for override in (
             {"base_modified": None},
             {"base_modified": "  "},
             {"base_modified": "yesterday"},
             {"workspace_appointment_id": ""},
-            {"workspace_appointment_id": "NATIVE-APPT-1"},
+            {"workspace_appointment_id": " APPT-1"},
         ):
             with self.subTest(override=override):
                 with self.assertRaises(AppointmentWriteError):

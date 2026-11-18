@@ -100,7 +100,7 @@ def suppress_api_tracebacks():
 # a fixed allowlist and only when the flag was set by server code in this
 # request; a client cannot set a flag on ``frappe.local``.
 WRITE_ERROR_CODES = frozenset(
-    {"WRITE_LOCKED", "OPERATION_CONFLICT", "STALE_VERSION"}
+    {"WRITE_LOCKED", "OPERATION_CONFLICT", "STALE_VERSION", "WRITE_UNCERTAIN"}
 )
 
 STATUS_CODES = {

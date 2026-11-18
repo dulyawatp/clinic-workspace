@@ -13,13 +13,11 @@ const BOOTSTRAP = "/api/method/clinic_ui.api.session.bootstrap";
 const LIST = "/api/method/clinic_ui.api.appointments.synthetic_appointments";
 const VIEW = "/api/method/clinic_ui.api.appointments.view";
 const DIRECTORY = "/api/method/clinic_ui.api.directory.synthetic_patients";
-const ACK = "/api/method/clinic_ui.api.appointments.ack";
 const BOOK = "/api/method/clinic_ui.api.appointments.book";
 const RESCHEDULE = "/api/method/clinic_ui.api.appointments.reschedule";
 const CHECKIN = "/api/method/clinic_ui.api.appointments.checkin";
 const CANCEL = "/api/method/clinic_ui.api.appointments_cancel_write.cancel";
 const NO_SHOW = "/api/method/clinic_ui.api.appointments_cancel_write.no_show";
-const TOKEN = "a".repeat(64);
 const ALIAS = "appointment-alias-1";
 
 const ROW = {
@@ -63,17 +61,7 @@ function serveBase(caps: Record<string, string>) {
 }
 
 function writeSuccess(status: string, appointment = DETAIL) {
-  return HttpResponse.json({
-    message: {
-      status,
-      ackToken: TOKEN,
-      appointment,
-    },
-  });
-}
-
-function acknowledge() {
-  return HttpResponse.json({ message: { acknowledged: true } });
+  return HttpResponse.json({ message: { status, appointment } });
 }
 
 beforeEach(() => {
@@ -100,21 +88,16 @@ it("shows the booking form only when the server enables booking", async () => {
   ).toBeVisible();
 });
 
-it("books a selected readable allowlisted patient and acknowledges once", async () => {
+it("books a selected readable patient without an acknowledgement", async () => {
   serveBase({
     "write.appointment.book": "enabled",
     "read.patient": "read_only",
   });
   const book = vi.fn();
-  const ack = vi.fn();
   server.use(
     http.post(BOOK, async ({ request }) => {
       book(await request.json());
       return writeSuccess("booked");
-    }),
-    http.post(ACK, async ({ request }) => {
-      ack(await request.json());
-      return acknowledge();
     }),
   );
   const user = userEvent.setup();
@@ -142,12 +125,34 @@ it("books a selected readable allowlisted patient and acknowledges once", async 
     appointment_date: "2026-11-25",
     appointment_time: "10:15",
   });
-  expect(ack).toHaveBeenCalledWith({
-    operation_key: expect.any(String),
-    kind: "book",
-    ack_token: TOKEN,
-  });
   expect(localStorage.length).toBe(0);
+});
+
+it("offers every readable directory patient, not only those with appointments", async () => {
+  serveBase({ "write.appointment.book": "enabled" });
+  server.use(
+    http.get(LIST, () => HttpResponse.json({ message: { items: [] } })),
+    http.get(DIRECTORY, () =>
+      HttpResponse.json({
+        message: {
+          items: [
+            { workspace_patient_id: "WS-1", display_name: "Patient One" },
+            { workspace_patient_id: "WS-2", display_name: "Patient Two" },
+          ],
+        },
+      }),
+    ),
+  );
+  const user = userEvent.setup();
+  renderWithFixtures(<ReceptionHomePage />);
+
+  const start = await screen.findByRole("button", {
+    name: "เริ่มจองนัดทดสอบ",
+  });
+  await waitFor(() => expect(start).toBeEnabled());
+  await user.click(start);
+  const patient = await screen.findByLabelText("ผู้ป่วย");
+  expect(within(patient).getByText(/Patient Two/)).toBeVisible();
 });
 
 it("reschedules a server-eligible appointment using the loaded version", async () => {
@@ -160,15 +165,10 @@ it("reschedules a server-eligible appointment using the loaded version", async (
     ),
   );
   const reschedule = vi.fn();
-  const ack = vi.fn();
   server.use(
     http.post(RESCHEDULE, async ({ request }) => {
       reschedule(await request.json());
       return writeSuccess("rescheduled");
-    }),
-    http.post(ACK, async ({ request }) => {
-      ack(await request.json());
-      return acknowledge();
     }),
   );
   const user = userEvent.setup();
@@ -199,14 +199,9 @@ it("reschedules a server-eligible appointment using the loaded version", async (
     appointment_date: "2026-11-26",
     appointment_time: "09:30",
   });
-  expect(ack).toHaveBeenCalledWith({
-    operation_key: expect.any(String),
-    kind: "reschedule",
-    ack_token: TOKEN,
-  });
 });
 
-it("reports a stale version conflict and keeps the appointment lock", async () => {
+it("reports a stale version conflict without locking or retrying", async () => {
   serveBase({ "write.appointment.reschedule": "enabled" });
   server.use(
     http.get(VIEW, () =>
@@ -236,8 +231,7 @@ it("reports a stale version conflict and keeps the appointment lock", async () =
   expect(
     await screen.findByText(/นัดหมายนี้เปลี่ยนไปหลังจากโหลดข้อมูล/),
   ).toBeVisible();
-  expect(localStorage.getItem("clinic.appointment-write.pending")).toBe("1");
-  expect(localStorage.getItem("clinic.patient-write.pending")).toBeNull();
+  expect(localStorage.length).toBe(0);
 });
 
 it("offers check-in only when the server detail flag is true", async () => {
@@ -262,15 +256,10 @@ it("checks in an eligible row through an explicit confirmation", async () => {
     ),
   );
   const checkin = vi.fn();
-  const ack = vi.fn();
   server.use(
     http.post(CHECKIN, async ({ request }) => {
       checkin(await request.json());
       return writeSuccess("checked_in");
-    }),
-    http.post(ACK, async ({ request }) => {
-      ack(await request.json());
-      return acknowledge();
     }),
   );
   const user = userEvent.setup();
@@ -291,11 +280,6 @@ it("checks in an eligible row through an explicit confirmation", async () => {
     operation_key: expect.any(String),
     workspace_appointment_id: ALIAS,
     base_modified: DETAIL.modified,
-  });
-  expect(ack).toHaveBeenCalledWith({
-    operation_key: expect.any(String),
-    kind: "checkin",
-    ack_token: TOKEN,
   });
 });
 
@@ -349,7 +333,6 @@ it("keeps cancellation and no-show capability-gated without posting when not ena
   );
   const cancel = vi.fn();
   const noShow = vi.fn();
-  const ack = vi.fn();
   server.use(
     http.post(CANCEL, ({ request }) => {
       cancel(request.url);
@@ -358,10 +341,6 @@ it("keeps cancellation and no-show capability-gated without posting when not ena
     http.post(NO_SHOW, ({ request }) => {
       noShow(request.url);
       return writeSuccess("no_show", { ...DETAIL, status: "No Show" });
-    }),
-    http.post(ACK, () => {
-      ack();
-      return acknowledge();
     }),
   );
   const user = userEvent.setup();
@@ -381,10 +360,9 @@ it("keeps cancellation and no-show capability-gated without posting when not ena
 
   expect(cancel).not.toHaveBeenCalled();
   expect(noShow).not.toHaveBeenCalled();
-  expect(ack).not.toHaveBeenCalled();
 });
 
-it("cancels through the confirmation step, the cancel endpoint and one ack", async () => {
+it("cancels through the confirmation step, the cancel endpoint without an acknowledgement", async () => {
   serveBase({ "read.patient": "read_only", "write.appointment.cancel": "enabled" });
   server.use(
     http.get(VIEW, () =>
@@ -394,15 +372,10 @@ it("cancels through the confirmation step, the cancel endpoint and one ack", asy
     ),
   );
   const cancel = vi.fn();
-  const ack = vi.fn();
   server.use(
     http.post(CANCEL, async ({ request }) => {
       cancel(await request.json());
       return writeSuccess("cancelled", { ...DETAIL, status: "Cancelled" });
-    }),
-    http.post(ACK, async ({ request }) => {
-      ack(await request.json());
-      return acknowledge();
     }),
   );
   const user = userEvent.setup();
@@ -436,17 +409,10 @@ it("cancels through the confirmation step, the cancel endpoint and one ack", asy
     appointment_id: ALIAS,
     reason: "ผู้ป่วยโทรขอยกเลิก",
   });
-  expect(ack).toHaveBeenCalledWith({
-    operation_key: expect.any(String),
-    kind: "appointment_cancel",
-    ack_token: TOKEN,
-  });
-  expect(
-    localStorage.getItem("clinic.appointment-write.pending"),
-  ).toBeNull();
+  expect(localStorage.length).toBe(0);
 });
 
-it("records a no-show through its own endpoint and acknowledgement kind", async () => {
+it("records a no-show through its own endpoint without an acknowledgement", async () => {
   serveBase({ "write.appointment.no_show": "enabled" });
   server.use(
     http.get(VIEW, () =>
@@ -456,15 +422,10 @@ it("records a no-show through its own endpoint and acknowledgement kind", async 
     ),
   );
   const noShow = vi.fn();
-  const ack = vi.fn();
   server.use(
     http.post(NO_SHOW, async ({ request }) => {
       noShow(await request.json());
       return writeSuccess("no_show", { ...DETAIL, status: "No Show" });
-    }),
-    http.post(ACK, async ({ request }) => {
-      ack(await request.json());
-      return acknowledge();
     }),
   );
   const user = userEvent.setup();
@@ -494,14 +455,9 @@ it("records a no-show through its own endpoint and acknowledgement kind", async 
     appointment_id: ALIAS,
     reason: "ไม่มาตามนัด",
   });
-  expect(ack).toHaveBeenCalledWith({
-    operation_key: expect.any(String),
-    kind: "appointment_no_show",
-    ack_token: TOKEN,
-  });
 });
 
-it("keeps the lock after an uncertain cancel and never retries", async () => {
+it("reports an unknown cancel outcome and never retries automatically", async () => {
   serveBase({ "write.appointment.cancel": "enabled" });
   server.use(
     http.get(VIEW, () =>
@@ -512,13 +468,10 @@ it("keeps the lock after an uncertain cancel and never retries", async () => {
   );
   const cancel = vi.fn();
   server.use(
-    http.post(CANCEL, async ({ request }) => {
-      cancel(await request.json());
-      return writeSuccess("cancelled", { ...DETAIL, status: "Cancelled" });
+    http.post(CANCEL, () => {
+      cancel();
+      return HttpResponse.json({}, { status: 500 });
     }),
-    http.post(ACK, () =>
-      HttpResponse.json({ message: { acknowledged: false } }, { status: 200 }),
-    ),
   );
   const user = userEvent.setup();
   renderWithFixtures(
@@ -540,21 +493,11 @@ it("keeps the lock after an uncertain cancel and never retries", async () => {
     within(group).getByRole("button", { name: "ยืนยันการยกเลิกนัด" }),
   );
 
-  expect(await screen.findByText(/ไม่ยืนยันผลการจอง/)).toBeVisible();
   expect(
-    localStorage.getItem("clinic.appointment-write.pending"),
-  ).toBe("1");
+    await screen.findByText(/ยังไม่ยืนยันผลการนัดหมาย/),
+  ).toBeVisible();
   expect(cancel).toHaveBeenCalledTimes(1);
-  const lockedGroup = screen.getByRole("group", {
-    name: "ยืนยันการยกเลิกนัด",
-  });
-  expect(
-    within(lockedGroup).getByRole("button", { name: "ยืนยันการยกเลิกนัด" }),
-  ).toBeDisabled();
-  await user.click(
-    within(lockedGroup).getByRole("button", { name: "ยืนยันการยกเลิกนัด" }),
-  );
-  expect(cancel).toHaveBeenCalledTimes(1);
+  expect(localStorage.length).toBe(0);
 });
 
 it("offers no cancel or no-show action on a terminal appointment", async () => {
@@ -633,13 +576,10 @@ it("does not fetch or show check-in when the capability is not enabled", async (
   expect(detail).not.toHaveBeenCalled();
 });
 
-it("keeps the lock visible across a remount after an uncertain acknowledgement", async () => {
+it("does not carry a stop state across a remount", async () => {
   serveBase({ "write.appointment.book": "enabled" });
   server.use(
-    http.post(BOOK, () => writeSuccess("booked")),
-    http.post(ACK, () =>
-      HttpResponse.json({ message: { acknowledged: false } }, { status: 200 }),
-    ),
+    http.post(BOOK, () => HttpResponse.json({}, { status: 500 })),
   );
   const user = userEvent.setup();
   const first = renderWithFixtures(<ReceptionHomePage />);
@@ -653,16 +593,15 @@ it("keeps the lock visible across a remount after an uncertain acknowledgement",
   await user.type(screen.getByLabelText("เวลา"), "10:15");
   await user.click(screen.getByRole("button", { name: "ยืนยันการจอง" }));
   expect(
-    (await screen.findAllByText(/การบันทึกนัดหมายก่อนหน้ายังไม่ยืนยัน/)).length,
-  ).toBeGreaterThan(0);
+    await screen.findByText(/ยังไม่ยืนยันผลการนัดหมาย/),
+  ).toBeVisible();
+  expect(localStorage.length).toBe(0);
   first.unmount();
 
   renderWithFixtures(<ReceptionHomePage />);
-  expect(
-    (await screen.findAllByText(/การบันทึกนัดหมายก่อนหน้ายังไม่ยืนยัน/)).length,
-  ).toBeGreaterThan(0);
-  start = screen.getByRole("button", { name: "เริ่มจองนัดทดสอบ" });
-  expect(start).toBeDisabled();
+  start = await screen.findByRole("button", { name: "เริ่มจองนัดทดสอบ" });
+  await waitFor(() => expect(start).toBeEnabled());
+  expect(screen.queryByText(/ยังไม่ยืนยันผลการนัดหมาย/)).toBeNull();
 });
 
 it("never falls back to the legacy proxy for live appointment detail", async () => {
@@ -681,16 +620,47 @@ it("never falls back to the legacy proxy for live appointment detail", async () 
   expect(legacy).toEqual([]);
 });
 
-it("fails closed on a malformed detail response", async () => {
+it("accepts native identifier values in the canonical fields", async () => {
+  serveBase({});
+  server.use(
+    http.get(VIEW, () =>
+      HttpResponse.json({
+        message: {
+          workspace_patient_id: "PAT-0001",
+          appointment_id: ALIAS,
+          appointment_date: DETAIL.appointment_date,
+          appointment_time: DETAIL.appointment_time,
+          status: DETAIL.status,
+          modified: DETAIL.modified,
+          can_reschedule: false,
+          can_checkin: false,
+        },
+      }),
+    ),
+  );
+  renderWithFixtures(
+    <Routes>
+      <Route path="/clinic/appointments/:id" element={<AppointmentPage />} />
+    </Routes>,
+    { path: `/clinic/appointments/${ALIAS}` },
+  );
+  expect(await screen.findByTestId("appointment-reference")).toHaveTextContent(
+    ALIAS,
+  );
+  expect(screen.getByText("PAT-0001")).toBeVisible();
+  expect(screen.getByText(DETAIL.modified)).toBeVisible();
+});
+
+it("rejects a detail with a raw alternate identifier field", async () => {
   serveBase({});
   server.use(
     http.get(VIEW, () =>
       HttpResponse.json({
         message: {
           ...DETAIL,
+          native_appointment_id: "APT-0001",
           can_reschedule: false,
           can_checkin: false,
-          native_appointment_id: "native-1",
         },
       }),
     ),
@@ -702,5 +672,29 @@ it("fails closed on a malformed detail response", async () => {
     { path: `/clinic/appointments/${ALIAS}` },
   );
   expect(await screen.findByRole("alert")).toBeVisible();
-  expect(screen.queryByText("native-1")).toBeNull();
+  expect(screen.queryByText("APT-0001")).toBeNull();
+});
+
+it("fails closed on a malformed detail response", async () => {
+  serveBase({});
+  server.use(
+    http.get(VIEW, () =>
+      HttpResponse.json({
+        message: {
+          ...DETAIL,
+          modified: "not-a-version",
+          can_reschedule: false,
+          can_checkin: false,
+        },
+      }),
+    ),
+  );
+  renderWithFixtures(
+    <Routes>
+      <Route path="/clinic/appointments/:id" element={<AppointmentPage />} />
+    </Routes>,
+    { path: `/clinic/appointments/${ALIAS}` },
+  );
+  expect(await screen.findByRole("alert")).toBeVisible();
+  expect(screen.queryByText("not-a-version")).toBeNull();
 });

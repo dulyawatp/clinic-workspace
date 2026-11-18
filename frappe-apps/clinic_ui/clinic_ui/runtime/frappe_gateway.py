@@ -23,7 +23,7 @@ import os
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date as _date
+from datetime import date as _date, datetime as _datetime
 
 from clinic_ui.core import (
     admin_contract,
@@ -119,8 +119,12 @@ PATIENT_CREATE_TRIGGER_FIELDS = (
 PATIENT_VIEW_FIELDS = PATIENT_DOCFIELD_FIELDS + PATIENT_STANDARD_FIELDS
 APPOINTMENT_TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
 # The site timestamp recorded verbatim in an appended cancel/no-show note,
-# exactly as ``frappe.utils.now()`` returns it.
-NOTE_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+# exactly as ``frappe.utils.now()`` returns it: whole seconds, or the seconds
+# plus six fractional digits Frappe 16 renders (``%Y-%m-%d %H:%M:%S.%f``).
+NOTE_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{6})?$"
+)
+NOTE_TIMESTAMP_FORMATS = ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S")
 NOTE_EVENT_DOCTYPE = "Event"
 
 # Pinned native contract (installed healthcare v16.6.1,
@@ -563,6 +567,20 @@ class Gateway:
         self.suppress_traceback()
         raise self.frappe.PermissionError(DENIAL_MESSAGE)
 
+    def is_native_permission_denial(self, exc):
+        """True only for the installed framework's own ``PermissionError`` type.
+
+        Identity-based on purpose: the endpoint layer never classifies by class
+        name, so an unrelated exception that merely happens to be called
+        ``PermissionError`` cannot turn an uncertain write into a definite
+        denial. When the framework type is unreadable this returns ``False``.
+        """
+
+        try:
+            return isinstance(exc, self.frappe.PermissionError)
+        except Exception:
+            return False
+
     def respond_anonymous(self):
         """Return the fixed anonymous body with an explicit 401 status.
 
@@ -621,6 +639,86 @@ class Gateway:
         if not isinstance(display_name, str) or not display_name.strip():
             return None
         return display_name.strip()
+
+    def list_readable_patients(self, limit):
+        """Bounded, permission-aware Patient names for the current user.
+
+        ``frappe.get_list`` applies the framework's own permission filtering and
+        permission-query conditions for the session user; ``get_all`` and raw
+        SQL are deliberately never used on this discovery path. The caller still
+        applies the document and field-level display-name checks per record. Any
+        failure returns ``None`` so discovery omits the native slice instead of
+        guessing.
+        """
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit < 1
+            or limit > 1000
+        ):
+            return None
+        try:
+            rows = self.frappe.get_list(
+                PATIENT_DOCTYPE,
+                fields=["name"],
+                order_by="modified desc, name asc",
+                limit_page_length=limit,
+            )
+        except Exception:
+            return None
+        if not isinstance(rows, (list, tuple)):
+            return None
+        names = []
+        for row in rows:
+            name = (
+                row.get("name")
+                if hasattr(row, "get")
+                else getattr(row, "name", None)
+            )
+            if isinstance(name, str) and name.strip():
+                names.append(name.strip())
+        return names
+
+    def list_readable_appointments(self, limit):
+        """Bounded, permission-aware Patient Appointment names for the user.
+
+        ``frappe.get_list`` applies the framework's own permission filtering and
+        permission-query conditions for the session user; ``get_all`` and raw
+        SQL are deliberately never used on this discovery path. The caller still
+        applies the document and field-level checks per record. Any failure
+        returns ``None`` so discovery omits the native slice instead of
+        guessing.
+        """
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit < 1
+            or limit > 1000
+        ):
+            return None
+        try:
+            rows = self.frappe.get_list(
+                APPOINTMENT_DOCTYPE,
+                fields=["name"],
+                order_by="modified desc, name asc",
+                limit_page_length=limit,
+            )
+        except Exception:
+            return None
+        if not isinstance(rows, (list, tuple)):
+            return None
+        names = []
+        for row in rows:
+            name = (
+                row.get("name")
+                if hasattr(row, "get")
+                else getattr(row, "name", None)
+            )
+            if isinstance(name, str) and name.strip():
+                names.append(name.strip())
+        return names
 
     @staticmethod
     def _text_value(value):
@@ -682,8 +780,9 @@ class Gateway:
         field, a malformed record and any adapter failure.
 
         The native patient id and appointment docname are returned to the
-        endpoint only; the endpoint maps the patient through the explicit
-        synthetic patient allowlist and never publishes either native value.
+        endpoint only. The converted development lane may publish them as the
+        record's client-facing identifier, but only behind the current user's
+        own native document permissions; this adapter never decides that.
         """
 
         try:
@@ -1755,7 +1854,13 @@ class Gateway:
             raise patient_write.WriteUncertain() from None
         if not isinstance(value, str) or NOTE_TIMESTAMP.fullmatch(value) is None:
             raise patient_write.WriteUncertain()
-        return value
+        for shape in NOTE_TIMESTAMP_FORMATS:
+            try:
+                _datetime.strptime(value, shape)
+            except ValueError:
+                continue
+            return value
+        raise patient_write.WriteUncertain()
 
     def _append_note(self, state, kind, reason, actor):
         """Return the contract-pinned ``notes`` postimage for one transition."""

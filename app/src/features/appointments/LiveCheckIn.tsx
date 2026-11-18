@@ -10,7 +10,6 @@ import {
 import { getCapability } from "../../domain/capability";
 import { useCapabilities } from "../shell/CapabilityProvider";
 import { useLiveAppointment } from "./live-appointment";
-import { useAppointmentWriteLock } from "./useAppointmentWriteLock";
 
 function failureKey(code: string): string {
   switch (code) {
@@ -39,7 +38,6 @@ export function LiveCheckIn({ appointmentId }: { appointmentId: string }) {
   const queryClient = useQueryClient();
   const enabled = getCapability(caps, "write.appointment.checkin") === "enabled";
   const detail = useLiveAppointment(enabled ? appointmentId : undefined);
-  const { locked, refreshLock } = useAppointmentWriteLock();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [checkedIn, setCheckedIn] = useState(false);
@@ -68,7 +66,7 @@ export function LiveCheckIn({ appointmentId }: { appointmentId: string }) {
     );
 
   async function submit() {
-    if (saving || locked || detail.data?.can_checkin !== true) return;
+    if (saving || detail.data?.can_checkin !== true) return;
     setSaving(true);
     setFailure(null);
     try {
@@ -79,16 +77,22 @@ export function LiveCheckIn({ appointmentId }: { appointmentId: string }) {
       });
       setCheckedIn(true);
       setOpen(false);
-      void queryClient.invalidateQueries({ queryKey: ["live-appointments"] });
-      void queryClient.invalidateQueries({ queryKey: ["live-appointment"] });
     } catch (error) {
+      // A deterministic refusal is a known failure; anything else (lost,
+      // unreadable) is an unknown outcome. Nothing is retried automatically.
       setFailure(
         error instanceof NativeAppointmentWriteError ? error.code : "uncertain",
       );
-    } finally {
-      refreshLock();
-      setSaving(false);
     }
+    // Best-effort refresh only: it is not a reconciliation guarantee, and an
+    // unknown outcome still requires the reader to check current records.
+    try {
+      await queryClient.invalidateQueries({ queryKey: ["live-appointments"] });
+      await queryClient.invalidateQueries({ queryKey: ["live-appointment"] });
+    } catch {
+      // A failed refresh leaves reconciliation to the reader's next view.
+    }
+    setSaving(false);
   }
 
   return (
@@ -108,11 +112,7 @@ export function LiveCheckIn({ appointmentId }: { appointmentId: string }) {
             })}
           </p>
           <div className="appointment-write-actions">
-            <Button
-              disabled={saving || locked}
-              disabledReason={locked ? t("appointmentWrite.locked") : undefined}
-              onClick={() => void submit()}
-            >
+            <Button disabled={saving} onClick={() => void submit()}>
               {saving ? t("appointmentWrite.saving") : t("action.checkIn")}
             </Button>
             <Button
@@ -125,12 +125,7 @@ export function LiveCheckIn({ appointmentId }: { appointmentId: string }) {
           </div>
         </div>
       )}
-      {locked && (
-        <p role="alert" className="appointment-write-alert">
-          {t("appointmentWrite.locked")}
-        </p>
-      )}
-      {failure !== null && failure !== "uncertain" && (
+      {failure !== null && (
         <p role="alert" className="appointment-write-alert">
           {t(failureKey(failure))}
         </p>

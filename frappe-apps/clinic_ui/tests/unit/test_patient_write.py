@@ -80,12 +80,20 @@ class CreateValidationTests(unittest.TestCase):
                     patient_write.validate_create(create_body(**{field: "x"}))
 
     def test_missing_required_fields_are_refused(self):
-        for field in ("operation_key", "first_name", "sex"):
+        for field in ("first_name", "sex"):
             with self.subTest(field=field):
                 body = create_body()
                 body.pop(field)
                 with self.assertRaises(patient_write.WriteInputError):
                     patient_write.validate_create(body)
+
+    def test_operation_key_is_optional_for_the_converted_lane(self):
+        body = create_body()
+        body.pop("operation_key")
+        payload = patient_write.validate_create(body)
+        self.assertEqual(payload["kind"], "create")
+        self.assertNotIn("operation_key", payload)
+        self.assertEqual(payload["fields"]["first_name"], "Patient")
 
     def test_optional_fields_may_be_absent(self):
         body = create_body()
@@ -116,7 +124,7 @@ class CreateValidationTests(unittest.TestCase):
                 with self.assertRaises(patient_write.WriteInputError):
                     patient_write.validate_create(create_body(dob=value))
 
-    def test_operation_key_is_strict(self):
+    def test_supplied_operation_key_is_still_strict(self):
         for value in (
             None,
             "",
@@ -152,12 +160,19 @@ class UpdateValidationTests(unittest.TestCase):
             patient_write.validate_update(body)
 
     def test_missing_identity_or_base_is_refused(self):
-        for field in ("operation_key", "workspace_patient_id", "base_modified"):
+        for field in ("workspace_patient_id", "base_modified"):
             with self.subTest(field=field):
                 body = update_body()
                 body.pop(field)
                 with self.assertRaises(patient_write.WriteInputError):
                     patient_write.validate_update(body)
+
+    def test_operation_key_is_optional_for_the_converted_lane(self):
+        body = update_body()
+        body.pop("operation_key")
+        payload = patient_write.validate_update(body)
+        self.assertEqual(payload["kind"], "update")
+        self.assertNotIn("operation_key", payload)
 
     def test_unknown_fields_are_refused(self):
         for field in ("status", "patient_name", "invite_user", "native_patient_id"):

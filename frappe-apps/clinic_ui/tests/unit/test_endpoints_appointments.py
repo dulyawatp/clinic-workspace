@@ -121,8 +121,68 @@ class AppointmentSuccessTests(unittest.TestCase):
         for native in ("PAT-1", "PAT-2", "NATIVE-APPT-1", "NATIVE-APPT-2"):
             self.assertNotIn(native, text)
 
-    def test_a_patient_outside_the_explicit_allowlist_is_omitted(self):
-        for patient in ("REAL-PATIENT-9", ""):
+    def test_an_appointment_whose_patient_the_user_cannot_read_is_omitted(self):
+        fake = gateway()
+        fake.patient_read_authority = {"PAT-2"}
+        payload = appointments_endpoint.synthetic_appointments(fake)
+        self.assertEqual(
+            [item["appointment_id"] for item in payload["items"]],
+            ["APPT-2"],
+        )
+        self.assertEqual(fake.patient_read_calls[0], "PAT-1")
+
+    def test_an_unreadable_booked_or_native_patient_is_omitted_not_a_denial(self):
+        alias = build_alias(SECRET.encode(), SITE, ACTOR, BOOK_KEY)
+        fake = gateway(
+            current_session=session_view(user=ACTOR, roles=("Clinic Reception",))
+        )
+        fake.patient_read_authority = {"PAT-1", "PAT-2"}
+        fake.appointment_receipt_records.append(
+            FakeAppointmentReceipt(
+                "book",
+                ACTOR,
+                BOOK_KEY,
+                appointment_write.encode_receipt(
+                    kind="book", alias=alias, native_appointment_id="NATIVE-APPT-3"
+                ),
+            )
+        )
+        fake.appointment_view_detail["NATIVE-APPT-3"] = {
+            "patient": "REAL-PATIENT-9",
+            "appointment_date": "2026-11-21",
+            "appointment_time": "11:00:00",
+            "status": "Open",
+        }
+        fake.readable_appointments = ["NATIVE-APPT-4"]
+        fake.appointment_view_detail["NATIVE-APPT-4"] = {
+            "patient": "REAL-PATIENT-8",
+            "appointment_date": "2026-11-21",
+            "appointment_time": "12:00:00",
+            "status": "Open",
+        }
+
+        payload = appointments_endpoint.synthetic_appointments(fake)
+
+        self.assertEqual(
+            [item["appointment_id"] for item in payload["items"]],
+            ["APPT-1", "APPT-2"],
+        )
+
+    def test_a_readable_native_patient_is_published_by_its_docname(self):
+        fake = gateway()
+        fake.patient_read_authority = {"PAT-1", "PAT-2", "REAL-PATIENT-9"}
+        fake.appointment_view_detail["NATIVE-APPT-2"] = {
+            **DETAILS["NATIVE-APPT-2"],
+            "patient": "REAL-PATIENT-9",
+        }
+        payload = appointments_endpoint.synthetic_appointments(fake)
+        self.assertEqual(
+            [item["workspace_patient_id"] for item in payload["items"]],
+            ["WS-1", "REAL-PATIENT-9"],
+        )
+
+    def test_a_blank_or_unreadable_patient_is_omitted(self):
+        for patient in ("", None):
             with self.subTest(patient=patient):
                 fake = gateway()
                 fake.appointment_view_detail["NATIVE-APPT-2"] = {
@@ -134,8 +194,6 @@ class AppointmentSuccessTests(unittest.TestCase):
                     [item["appointment_id"] for item in payload["items"]],
                     ["APPT-1"],
                 )
-                if patient:
-                    self.assertNotIn(patient, repr(payload))
 
     def test_empty_appointment_allowlist_returns_no_items_without_reads(self):
         fake = gateway(
@@ -332,7 +390,7 @@ class BookedAppointmentDiscoveryTests(unittest.TestCase):
         with self.assertRaises(Denied):
             appointments_endpoint.synthetic_appointments(fake)
 
-    def test_a_booked_record_for_an_unallowlisted_patient_is_refused(self):
+    def test_a_booked_record_for_an_unallowlisted_patient_uses_its_docname(self):
         fake = gateway(
             current_session=session_view(user=ACTOR, roles=("Clinic Reception",))
         )
@@ -344,8 +402,9 @@ class BookedAppointmentDiscoveryTests(unittest.TestCase):
             "appointment_time": "11:00:00",
             "status": "Open",
         }
-        with self.assertRaises(Denied):
-            appointments_endpoint.synthetic_appointments(fake)
+        payload = appointments_endpoint.synthetic_appointments(fake)
+        rows = {item["appointment_id"]: item for item in payload["items"]}
+        self.assertEqual(rows[alias]["workspace_patient_id"], "REAL-PATIENT-9")
 
 
     def test_an_unavailable_fence_keeps_the_static_read_contract(self):
@@ -386,6 +445,16 @@ class BookedAppointmentDiscoveryTests(unittest.TestCase):
 
 
 class AppointmentDetailTests(unittest.TestCase):
+    def test_an_unreadable_patient_fails_the_detail_closed(self):
+        fake = gateway()
+        fake.appointment_detail_map["NATIVE-APPT-1"] = {
+            **DETAILS["NATIVE-APPT-1"],
+            "modified": "2026-11-14 09:30:00.123456",
+        }
+        fake.patient_read_authority = set()
+        with self.assertRaises(Denied):
+            appointments_endpoint.appointment_detail(fake, "APPT-1")
+
     def test_static_fixture_detail_is_versioned_and_read_only(self):
         fake = gateway()
         fake.appointment_detail_map["NATIVE-APPT-1"] = {
@@ -434,13 +503,13 @@ class AppointmentDetailTests(unittest.TestCase):
         own = appointments_endpoint.appointment_detail(fake, alias)
         self.assertTrue(own["can_reschedule"])
         self.assertFalse(own["can_checkin"])
-        # The non-mutating target check receives the exact configured identity.
+        # The non-mutating target check receives the resolved target's own
+        # patient, plus the exact configured company/type/department.
         self.assertIn(
             (
                 "NATIVE-APPT-3",
                 {
-                    "patient": None,
-                    "patients": ("PAT-1", "PAT-2"),
+                    "patient": "PAT-1",
                     "company": "COMP-1",
                     "appointment_type": "APPT-TYPE-1",
                     "department": "MEDDEP-1",
@@ -494,8 +563,6 @@ class AppointmentDetailTests(unittest.TestCase):
                 clinic_ui_synthetic_appointments=APPOINTMENTS,
                 clinic_ui_native_appointment_write_enabled=0,
             )},
-            "no deployment marker": {"deployment_approved": False},
-            "fence not ready": {"fence_ready": False},
             "unsafe controller settings": {"appointment_side_effects_unsafe": True},
             "no write authority": {"appointment_can_write": False},
             "no linked read": {"doctype_reads": {"Company": False}},
@@ -556,6 +623,39 @@ class AppointmentDetailTests(unittest.TestCase):
                 payload = appointments_endpoint.appointment_detail(fake, alias)
                 self.assertFalse(payload["can_reschedule"])
                 self.assertFalse(payload["can_checkin"])
+
+    def test_action_flags_ignore_the_historical_fence_and_deployment_marker(self):
+        fake = gateway(
+            current_session=session_view(user=ACTOR, roles=("Clinic Reception",))
+        )
+        fake.deployment_approved = False
+        fake.fence_ready = False
+        alias = build_alias(SECRET.encode(), SITE, ACTOR, BOOK_KEY)
+        fake.appointment_receipt_records.append(
+            FakeAppointmentReceipt(
+                "book",
+                ACTOR,
+                BOOK_KEY,
+                appointment_write.encode_receipt(
+                    kind="book", alias=alias, native_appointment_id="NATIVE-APPT-3"
+                ),
+            )
+        )
+        fake.appointment_detail_map["NATIVE-APPT-3"] = {
+            "patient": "PAT-1",
+            "appointment_date": "2026-11-20",
+            "appointment_time": "08:00:00",
+            "status": "Open",
+            "modified": "2026-11-14 09:30:00.123456",
+        }
+        fake.appointment_view_detail["NATIVE-APPT-3"] = {
+            "patient": "PAT-1",
+            "appointment_date": "2026-11-20",
+            "appointment_time": "08:00:00",
+            "status": "Open",
+        }
+        payload = appointments_endpoint.appointment_detail(fake, alias)
+        self.assertTrue(payload["can_reschedule"])
 
     def test_dedicated_same_day_record_is_the_only_checkin_action(self):
         fake = gateway(

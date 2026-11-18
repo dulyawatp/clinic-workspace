@@ -67,14 +67,16 @@ def authorize(gateway, allowed_codes):
     return settings, view, role
 
 
-def authorize_write(gateway, allowed_codes, csrf_token=None):
-    """Read gate, explicit CSRF check, and default-off native write gate.
+def authorize_patient_write(gateway, allowed_codes, csrf_token=None):
+    """Read gate, explicit CSRF, and the converted patient-write gate.
 
-    Read endpoints are unaffected by the write keys. A write request must also
-    present the initialized session's CSRF token; this check is explicit and
-    does not honour ``frappe.conf.ignore_csrf`` or an allowed referrer. The
-    site must then enable writes for the exact approved site and present a
-    private deployment marker bound to the fence store.
+    The converted development lane relies on Frappe/Marley permissions,
+    validation and transactions instead of the historical operation fence,
+    deployment marker and acknowledgement barrier. It still requires the
+    authenticated session, a valid same-session CSRF token, the exact approved
+    site configuration and the clinic role code, and it refuses the historical
+    fence's reserved synthetic identity. Native Patient create/write authority
+    is checked per request by the endpoint. No fence state is read.
     """
 
     settings, view, role = authorize(gateway, allowed_codes)
@@ -84,18 +86,19 @@ def authorize_write(gateway, allowed_codes, csrf_token=None):
         gateway.deny()
     if not settings.write_enabled:
         gateway.deny()
-    if not gateway.write_deployment_approved():
-        gateway.deny()
     return settings, view, role
 
 
 def authorize_appointment_write(gateway, allowed_codes, csrf_token=None):
-    """Read gate, explicit CSRF, and the separate appointment-write gate.
+    """Read gate, explicit CSRF, and the converted appointment-write gate.
 
-    The appointment gate is independent of the patient write flag. It requires
-    the exact approved site, the appointment flag and the same private
-    deployment marker bound to the fence store. Target configuration is never
-    authority: every request still performs its own native permission checks.
+    The converted development lane relies on Frappe/Marley permissions,
+    validation and transactions instead of the historical operation fence,
+    deployment marker and acknowledgement barrier. It still requires the
+    authenticated session, a valid same-session CSRF token, the exact approved
+    site configuration, the appointment flag and the clinic role code. Target
+    configuration is never authority: every request still performs its own
+    native document permission checks.
     """
 
     settings, view, role = authorize(gateway, allowed_codes)
@@ -104,8 +107,6 @@ def authorize_appointment_write(gateway, allowed_codes, csrf_token=None):
     if not gateway.csrf_token_valid(csrf_token):
         gateway.deny()
     if not settings.appointment_write_enabled:
-        gateway.deny()
-    if not gateway.write_deployment_approved():
         gateway.deny()
     return settings, view, role
 

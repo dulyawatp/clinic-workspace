@@ -294,15 +294,13 @@ class PatientDetailDTOTests(unittest.TestCase):
 
 
     def test_write_result_status_and_patient_shape(self):
-        token = "a" * 64
         for status in ("created", "updated"):
             with self.subTest(status=status):
                 payload = dto.patient_write_result(
-                    status, "WS-1", self.DETAIL, token
+                    status, "WS-1", self.DETAIL
                 )
                 self.assertEqual(payload["status"], status)
-                self.assertEqual(payload["ackToken"], token)
-                self.assertEqual(set(payload), {"status", "patient", "ackToken"})
+                self.assertEqual(set(payload), {"status", "patient"})
                 self.assertEqual(
                     payload["patient"],
                     dto.patient_detail("WS-1", self.DETAIL),
@@ -324,21 +322,12 @@ class PatientDetailDTOTests(unittest.TestCase):
                 self.assertFalse(payload["patient"]["editable"])
 
     def test_write_result_refuses_unknown_status_or_bad_detail(self):
-        token = "a" * 64
         with self.assertRaises(ValueError):
-            dto.patient_write_result("ok", "WS-1", self.DETAIL, token)
+            dto.patient_write_result("ok", "WS-1", self.DETAIL)
         with self.assertRaises(ValueError):
             dto.patient_write_result(
-                "created", "WS-1", {"patient_name": "P"}, token
+                "created", "WS-1", {"patient_name": "P"}
             )
-
-    def test_write_result_requires_a_valid_ack_token(self):
-        for token in (None, "", "A" * 64, "a" * 63, "a" * 65, "g" * 64, 5):
-            with self.subTest(token=token):
-                with self.assertRaises(ValueError):
-                    dto.patient_write_result(
-                        "created", "WS-1", self.DETAIL, token
-                    )
 
     def test_modified_is_required_and_bounded(self):
         for value in (None, "", "x" * 65, "not a datetime"):
@@ -465,25 +454,21 @@ class AppointmentDetailDTOTests(unittest.TestCase):
             "no_show",
         ):
             with self.subTest(status=status):
-                payload = dto.appointment_write_result(
-                    status, detail, "a" * 64
-                )
-                self.assertEqual(
-                    set(payload), {"status", "appointment", "ackToken"}
-                )
+                payload = dto.appointment_write_result(status, detail)
+                self.assertEqual(set(payload), {"status", "appointment"})
                 self.assertEqual(payload["status"], status)
                 self.assertEqual(payload["appointment"], detail)
+                self.assertNotIn("ackToken", payload)
                 self.assertNotIn("native_appointment_id", repr(payload))
 
-    def test_write_result_refuses_unknown_status_or_bad_token(self):
+    def test_write_result_refuses_an_unknown_status_or_detail(self):
         detail = dto.appointment_detail(**self.ITEM)
-        for args in (("cancel", detail, "a" * 64),
-                     ("no-show", detail, "a" * 64),
-                     ("booked", detail, "short"),
-                     ("booked", detail, "A" * 64)):
+        for args in (("cancel", detail), ("no-show", detail)):
             with self.subTest(args=str(args)[:24]):
                 with self.assertRaises(ValueError):
                     dto.appointment_write_result(*args)
+        with self.assertRaises(ValueError):
+            dto.appointment_write_result("booked", {"status": "Open"})
 
     def test_detail_refuses_extra_or_missing_fields(self):
         with self.assertRaises(TypeError):

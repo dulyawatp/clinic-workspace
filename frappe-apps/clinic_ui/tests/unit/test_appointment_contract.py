@@ -510,7 +510,7 @@ class TargetEligibilityTests(unittest.TestCase):
             )
         )
 
-    def test_checkin_is_only_the_unique_dedicated_same_day_record(self):
+    def test_checkin_is_the_dedicated_same_day_record(self):
         base = {
             "status": "Open",
             "appointment_date": "2026-11-14",
@@ -518,7 +518,6 @@ class TargetEligibilityTests(unittest.TestCase):
             "patient": "PAT-2",
             "dedicated_patient": "PAT-2",
             "has_receipt": False,
-            "is_unique_eligible": True,
         }
         self.assertTrue(contract.checkin_target_eligible(**base))
         for override in (
@@ -529,7 +528,6 @@ class TargetEligibilityTests(unittest.TestCase):
             {"patient": "PAT-1"},
             {"dedicated_patient": "PAT-1"},
             {"has_receipt": True},
-            {"is_unique_eligible": False},
         ):
             with self.subTest(override=override):
                 self.assertFalse(

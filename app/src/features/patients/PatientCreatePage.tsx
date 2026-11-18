@@ -26,8 +26,9 @@ import { formatDate } from "../../i18n/format";
 import { useLocale } from "../../i18n/LocaleProvider";
 import { nativeTransportEnabled } from "../../transport/native/flag";
 import {
-  patientWriteLocked,
+  PatientWriteRejectedError,
   saveNativePatient,
+  type PatientWriteFailureKind,
 } from "../../transport/native/patient-write";
 import { useReadQuery } from "../../transport/read/query";
 import { StatePanel } from "../../ui/StatePanel";
@@ -229,8 +230,9 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
   );
   const [reviewing, setReviewing] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [uncertain, setUncertain] = useState(false);
-  const [locked, setLocked] = useState(patientWriteLocked);
+  const [failure, setFailure] = useState<
+    PatientWriteFailureKind | "unknown" | null
+  >(null);
 
   useEffect(() => {
     const stored = readCreateDraft();
@@ -253,15 +255,25 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
     // An edited field invalidates the reviewed snapshot: confirm and duplicate
     // decisions must never be applied to input the reader has since changed.
     setStep({ kind: "edit" });
-    setUncertain(false);
+    setFailure(null);
   }
 
   const displayName = `${input.firstName.trim()} ${input.lastName.trim()}`.trim();
 
+  /** Best-effort record refresh; it never changes a decided write outcome. */
+  async function refreshRecords() {
+    try {
+      await queryClient.invalidateQueries({ queryKey: ["live-directory"] });
+      await queryClient.invalidateQueries({ queryKey: ["live-patient"] });
+    } catch {
+      // A failed refresh leaves the reconciliation to the reader's next view.
+    }
+  }
+
   async function review(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (reviewing || saving) return;
-    setUncertain(false);
+    setFailure(null);
     const nextErrors = validatePatientCreate(input, bangkokTodayKey());
     setErrors(nextErrors);
     if (nextErrors.length > 0) {
@@ -284,13 +296,7 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
   }
 
   async function confirm() {
-    if (saving || reviewing || locked || capability !== "enabled") return;
-    // The reviewed one-shot lock stays authoritative even if this page never
-    // saw the earlier attempt: an ambiguous result disables a fresh write.
-    if (patientWriteLocked()) {
-      setLocked(true);
-      return;
-    }
+    if (saving || reviewing || capability !== "enabled") return;
     // Prototype parity: every register re-validates, and a non-forced register
     // re-runs the duplicate check against the directory.
     const nextErrors = validatePatientCreate(input, bangkokTodayKey());
@@ -316,9 +322,10 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
       setReviewing(false);
     }
     setSaving(true);
-    setUncertain(false);
+    setFailure(null);
     const native = session?.mode === "live" && nativeTransportEnabled();
     if (native && input.sex !== "") {
+      let confirmed = false;
       try {
         await saveNativePatient({
           first_name: input.firstName.trim(),
@@ -327,21 +334,27 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
           dob: input.dob,
           operation_key: crypto.randomUUID(),
         });
-        clearCreateDraft();
-        await queryClient.invalidateQueries({ queryKey: ["live-directory"] });
-        await queryClient.invalidateQueries({ queryKey: ["live-patient"] });
-        setStep({ kind: "saved", local: null });
-      } catch {
-        setUncertain(true);
-        setLocked(patientWriteLocked());
-      } finally {
-        setSaving(false);
+        confirmed = true;
+      } catch (error) {
+        // A deterministic refusal is a known failure; anything else (lost,
+        // unreadable) is an unknown outcome. Nothing is retried automatically.
+        setFailure(
+          error instanceof PatientWriteRejectedError ? error.kind : "unknown",
+        );
       }
+      if (confirmed) {
+        clearCreateDraft();
+        setStep({ kind: "saved", local: null });
+      }
+      // Refresh either way: a confirmed registration shows the new row, and an
+      // unknown outcome is reconciled before the reader can repeat it.
+      await refreshRecords();
+      setSaving(false);
       return;
     }
     const local = saveSampleRegistration(input);
     if (local === null) {
-      setUncertain(true);
+      setFailure("unknown");
     } else {
       clearCreateDraft();
       setStep({ kind: "saved", local });
@@ -711,7 +724,7 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
                 <button
                   type="button"
                   className="pc-button pc-button--primary"
-                  disabled={saving || reviewing || locked}
+                  disabled={saving || reviewing}
                   onClick={() => void confirm()}
                 >
                   {saving
@@ -725,9 +738,13 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
                 {t("patientCreate.backToEdit")}
               </Button>
             </div>
-            {(uncertain || locked) && (
+            {failure !== null && (
               <p role="alert" className="patient-create-status">
-                {t("patientWrite.uncertain")}
+                {t(
+                  failure === "unknown"
+                    ? "patientWrite.uncertain"
+                    : `patientWrite.${failure}`,
+                )}
               </p>
             )}
           </div>

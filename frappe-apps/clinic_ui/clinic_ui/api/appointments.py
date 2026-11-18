@@ -1,14 +1,16 @@
-"""Synthetic appointment read, detail and local write methods.
+"""Synthetic appointment read, detail and converted write methods.
 
 ``GET /api/method/clinic_ui.api.appointments.synthetic_appointments`` keeps the
-five-field list contract and adds verified receipt discovery.
+five-field list contract and adds the historical and native discovery sources.
 ``GET .../view`` returns the separate versioned detail contract.
-``POST .../book``, ``.../reschedule``, ``.../checkin`` and ``.../ack`` are the
-separate, default-off local experiment. Frappe performs the POST CSRF check
-before any write method runs, and the endpoint repeats an explicit same-session
-token check that does not honour ``ignore_csrf`` or an allowed referrer. This
-module never sets ``ignore_csrf`` and exposes no cancellation or generic status
-setter.
+
+``POST .../book``, ``.../reschedule`` and ``.../checkin`` are the converted
+development write lane: they rely on Frappe/Marley permissions, validation and
+transactions, with no operation fence, acknowledgement or deployment marker.
+Frappe performs the POST CSRF check before any write method runs, and the
+endpoint repeats an explicit same-session token check that does not honour
+``ignore_csrf`` or an allowed referrer. This module never sets ``ignore_csrf``
+and exposes no cancellation, acknowledgement or generic status setter.
 
 Frappe wraps every returned mapping as ``{"message": ...}``.
 """
@@ -48,8 +50,3 @@ def checkin(**form):
     return appointments_write_endpoint.checkin(
         Gateway(), _body(form), _csrf_token(form)
     )
-
-
-@frappe.whitelist(methods=["POST"])
-def ack(**form):
-    return appointments_write_endpoint.ack(Gateway(), _body(form), _csrf_token(form))
