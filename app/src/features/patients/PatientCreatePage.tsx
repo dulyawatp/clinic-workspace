@@ -36,12 +36,17 @@ import { WriteGate } from "../../ui/WriteGate";
 import { useCapabilities } from "../shell/CapabilityProvider";
 import { useLivePatients } from "./live-directory";
 import {
+  patientGenderLabelKey,
+  usePatientGenderOptions,
+} from "./use-patient-genders";
+import {
   bangkokTodayKey,
   type CreateField,
   type CreateFieldError,
   type CreateSex,
   type DirectoryCandidate,
   emptyCreateInput,
+  FIXTURE_SEX_VALUES,
   findDuplicateCandidates,
   type PatientCreateInput,
   type SampleRegistration,
@@ -54,12 +59,6 @@ import {
 import "./patients.css";
 
 const SEX_OPTIONS: readonly CreateSex[] = ["female", "male", "other"];
-
-const NATIVE_SEX: Readonly<Record<Exclude<CreateSex, "">, string>> = {
-  female: "Female",
-  male: "Male",
-  other: "Other",
-};
 
 type Step =
   | { readonly kind: "edit" }
@@ -221,6 +220,12 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
   const { caps } = useCapabilities();
   const queryClient = useQueryClient();
   const capability = getCapability(caps, "write.patient.create");
+  const nativeWrite =
+    nativeTransportEnabled() &&
+    session?.mode === "live" &&
+    capability === "enabled";
+  const genders = usePatientGenderOptions(nativeWrite);
+  const genderItems = genders.state === "ready" ? genders.items : null;
   const ids = useId();
   const [input, setInput] = useState<PatientCreateInput>(emptyCreateInput);
   const [step, setStep] = useState<Step>({ kind: "edit" });
@@ -274,7 +279,11 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
     event.preventDefault();
     if (reviewing || saving) return;
     setFailure(null);
-    const nextErrors = validatePatientCreate(input, bangkokTodayKey());
+    const sexValues = nativeWrite ? (genderItems ?? []) : FIXTURE_SEX_VALUES;
+    const nextErrors = validatePatientCreate(input, bangkokTodayKey(), sexValues);
+    // A missing native list is its own failure: never submit unloaded options.
+    if (nativeWrite && genderItems === null)
+      nextErrors.unshift({ field: "sex", key: "patientGenders.error" });
     setErrors(nextErrors);
     if (nextErrors.length > 0) {
       setStep({ kind: "edit" });
@@ -299,7 +308,11 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
     if (saving || reviewing || capability !== "enabled") return;
     // Prototype parity: every register re-validates, and a non-forced register
     // re-runs the duplicate check against the directory.
-    const nextErrors = validatePatientCreate(input, bangkokTodayKey());
+    const sexValues = nativeWrite ? (genderItems ?? []) : FIXTURE_SEX_VALUES;
+    const nextErrors = validatePatientCreate(input, bangkokTodayKey(), sexValues);
+    // A missing native list is its own failure: never submit unloaded options.
+    if (nativeWrite && genderItems === null)
+      nextErrors.unshift({ field: "sex", key: "patientGenders.error" });
     setErrors(nextErrors);
     if (nextErrors.length > 0) {
       setStep({ kind: "edit" });
@@ -323,14 +336,13 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
     }
     setSaving(true);
     setFailure(null);
-    const native = session?.mode === "live" && nativeTransportEnabled();
-    if (native && input.sex !== "") {
+    if (nativeWrite && input.sex !== "") {
       let confirmed = false;
       try {
         await saveNativePatient({
           first_name: input.firstName.trim(),
           last_name: input.lastName.trim(),
-          sex: NATIVE_SEX[input.sex],
+          sex: input.sex,
           dob: input.dob,
           operation_key: crypto.randomUUID(),
         });
@@ -477,19 +489,29 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
                 value={input.sex}
                 required
                 aria-required="true"
+                disabled={nativeWrite && genderItems === null}
                 aria-invalid={errorFor.has("sex") || undefined}
                 onChange={(event) =>
                   update("sex", event.target.value as CreateSex)
                 }
               >
                 <option value="">{t("patientCreate.select")}</option>
-                {SEX_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    {t(
-                      `patient.${option === "female" ? "sexFemale" : option === "male" ? "sexMale" : "sexOther"}`,
-                    )}
-                  </option>
-                ))}
+                {nativeWrite
+                  ? genderItems?.map((value) => {
+                      const key = patientGenderLabelKey(value);
+                      return (
+                        <option key={value} value={value}>
+                          {key ? t(key) : value}
+                        </option>
+                      );
+                    })
+                  : SEX_OPTIONS.map((option) => (
+                      <option key={option} value={option}>
+                        {t(
+                          `patient.${option === "female" ? "sexFemale" : option === "male" ? "sexMale" : "sexOther"}`,
+                        )}
+                      </option>
+                    ))}
               </select>
             </Field>
             <Field
@@ -635,13 +657,25 @@ function CreateForm({ lookup }: { lookup: CandidateLookup }) {
           </div>
         )}
 
+        {nativeWrite && genders.state === "error" && (
+          <p role="alert" className="patient-create-status">
+            {t("patientGenders.error")}
+          </p>
+        )}
+
+        {nativeWrite && genders.state === "loading" && (
+          <p role="status" className="patient-create-status">
+            {t("patientGenders.loading")}
+          </p>
+        )}
+
         {step.kind === "edit" && (
           <div className="patient-create-actions">
             <Button onClick={saveDraft}>{t("action.saveDraft")}</Button>
             <Button
               type="submit"
               variant="primary"
-              disabled={reviewing || saving}
+              disabled={reviewing || saving || (nativeWrite && genderItems === null)}
             >
               {reviewing
                 ? t("patientCreate.checking")

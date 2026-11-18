@@ -150,6 +150,8 @@ class FakeGateway:
         self.can_create = True
         self.can_write = True
         self.genders = {"Female"}
+        self.gender_options = ["Female"]
+        self.gender_option_calls = []
         self.patient_modified = {}
         self.created_native_id = "PAT-NEW"
         self.prepare_calls = []
@@ -612,6 +614,14 @@ class FakeGateway:
 
     def native_gender_exists(self, sex):
         return sex in self.genders
+
+    def native_gender_options(self, limit):
+        self.gender_option_calls.append(limit)
+        if not isinstance(self.gender_options, (list, tuple)):
+            # ``None`` simulates a refused/failed read; anything else simulates
+            # a malformed adapter response.
+            return self.gender_options
+        return list(self.gender_options)[:limit]
 
     def native_patient_modified(self, native_patient_id):
         return self.patient_modified.get(native_patient_id)

@@ -47,10 +47,21 @@ function renderPage(caps: CapabilityMap = {}) {
   return renderWithFixtures(<PatientCreatePage />, { caps });
 }
 
-async function fillValidForm(user: ReturnType<typeof userEvent.setup>) {
+function optionValues(select: HTMLElement): string[] {
+  return Array.from((select as HTMLSelectElement).options).map(
+    (option) => option.value,
+  );
+}
+
+async function fillValidForm(
+  user: ReturnType<typeof userEvent.setup>,
+  sex = "female",
+) {
   await user.type(await screen.findByLabelText("ชื่อ"), "อารีย์");
   await user.type(screen.getByLabelText("นามสกุล"), "ทดสอบ");
-  await user.selectOptions(screen.getByLabelText("เพศ"), "female");
+  const select = screen.getByLabelText("เพศ");
+  await waitFor(() => expect(optionValues(select)).toContain(sex));
+  await user.selectOptions(select, sex);
   await user.type(screen.getByLabelText("วันเกิด"), "1991-02-03");
   await user.type(screen.getByLabelText("เบอร์โทรศัพท์"), "0891234567");
 }
@@ -176,6 +187,38 @@ it("keeps a local draft across a remount and clears it on request", async () => 
   );
 });
 
+it("blocks review for a stored draft whose sex is not a fixture value", async () => {
+  const user = userEvent.setup();
+  localStorage.setItem(
+    CREATE_DRAFT_KEY,
+    JSON.stringify({
+      version: 1,
+      savedAt: new Date().toISOString(),
+      input: {
+        firstName: "อารีย์",
+        lastName: "ทดสอบ",
+        sex: "robot",
+        dob: "1991-02-03",
+        phone: "0891234567",
+        email: "",
+        allergyStatus: "unknown",
+        allergyText: "",
+        address: "",
+        emergency: "",
+      },
+    }),
+  );
+  renderPage(CREATE_CAPS);
+  expect(await screen.findByText("โหลดฉบับร่างในเครื่องแล้ว")).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "ตรวจสอบและลงทะเบียน" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "เลือกเพศจากตัวเลือกที่เว็บไซต์นี้ใช้ได้",
+  );
+  expect(
+    screen.queryByRole("heading", { name: "ยืนยันลงทะเบียน" }),
+  ).toBeNull();
+});
+
 it("gates the real registration action exactly on write.patient.create", async () => {
   const user = userEvent.setup();
   renderPage();
@@ -243,6 +286,7 @@ it.each([390, 834, 1440] as const)(
 
 const NATIVE_BOOTSTRAP = "/api/method/clinic_ui.api.session.bootstrap";
 const NATIVE_DIRECTORY = "/api/method/clinic_ui.api.directory.synthetic_patients";
+const NATIVE_GENDERS = "/api/method/clinic_ui.api.patients.genders";
 
 function nativeSession(caps: CapabilityMap) {
   return HttpResponse.json({
@@ -258,6 +302,12 @@ function nativeSession(caps: CapabilityMap) {
       csrfToken: "native-csrf",
     },
   });
+}
+
+function nativeGenders() {
+  return http.get(NATIVE_GENDERS, () =>
+    HttpResponse.json({ message: { items: ["Female"] } }),
+  );
 }
 
 it("keeps sample, draft and duplicate states network-free in native mode", async () => {
@@ -308,6 +358,7 @@ it("writes only the current native contract fields when it is enabled", async ()
         },
       }),
     ),
+    nativeGenders(),
   );
   renderWithFixtures(<PatientCreatePage />, {
     sessionMode: "live",
@@ -316,7 +367,10 @@ it("writes only the current native contract fields when it is enabled", async ()
       "write.patient.create": "enabled",
     },
   });
-  await fillValidForm(user);
+  await waitFor(() =>
+    expect(optionValues(screen.getByLabelText("เพศ"))).toEqual(["", "Female"]),
+  );
+  await fillValidForm(user, "Female");
   await user.type(
     screen.getByLabelText("ผู้ติดต่อฉุกเฉิน (ชื่อ ความสัมพันธ์ เบอร์)"),
     "ปวีณา · 089-000-1111",
@@ -408,6 +462,7 @@ it("keeps a confirmed native registration when the record refresh fails", async 
         },
       }),
     ),
+    nativeGenders(),
   );
   renderWithFixtures(<PatientCreatePage />, {
     sessionMode: "live",
@@ -416,7 +471,7 @@ it("keeps a confirmed native registration when the record refresh fails", async 
       "write.patient.create": "enabled",
     },
   });
-  await fillValidForm(user);
+  await fillValidForm(user, "Female");
   await user.click(screen.getByRole("button", { name: "ตรวจสอบและลงทะเบียน" }));
   await user.click(
     await screen.findByRole("button", { name: "ลงทะเบียนผู้ป่วย" }),
@@ -446,6 +501,7 @@ it("renders a known stale refusal instead of an unknown outcome", async () => {
         },
       }),
     ),
+    nativeGenders(),
   );
   renderWithFixtures(<PatientCreatePage />, {
     sessionMode: "live",
@@ -454,7 +510,7 @@ it("renders a known stale refusal instead of an unknown outcome", async () => {
       "write.patient.create": "enabled",
     },
   });
-  await fillValidForm(user);
+  await fillValidForm(user, "Female");
   await user.click(screen.getByRole("button", { name: "ตรวจสอบและลงทะเบียน" }));
   await user.click(
     await screen.findByRole("button", { name: "ลงทะเบียนผู้ป่วย" }),
@@ -490,6 +546,7 @@ it("reports an unknown outcome and refreshes the directory before a repeat", asy
         },
       });
     }),
+    nativeGenders(),
   );
   renderWithFixtures(<PatientCreatePage />, {
     sessionMode: "live",
@@ -498,7 +555,7 @@ it("reports an unknown outcome and refreshes the directory before a repeat", asy
       "write.patient.create": "enabled",
     },
   });
-  await fillValidForm(user);
+  await fillValidForm(user, "Female");
   await user.click(screen.getByRole("button", { name: "ตรวจสอบและลงทะเบียน" }));
   const register = await screen.findByRole("button", {
     name: "ลงทะเบียนผู้ป่วย",

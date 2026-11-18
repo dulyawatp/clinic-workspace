@@ -1,24 +1,30 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "../../ui/Button";
+import { nativeTransportEnabled } from "../../transport/native/flag";
 import {
   PatientWriteRejectedError,
   saveNativePatient,
   type PatientWriteFailureKind,
 } from "../../transport/native/patient-write";
 import type { LivePatientDetail } from "./live-patient";
+import {
+  patientGenderLabelKey,
+  usePatientGenderOptions,
+} from "./use-patient-genders";
 
 export function PatientWriteForm({ patient }: { patient?: LivePatientDetail }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const id = useId();
+  const native = nativeTransportEnabled();
   const [open, setOpen] = useState(false);
   const [first, setFirst] = useState(patient?.first_name ?? "");
   const [last, setLast] = useState(patient?.last_name ?? "");
-  const [sex, setSex] = useState(
-    ["Male", "Female", "Other", "Unknown"].find((value) => value.toLowerCase() === patient?.sex?.toLowerCase()) ?? "",
-  );
+  const [sex, setSex] = useState(patient?.sex ?? "");
+  const genders = usePatientGenderOptions(open);
+  const genderItems = genders.state === "ready" ? genders.items : null;
   const [dob, setDob] = useState(patient?.dob ?? "");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -27,6 +33,13 @@ export function PatientWriteForm({ patient }: { patient?: LivePatientDetail }) {
   >(null);
   const [invalid, setInvalid] = useState(false);
   const title = t(patient ? "patientWrite.edit" : "patientWrite.create");
+
+  // A stored sex the site no longer offers is never rewritten silently: the
+  // selection is cleared so the reader must choose from the current list.
+  useEffect(() => {
+    if (!native || !open || genders.state !== "ready") return;
+    if (!genders.items.includes(sex)) setSex("");
+  }, [native, open, genders, sex]);
 
   /** Best-effort record refresh; it never changes a decided write outcome. */
   async function refreshRecords() {
@@ -42,7 +55,8 @@ export function PatientWriteForm({ patient }: { patient?: LivePatientDetail }) {
     event.preventDefault();
     if (saving) return;
     const date = new Date(`${dob}T00:00:00Z`);
-    if (!first.trim() || !last.trim() || !["Male", "Female", "Other", "Unknown"].includes(sex) ||
+    if (!first.trim() || !last.trim() || genderItems === null ||
+        !genderItems.includes(sex) ||
         !/^\d{4}-\d{2}-\d{2}$/.test(dob) || Number.isNaN(date.valueOf()) ||
         date.toISOString().slice(0, 10) !== dob || dob > new Date().toISOString().slice(0, 10) ||
         (patient && !patient.modified)) {
@@ -99,12 +113,14 @@ export function PatientWriteForm({ patient }: { patient?: LivePatientDetail }) {
           <div className="patients-write-fields">
             <div className="patients-field"><label htmlFor={`${id}-first`}>{t("patientWrite.first")}</label><input id={`${id}-first`} value={first} maxLength={140} required onChange={(event) => setFirst(event.target.value)} /></div>
             <div className="patients-field"><label htmlFor={`${id}-last`}>{t("patientWrite.last")}</label><input id={`${id}-last`} value={last} maxLength={140} required onChange={(event) => setLast(event.target.value)} /></div>
-            <div className="patients-field"><label htmlFor={`${id}-sex`}>{t("field.sex")}</label><select id={`${id}-sex`} value={sex} required onChange={(event) => setSex(event.target.value)}><option value="">{t("patientWrite.select")}</option>{["Male", "Female", "Other", "Unknown"].map((value) => <option key={value} value={value}>{t(`patient.sex${value}`)}</option>)}</select></div>
+            <div className="patients-field"><label htmlFor={`${id}-sex`}>{t("field.sex")}</label><select id={`${id}-sex`} value={sex} required disabled={genderItems === null} onChange={(event) => setSex(event.target.value)}><option value="">{t("patientWrite.select")}</option>{genderItems?.map((value) => { const key = patientGenderLabelKey(value); return <option key={value} value={value}>{key ? t(key) : value}</option>; })}</select></div>
             <div className="patients-field"><label htmlFor={`${id}-dob`}>{t("profile.dob")}</label><input id={`${id}-dob`} type="date" value={dob} required onChange={(event) => setDob(event.target.value)} /></div>
           </div>
+          {genders.state === "loading" && <p role="status">{t("patientGenders.loading")}</p>}
+          {genders.state === "error" && <p role="alert">{t("patientGenders.error")}</p>}
           {invalid && <p role="alert">{t("patientWrite.invalid")}</p>}
           <div className="patients-write-actions">
-            <Button type="submit" disabled={saving || Boolean(patient && !patient.modified)}>{saving ? t("patientWrite.saving") : t("patientWrite.save")}</Button>
+            <Button type="submit" disabled={saving || genderItems === null || Boolean(patient && !patient.modified)}>{saving ? t("patientWrite.saving") : t("patientWrite.save")}</Button>
             <Button variant="secondary" onClick={() => setOpen(false)} disabled={saving}>{t("patientWrite.close")}</Button>
           </div>
         </form>

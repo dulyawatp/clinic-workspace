@@ -6,6 +6,10 @@ a native ``Patient`` docname returned by the converted create lane. The native
 docname is accepted only after the current user's own native Patient read
 permission check.
 
+``genders`` is the sibling read used by the patient form: the site's own
+readable ``Gender`` master names, never a built-in list. It shares the gate
+below and the approved development site scope, and refuses on any uncertainty.
+
 Gate order is the shared one: no-store, session validity, site configuration,
 clinic role, then the native read permission check for the *current* user on
 the exact Patient. A refused native check, a missing or malformed identifier and
@@ -34,6 +38,10 @@ from clinic_ui.core.text import (
     normalize_identifier,
 )
 from clinic_ui.endpoints import aliases, common
+
+# Hard bound on the gender option list. A clinical Gender master is a short
+# curated list; the cap only stops an unexpectedly large or looping read.
+MAX_GENDER_OPTIONS = 100
 
 
 def _is_editable(gateway, settings, actor, role, alias, resolved):
@@ -91,3 +99,28 @@ def view(gateway, workspace_patient_id):
         return dto.patient_detail(alias, detail, editable=editable)
     except ValueError:
         gateway.deny()
+
+
+def genders(gateway):
+    """Return the site's own readable ``Gender`` master names.
+
+    The response is ``{"items": [string, ...]}``: exact master names the
+    current user may read, never a built-in or inferred list. The surface uses
+    the same no-store, session, site-configuration and clinic-role gate as the
+    patient read, and the native-docname scope: outside the approved
+    development site the legacy behavior is unchanged and the caller is
+    refused. A missing role-level Gender read authority, a failed read or an
+    unexpected shape is the framework's generic 403, so the form never receives
+    a partial or invented option set.
+    """
+
+    common.authorize(gateway, PATIENT_VIEW_ROLE_CODES)
+
+    if not aliases.native_read_scope_enabled(gateway):
+        gateway.deny()
+
+    items = gateway.native_gender_options(MAX_GENDER_OPTIONS)
+    if not isinstance(items, (list, tuple)):
+        gateway.deny()
+
+    return {"items": list(items)}

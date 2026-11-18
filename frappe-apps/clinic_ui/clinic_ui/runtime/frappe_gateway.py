@@ -43,6 +43,7 @@ from clinic_ui.core import (
     stock_contract,
     write_fence,
 )
+from clinic_ui.core.text import is_valid_text, normalize_identifier
 from clinic_ui.runtime.traceback import UNSAFE_V1_KEYS, WRITE_ERROR_CODES
 
 PATIENT_DOCTYPE = "Patient"
@@ -2229,6 +2230,49 @@ class Gateway:
             return bool(frappe.db.exists("Gender", sex))
         except Exception:
             return False
+
+    def native_gender_options(self, limit):
+        """Bounded, permission-aware Gender master names for the current user.
+
+        ``frappe.get_list`` applies the framework's own permission filtering and
+        permission-query conditions for the session user; ``get_all`` and raw
+        SQL are deliberately never used. A caller without role-level Gender read
+        authority, an invalid limit, a failed query or an unexpected shape
+        returns ``None`` so the endpoint refuses instead of inventing options.
+        """
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit < 1
+            or limit > 1000
+        ):
+            return None
+        try:
+            frappe = self.frappe
+            user = frappe.session.user
+            if not frappe.has_permission("Gender", ptype="read", user=user):
+                return None
+            rows = frappe.get_list(
+                "Gender",
+                fields=["name"],
+                order_by="name asc",
+                limit_page_length=limit,
+            )
+        except Exception:
+            return None
+        if not isinstance(rows, (list, tuple)):
+            return None
+        names = []
+        for row in rows:
+            name = (
+                row.get("name")
+                if hasattr(row, "get")
+                else getattr(row, "name", None)
+            )
+            if isinstance(name, str) and is_valid_text(name):
+                names.append(normalize_identifier(name))
+        return names
 
     def native_patient_modified(self, native_patient_id):
         """Current authoritative modified value under native write authority."""

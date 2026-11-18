@@ -7,6 +7,7 @@ import {
   type DirectoryCandidate,
   emptyCreateInput,
   findDuplicateCandidates,
+  FIXTURE_SEX_VALUES,
   type PatientCreateInput,
   readCreateDraft,
   saveSampleRegistration,
@@ -50,6 +51,16 @@ describe("PAT-02 create validation", () => {
     ]);
     expect(errors.every((error) => error.key === "patientCreate.error.required"))
       .toBe(true);
+  });
+
+  it("accepts only the sex vocabulary of the active mode", () => {
+    const fields = (sex: string, allowed?: readonly string[]) =>
+      validatePatientCreate(input({ sex }), TODAY, allowed).map(
+        (error) => error.field,
+      );
+    expect(fields("robot")).toContain("sex");
+    expect(fields("Non-binary", FIXTURE_SEX_VALUES)).toContain("sex");
+    expect(fields("Non-binary", ["Non-binary"])).not.toContain("sex");
   });
 
   it.each(["08123456", "08123456789", "812345678", "081-234-5678x"])(
@@ -170,6 +181,22 @@ describe("PAT-02 local draft", () => {
     expect(readCreateDraft()).toEqual(entry);
   });
 
+  it("restores any stored sex string; membership is decided at submit", () => {
+    for (const sex of ["Female", "Non-binary", "robot"]) {
+      localStorage.setItem(
+        CREATE_DRAFT_KEY,
+        JSON.stringify({ version: 1, input: { ...input(), sex } }),
+      );
+      expect(readCreateDraft()?.sex, sex).toBe(sex);
+    }
+
+    localStorage.setItem(
+      CREATE_DRAFT_KEY,
+      JSON.stringify({ version: 1, input: { ...input(), sex: 42 } }),
+    );
+    expect(readCreateDraft()).toBeNull();
+  });
+
   it("ignores a missing, malformed or foreign-version draft", () => {
     expect(readCreateDraft()).toBeNull();
     localStorage.setItem(CREATE_DRAFT_KEY, "{not json");
@@ -181,7 +208,7 @@ describe("PAT-02 local draft", () => {
     expect(readCreateDraft()).toBeNull();
     localStorage.setItem(
       CREATE_DRAFT_KEY,
-      JSON.stringify({ version: 1, input: { ...input(), sex: "robot" } }),
+      JSON.stringify({ version: 1, input: { ...input(), sex: 42 } }),
     );
     expect(readCreateDraft()).toBeNull();
   });

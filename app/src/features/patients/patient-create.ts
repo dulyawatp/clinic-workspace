@@ -15,7 +15,29 @@
 export const CREATE_DRAFT_KEY = "clinic.patientCreateDraft.v1";
 export const CREATE_SAMPLES_KEY = "clinic.patientCreateSamples.v1";
 
-export type CreateSex = "" | "female" | "male" | "other";
+/**
+ * Native builds offer the sex values the isolated site returns, verbatim, so
+ * the stored form value is the exact option string. The fixture/proxy form
+ * keeps its lowercase design values (`female`, `male`, `other`).
+ */
+export type CreateSex = string;
+
+/** The fixture/proxy design values; submits outside native must match them. */
+export const FIXTURE_SEX_VALUES: readonly string[] = [
+  "female",
+  "male",
+  "other",
+];
+
+/**
+ * Draft vocabulary: any string. The draft is untrusted browser data, so the
+ * value is restored as-is and membership is decided at review/submit against
+ * the active mode's allowed list (fixture design values or the native site's
+ * exact list). A non-string value still invalidates the draft.
+ */
+function isDraftSex(value: unknown): value is string {
+  return typeof value === "string";
+}
 export type AllergyStatus = "unknown" | "none" | "known";
 
 export interface PatientCreateInput {
@@ -100,11 +122,14 @@ export function isCalendarDate(value: string): boolean {
 /**
  * Field validation in prototype order. `todayKey` is the Bangkok calendar day
  * so a future birth date is rejected against the clinic's day, not the
- * browser's local midnight.
+ * browser's local midnight. `allowedSexes` is the writable vocabulary for the
+ * active mode: the fixture design values by default, the native site's exact
+ * list when the native write is enabled.
  */
 export function validatePatientCreate(
   input: PatientCreateInput,
   todayKey: string,
+  allowedSexes: readonly string[] = FIXTURE_SEX_VALUES,
 ): CreateFieldError[] {
   const errors: CreateFieldError[] = [];
   if (!input.firstName.trim())
@@ -113,6 +138,8 @@ export function validatePatientCreate(
     errors.push({ field: "lastName", key: "patientCreate.error.required" });
   if (input.sex === "")
     errors.push({ field: "sex", key: "patientCreate.error.required" });
+  else if (!allowedSexes.includes(input.sex))
+    errors.push({ field: "sex", key: "patientCreate.error.sex" });
   if (!input.dob.trim())
     errors.push({ field: "dob", key: "patientCreate.error.required" });
   else if (!isCalendarDate(input.dob))
@@ -174,8 +201,7 @@ function coerceInput(value: unknown): PatientCreateInput | null {
   const base = emptyCreateInput();
   const sex = value.sex;
   const allergyStatus = value.allergyStatus;
-  if (sex !== undefined && !["", "female", "male", "other"].includes(String(sex)))
-    return null;
+  if (sex !== undefined && !isDraftSex(sex)) return null;
   if (
     allergyStatus !== undefined &&
     !["unknown", "none", "known"].includes(String(allergyStatus))

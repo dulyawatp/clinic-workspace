@@ -44,6 +44,7 @@ EXPECTED_ENDPOINTS = {
     "clinic_ui.api.finance_write.receive_payment",
     "clinic_ui.api.finance_write.ack",
     "clinic_ui.api.patients.view",
+    "clinic_ui.api.patients.genders",
     "clinic_ui.api.patients.create",
     "clinic_ui.api.patients.update",
 }
@@ -81,6 +82,7 @@ EXPECTED_METHODS = {
     "clinic_ui.api.finance_write.receive_payment": ["POST"],
     "clinic_ui.api.finance_write.ack": ["POST"],
     "clinic_ui.api.patients.view": ["GET"],
+    "clinic_ui.api.patients.genders": ["GET"],
     "clinic_ui.api.patients.create": ["POST"],
     "clinic_ui.api.patients.update": ["POST"],
 }

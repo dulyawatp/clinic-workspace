@@ -1527,6 +1527,72 @@ class ReadableAppointmentListAdapterTests(GatewayTestCase):
         self.assertEqual(stub.get_list_calls, [])
 
 
+class ReadableGenderListAdapterTests(GatewayTestCase):
+    """Bounded, permission-aware Gender master read for the patient form."""
+
+    def doctor(self):
+        stub = FakeFrappe()
+        stub.session = types.SimpleNamespace(
+            user="doctor@example.test", sid="sid-abc123"
+        )
+        stub.db.values[("__perm__", None, "read")] = True
+        return stub
+
+    def test_uses_the_permission_aware_native_list_with_a_hard_limit(self):
+        stub = self.doctor()
+        stub.get_list_rows = [{"name": "Female"}, {"name": "Male"}]
+
+        names = self.gateway(stub).native_gender_options(100)
+
+        self.assertEqual(names, ["Female", "Male"])
+        self.assertEqual(len(stub.get_list_calls), 1)
+        doctype, fields, order_by, limit, _kwargs = stub.get_list_calls[0]
+        self.assertEqual(doctype, "Gender")
+        self.assertEqual(fields, ["name"])
+        self.assertEqual(limit, 100)
+        self.assertIn("name", order_by)
+        self.assertIn(
+            ("Gender", "read", None, "doctor@example.test"),
+            stub.permission_calls,
+        )
+        # ``frappe.get_all`` and raw SQL never appear on this path.
+        self.assertEqual(stub.db.get_all_calls, [])
+
+    def test_without_gender_read_permission_nothing_is_queried(self):
+        stub = self.doctor()
+        stub.db.values[("__perm__", None, "read")] = False
+        stub.get_list_rows = [{"name": "Female"}]
+        self.assertIsNone(self.gateway(stub).native_gender_options(100))
+        self.assertEqual(stub.get_list_calls, [])
+
+    def test_missing_or_malformed_rows_are_dropped(self):
+        stub = self.doctor()
+        stub.get_list_rows = [
+            {"name": "Female"},
+            {"name": ""},
+            {"name": None},
+            {},
+            "Male",
+            {"name": 5},
+            {"name": "bad\x00name"},
+        ]
+        self.assertEqual(
+            self.gateway(stub).native_gender_options(100), ["Female"]
+        )
+
+    def test_a_list_failure_returns_none_instead_of_raising(self):
+        stub = self.doctor()
+        stub.get_list_error = RuntimeError("native list unavailable")
+        self.assertIsNone(self.gateway(stub).native_gender_options(10))
+
+    def test_an_invalid_limit_is_refused_without_a_query(self):
+        stub = self.doctor()
+        for limit in (0, -1, None, "10", True, 100000):
+            with self.subTest(limit=limit):
+                self.assertIsNone(self.gateway(stub).native_gender_options(limit))
+        self.assertEqual(stub.get_list_calls, [])
+
+
 class ManualInvestigationLatchTests(GatewayTestCase):
     KEY = "op-0123456789abcdef"
     OTHER_KEY = "op-fedcba9876543210"

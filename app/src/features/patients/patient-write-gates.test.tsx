@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { Route, Routes } from "react-router-dom";
@@ -13,6 +13,15 @@ afterEach(() => {
   vi.unstubAllEnvs();
   clearNativeCsrfToken();
 });
+
+const NATIVE_GENDERS = "/api/method/clinic_ui.api.patients.genders";
+
+/** The isolated site offers only these values; there is no "Male". */
+function nativeGenders() {
+  return http.get(NATIVE_GENDERS, () =>
+    HttpResponse.json({ message: { items: ["Female", "Other"] } }),
+  );
+}
 
 it.each([
   ["enabled", "read_only", true, false],
@@ -94,12 +103,21 @@ it("refreshes the native directory after a confirmed creation without an acknowl
       requests.push("ack");
       return HttpResponse.json({ message: { acknowledged: true } });
     }),
+    nativeGenders(),
   );
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: "เพิ่มผู้ป่วยจำลอง" }));
   await user.type(screen.getByLabelText("ชื่อ"), "Test");
   await user.type(screen.getByLabelText("นามสกุล"), "Patient");
-  await user.selectOptions(screen.getByLabelText("เพศ"), "Other");
+  const sex = screen.getByLabelText("เพศ");
+  await waitFor(() =>
+    expect(
+      Array.from((sex as HTMLSelectElement).options).map(
+        (option) => option.value,
+      ),
+    ).toContain("Other"),
+  );
+  await user.selectOptions(sex, "Other");
   await user.type(screen.getByLabelText("วันเกิด"), "2000-01-01");
   await user.click(screen.getByRole("button", { name: "บันทึก" }));
   expect(await screen.findByText("Test Patient")).toBeVisible();
@@ -126,12 +144,21 @@ it("renders a stale refusal as a known failure without retrying", async () => {
       creates.push("create");
       return HttpResponse.json({ message: { code: "STALE_VERSION" } }, { status: 409 });
     }),
+    nativeGenders(),
   );
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: "เพิ่มผู้ป่วยจำลอง" }));
   await user.type(screen.getByLabelText("ชื่อ"), "Test");
   await user.type(screen.getByLabelText("นามสกุล"), "Patient");
-  await user.selectOptions(screen.getByLabelText("เพศ"), "Other");
+  const sex = screen.getByLabelText("เพศ");
+  await waitFor(() =>
+    expect(
+      Array.from((sex as HTMLSelectElement).options).map(
+        (option) => option.value,
+      ),
+    ).toContain("Other"),
+  );
+  await user.selectOptions(sex, "Other");
   await user.type(screen.getByLabelText("วันเกิด"), "2000-01-01");
   await user.click(screen.getByRole("button", { name: "บันทึก" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("ข้อมูลผู้ป่วยมีการเปลี่ยนแปลงตั้งแต่เปิดรายการนี้");
@@ -161,12 +188,21 @@ it("reports an unknown outcome and refreshes records before a repeat", async () 
       // Malformed success: the browser cannot tell whether the row was written.
       return HttpResponse.json({ message: { status: "created" } });
     }),
+    nativeGenders(),
   );
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: "เพิ่มผู้ป่วยจำลอง" }));
   await user.type(screen.getByLabelText("ชื่อ"), "Test");
   await user.type(screen.getByLabelText("นามสกุล"), "Patient");
-  await user.selectOptions(screen.getByLabelText("เพศ"), "Other");
+  const sex = screen.getByLabelText("เพศ");
+  await waitFor(() =>
+    expect(
+      Array.from((sex as HTMLSelectElement).options).map(
+        (option) => option.value,
+      ),
+    ).toContain("Other"),
+  );
+  await user.selectOptions(sex, "Other");
   await user.type(screen.getByLabelText("วันเกิด"), "2000-01-01");
   await user.click(screen.getByRole("button", { name: "บันทึก" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("ข้อมูลผู้ป่วยล่าสุด");

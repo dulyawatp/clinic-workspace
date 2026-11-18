@@ -4,6 +4,11 @@
 workspace alias, a historical sealed alias or a native ``Patient`` docname the
 current user may read.
 
+``GET /api/method/clinic_ui.api.patients.genders`` returns the site's own
+readable ``Gender`` master names as ``{"items": [...]}`` so a patient form
+never hardcodes options the site does not have. It is a read on the approved
+development site only and fails closed.
+
 ``POST /api/method/clinic_ui.api.patients.create`` and ``...update`` are the
 converted development write lane. They rely on Frappe/Marley permissions,
 validation and transactions; there is no operation fence, acknowledgement or
@@ -57,6 +62,11 @@ def _csrf_token(form):
 @frappe.whitelist(methods=["GET"])
 def view(workspace_patient_id=None):
     return patients_endpoint.view(Gateway(), workspace_patient_id)
+
+
+@frappe.whitelist(methods=["GET"])
+def genders():
+    return patients_endpoint.genders(Gateway())
 
 
 @frappe.whitelist(methods=["POST"])
