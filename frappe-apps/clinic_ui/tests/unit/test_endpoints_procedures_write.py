@@ -320,6 +320,21 @@ class CompleteTests(unittest.TestCase):
         self.assertIs(payload["stockEntryCreated"], False)
         self.assertEqual(fake.procedure_read_detail_calls, [NATIVE])
 
+    def test_a_non_consuming_completion_without_a_warehouse_is_not_uncertain(self):
+        fake = gateway()
+        fake.procedure_details[NATIVE] = procedure_detail(
+            consume_stock=False, items=(), warehouse=None
+        )
+        fake.created_stock_entry = None
+        fake.procedure_facts = non_consuming_facts(bin_warehouse=None)
+
+        payload = procedures_write.complete(fake, body(), CSRF)
+
+        self.assertEqual(payload["status"], "completed")
+        self.assertIs(payload["stockEntryCreated"], False)
+        self.assertEqual(fake.commit_calls, 1)
+        self.assertEqual(fake.rollback_calls, 0)
+
     def test_an_unresolved_historical_ledger_never_blocks_the_write(self):
         fake = gateway()
         fake.procedure_receipt_list_error = RuntimeError("ledger unavailable")

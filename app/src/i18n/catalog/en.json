@@ -1845,7 +1845,7 @@
   "procedureWrite.notice": "Only procedures that do not consume stock can be completed here. The backend validates and completes the procedure.",
   "procedureWrite.stockNote": "Stock consumption is not available in this workflow.",
   "procedureWrite.completeAction": "Complete procedure",
-  "procedureWrite.confirmBody": "Complete {procedure}? The backend will validate its current state.",
+  "procedureWrite.confirmBody": "Complete {{procedure}}? The backend will validate its current state.",
   "procedureWrite.completed": "Procedure completed",
   "procedureWrite.doctorOnly": "Only a doctor may complete a procedure.",
   "procedureWrite.invalid": "The server refused the completion: check the price list, batch, stock and item rows.",

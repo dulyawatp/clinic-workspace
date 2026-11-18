@@ -479,6 +479,23 @@ class SideEffectTests(unittest.TestCase):
             "a Stock Entry was created for a non-consuming procedure",
         )
 
+    def test_an_absent_warehouse_matches_an_absent_bin_warehouse(self):
+        self.assertIsNone(
+            contract.side_effect_problem(
+                facts(
+                    stock_entry=None,
+                    stock_entry_docstatus=None,
+                    stock_entry_type=None,
+                    stock_entry_company=None,
+                    stock_ledger_rows=0,
+                    gl_rows=0,
+                    bin_delta=0.0,
+                    bin_warehouse=None,
+                ),
+                self.expected(consume_stock=False, warehouse=None),
+            )
+        )
+
 
 class BudgetAndCodecTests(unittest.TestCase):
     secret = "0123456789abcdef0123456789abcdef".encode()

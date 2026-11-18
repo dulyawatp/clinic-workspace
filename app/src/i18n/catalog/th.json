@@ -1845,7 +1845,7 @@
   "procedureWrite.notice": "จบหัตถการได้เฉพาะรายการที่ไม่ตัดสต็อก ระบบหลังบ้านจะตรวจสอบและจบหัตถการ",
   "procedureWrite.stockNote": "ขั้นตอนนี้ไม่รองรับการตัดสต็อก",
   "procedureWrite.completeAction": "ยืนยันจบหัตถการ",
-  "procedureWrite.confirmBody": "ยืนยันจบ {procedure}? ระบบหลังบ้านจะตรวจสอบสถานะปัจจุบัน",
+  "procedureWrite.confirmBody": "ยืนยันจบ {{procedure}}? ระบบหลังบ้านจะตรวจสอบสถานะปัจจุบัน",
   "procedureWrite.completed": "จบหัตถการแล้ว",
   "procedureWrite.doctorOnly": "เฉพาะแพทย์เท่านั้นที่จบหัตถการได้",
   "procedureWrite.invalid": "เซิร์ฟเวอร์ปฏิเสธการจบหัตถการ: ตรวจสอบรายการราคา แบตช์ สต็อก และรายการเวชภัณฑ์",

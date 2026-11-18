@@ -623,7 +623,10 @@ def side_effect_problem(facts, expected):
         return "bin movement is unreadable"
     if abs(float(bin_delta) + float(expected["total_qty"])) > 1e-6:
         return "bin movement differs from the consumed quantity"
-    if facts.get("bin_warehouse") != expected["warehouse"]:
+    if (
+        _text(facts.get("bin_warehouse"), MAX_TEXT_LENGTH)
+        != expected["warehouse"]
+    ):
         return "bin warehouse differs from the procedure warehouse"
 
     gl_rows = facts.get("gl_rows")
