@@ -1,25 +1,21 @@
 import { FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
 import { nativeCsrfToken } from "./session";
 
-/** Distinct from the patient, appointment and encounter locks. */
-const LOCK = "clinic.procedure-write.pending";
-/** The creation path keeps its own lock: an uncertain create never blocks a
- * completion, and neither is ever unlocked automatically. */
-const CREATE_LOCK = "clinic.procedure-create-write.pending";
-
-const ACK_TOKEN = /^[0-9a-f]{64}$/;
-
 export type ProcedureWriteKind = "procedure_complete" | "procedure_create";
 export type ProcedureWriteStatus = "completed";
 export type ProcedureCreateStatus = "created";
+
+/**
+ * A deterministic refusal (`conflict`, `validation`, `auth`, `forbidden`) or an
+ * unresolved outcome (`uncertain`). The converted lane reports a lost or
+ * unreadable response, and a server `WRITE_UNCERTAIN`, as uncertain.
+ */
 export type ProcedureWriteFailure =
-  | "locked"
   | "uncertain"
   | "conflict"
   | "validation"
   | "auth"
-  | "forbidden"
-  | "unavailable";
+  | "forbidden";
 
 export class NativeProcedureWriteError extends Error {
   readonly code: ProcedureWriteFailure;
@@ -33,7 +29,7 @@ export class NativeProcedureWriteError extends Error {
 
 export interface CompleteProcedureInput {
   operation_key: string;
-  /** The server-owned workspace procedure id; never a native docname. */
+  /** The workspace procedure id or the native docname the actor holds. */
   procedure: string;
 }
 
@@ -56,6 +52,7 @@ export interface ProcedureWriteResult {
 }
 
 export interface NativeProcedureCreated {
+  /** The native docname of the row the server created. */
   procedure_id: string;
   state: "pending";
   status: string;
@@ -64,12 +61,6 @@ export interface NativeProcedureCreated {
 export interface ProcedureCreateResult {
   status: ProcedureCreateStatus;
   procedure: NativeProcedureCreated;
-}
-
-const listeners = new Set<() => void>();
-
-function notifyLock(): void {
-  for (const listener of listeners) listener();
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -90,51 +81,11 @@ function isText(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
 }
 
-function readLock(lock: string): boolean {
-  try {
-    return localStorage.getItem(lock) !== null;
-  } catch {
-    return true;
-  }
-}
-
-/** The browser lock is the only persisted write state: no data is stored. */
-export function procedureWriteLocked(): boolean {
-  return readLock(LOCK);
-}
-
-export function procedureCreateLocked(): boolean {
-  return readLock(CREATE_LOCK);
-}
-
-export function subscribeProcedureWriteLock(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}
-
-function persistLock(lock: string): void {
-  try {
-    localStorage.setItem(lock, "1");
-    if (localStorage.getItem(lock) !== "1")
-      throw new NativeProcedureWriteError("locked");
-  } catch {
-    throw new NativeProcedureWriteError("locked");
-  }
-}
-
-function clearLock(lock: string): void {
-  try {
-    localStorage.removeItem(lock);
-    if (readLock(lock)) throw new NativeProcedureWriteError("uncertain");
-  } catch {
-    throw new NativeProcedureWriteError("uncertain");
-  }
-  notifyLock();
-}
-
 function errorCode(body: unknown): string | null {
-  if (!isRecord(body) || !isRecord(body.message)) return null;
-  return typeof body.message.code === "string" ? body.message.code : null;
+  if (!isRecord(body)) return null;
+  if (isRecord(body.message) && typeof body.message.code === "string")
+    return body.message.code;
+  return typeof body.code === "string" ? body.code : null;
 }
 
 function failure(status: number, body: unknown): NativeProcedureWriteError {
@@ -142,7 +93,8 @@ function failure(status: number, body: unknown): NativeProcedureWriteError {
     const code = errorCode(body);
     if (code === "OPERATION_CONFLICT")
       return new NativeProcedureWriteError("conflict");
-    return new NativeProcedureWriteError("locked");
+    // `WRITE_UNCERTAIN` is the server's own rolled-back outcome: still unknown.
+    return new NativeProcedureWriteError("uncertain");
   }
   if (status === 401) return new NativeProcedureWriteError("auth");
   if (status === 403) return new NativeProcedureWriteError("forbidden");
@@ -151,171 +103,66 @@ function failure(status: number, body: unknown): NativeProcedureWriteError {
   return new NativeProcedureWriteError("uncertain");
 }
 
-function parseDetail(value: unknown, expectedAlias: string): NativeProcedureDetail {
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, ["procedure_id", "state", "status"]) ||
-    value.procedure_id !== expectedAlias ||
-    value.state !== "completed" ||
-    !isText(value.status)
-  )
-    throw new NativeProcedureWriteError("uncertain");
-  return {
-    procedure_id: expectedAlias,
-    state: "completed",
-    status: value.status,
-  };
-}
-
-function parseWriteResult(
-  expectedAlias: string,
+/**
+ * Validates the exact `{status, procedure, stockEntryCreated}` completion
+ * result. The echoed detail must be the committed target this request named and
+ * must read back as completed; an unexpected envelope field (including the
+ * retired `ackToken`) fails as uncertain. The browser never derives an id of
+ * its own and never claims a state it was not handed.
+ */
+function parseCompleteResult(
+  expectedId: string,
   body: unknown,
-): { result: ProcedureWriteResult; ackToken: string } {
+): ProcedureWriteResult {
   if (
     !isRecord(body) ||
     !isRecord(body.message) ||
-    !hasExactKeys(body.message, [
-      "status",
-      "procedure",
-      "ackToken",
-      "stockEntryCreated",
-    ])
+    !hasExactKeys(body.message, ["status", "procedure", "stockEntryCreated"])
   )
     throw new NativeProcedureWriteError("uncertain");
 
   const message = body.message;
   if (
     message.status !== "completed" ||
-    typeof message.ackToken !== "string" ||
-    !ACK_TOKEN.test(message.ackToken) ||
-    typeof message.stockEntryCreated !== "boolean"
+    typeof message.stockEntryCreated !== "boolean" ||
+    !isRecord(message.procedure) ||
+    !hasExactKeys(message.procedure, ["procedure_id", "state", "status"]) ||
+    message.procedure.procedure_id !== expectedId ||
+    message.procedure.state !== "completed" ||
+    !isText(message.procedure.status)
   )
     throw new NativeProcedureWriteError("uncertain");
 
   return {
-    result: {
-      status: "completed",
-      procedure: parseDetail(message.procedure, expectedAlias),
-      stockEntryCreated: message.stockEntryCreated,
+    status: "completed",
+    procedure: {
+      procedure_id: expectedId,
+      state: "completed",
+      status: message.procedure.status,
     },
-    ackToken: message.ackToken,
+    stockEntryCreated: message.stockEntryCreated,
   };
 }
 
-async function acknowledge(
-  token: string,
-  kind: ProcedureWriteKind,
-  operationKey: string,
-  ackToken: string,
-): Promise<void> {
-  const response = await frappeRequest("clinic_ui.api.procedures_write.ack", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      [FRAPPE_CSRF_HEADER]: token,
-    },
-    body: JSON.stringify({
-      operation_key: operationKey,
-      kind,
-      ack_token: ackToken,
-    }),
-  });
-  const body: unknown = await response.json().catch(() => null);
-  if (
-    response.status !== 200 ||
-    !isRecord(body) ||
-    !isRecord(body.message) ||
-    !hasExactKeys(body.message, ["acknowledged"]) ||
-    body.message.acknowledged !== true
-  )
-    throw new NativeProcedureWriteError("uncertain");
-}
-
 /**
- * One guarded POST with one explicit acknowledgement and no retry anywhere.
- * The lock is persisted before dispatch and only cleared after a confirmed ack;
- * any uncertain outcome keeps it, so a reload shows the stop state again.
+ * Validates the exact `{status, procedure}` creation result. Creation returns
+ * the native docname of the row the server created; the client validates the
+ * shape and never composes or rewrites that identifier.
  */
-export async function completeNativeProcedure(
-  input: CompleteProcedureInput,
-): Promise<ProcedureWriteResult> {
-  if (!isText(input.operation_key) || !isText(input.procedure))
-    throw new NativeProcedureWriteError("validation");
-
-  const token = nativeCsrfToken();
-  if (!token || procedureWriteLocked())
-    throw new NativeProcedureWriteError("locked");
-
-  persistLock(LOCK);
-
-  let response: Response;
-  try {
-    response = await frappeRequest(
-      "clinic_ui.api.procedures_write.complete",
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          [FRAPPE_CSRF_HEADER]: token,
-        },
-        body: JSON.stringify({
-          operation_key: input.operation_key,
-          procedure: input.procedure,
-        }),
-      },
-    );
-  } catch {
-    notifyLock();
-    throw new NativeProcedureWriteError("uncertain");
-  }
-
-  const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    notifyLock();
-    throw failure(response.status, body);
-  }
-
-  let parsed: { result: ProcedureWriteResult; ackToken: string };
-  try {
-    parsed = parseWriteResult(input.procedure, body);
-  } catch {
-    notifyLock();
-    throw new NativeProcedureWriteError("uncertain");
-  }
-
-  try {
-    await acknowledge(
-      token,
-      "procedure_complete",
-      input.operation_key,
-      parsed.ackToken,
-    );
-  } catch {
-    notifyLock();
-    throw new NativeProcedureWriteError("uncertain");
-  }
-
-  clearLock(LOCK);
-  return parsed.result;
-}
-
-function parseCreateResult(body: unknown): {
-  result: ProcedureCreateResult;
-  ackToken: string;
-} {
+function parseCreateResult(body: unknown): ProcedureCreateResult {
   if (
     !isRecord(body) ||
     !isRecord(body.message) ||
-    !hasExactKeys(body.message, ["status", "procedure", "ackToken"])
+    !hasExactKeys(body.message, ["status", "procedure"])
   )
     throw new NativeProcedureWriteError("uncertain");
 
   const message = body.message;
+  if (message.status !== "created") {
+    throw new NativeProcedureWriteError("uncertain");
+  }
   const procedure = message.procedure;
   if (
-    message.status !== "created" ||
-    typeof message.ackToken !== "string" ||
-    !ACK_TOKEN.test(message.ackToken) ||
     !isRecord(procedure) ||
     !hasExactKeys(procedure, ["procedure_id", "state", "status"]) ||
     !isText(procedure.procedure_id) ||
@@ -325,86 +172,85 @@ function parseCreateResult(body: unknown): {
     throw new NativeProcedureWriteError("uncertain");
 
   return {
-    result: {
-      status: "created",
-      procedure: {
-        procedure_id: procedure.procedure_id,
-        state: "pending",
-        status: procedure.status,
-      },
+    status: "created",
+    procedure: {
+      procedure_id: procedure.procedure_id,
+      state: "pending",
+      status: procedure.status,
     },
-    ackToken: message.ackToken,
   };
 }
 
 /**
- * One guarded creation POST with one explicit acknowledgement and no retry.
+ * One procedure POST through the native Frappe method.
  *
- * The request carries the selected Service Request and an operation key only.
- * The returned procedure id is the workspace alias the completion path resolves
- * through the committed creation receipt, so no native docname reaches the
- * browser. The creation lock is persisted before dispatch and only cleared
- * after a confirmed ack.
+ * The backend owns validation, permissions, the transaction and the canonical
+ * result, so the returned detail is validated by shape and never compared
+ * field-by-field with what the form submitted. There is no acknowledgement
+ * request and no browser-side fence: the caller keeps the in-flight guard,
+ * renders a deterministic refusal as a known failure, and must not retry an
+ * unknown outcome before the records are checked. Every path throws at most
+ * once and nothing is retried here.
  */
+async function writeProcedure<T>(
+  method: string,
+  payload: Record<string, string>,
+  parse: (body: unknown) => T,
+): Promise<T> {
+  const token = nativeCsrfToken();
+  if (!token) throw new NativeProcedureWriteError("uncertain");
+
+  let response: Response;
+  try {
+    response = await frappeRequest(method, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [FRAPPE_CSRF_HEADER]: token,
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    // The request may have reached the server: the outcome is unknown.
+    throw new NativeProcedureWriteError("uncertain");
+  }
+
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw failure(response.status, body);
+
+  return parse(body);
+}
+
+/** Complete one resolved procedure; the server performs the stock movement. */
+export async function completeNativeProcedure(
+  input: CompleteProcedureInput,
+): Promise<ProcedureWriteResult> {
+  if (!isText(input.operation_key) || !isText(input.procedure))
+    throw new NativeProcedureWriteError("validation");
+
+  return writeProcedure(
+    "clinic_ui.api.procedures_write.complete",
+    {
+      operation_key: input.operation_key,
+      procedure: input.procedure,
+    },
+    (body) => parseCompleteResult(input.procedure, body),
+  );
+}
+
+/** Create one procedure from a submitted Service Request. */
 export async function createNativeProcedure(
   input: CreateProcedureInput,
 ): Promise<ProcedureCreateResult> {
   if (!isText(input.operation_key) || !isText(input.service_request))
     throw new NativeProcedureWriteError("validation");
 
-  const token = nativeCsrfToken();
-  if (!token || procedureCreateLocked())
-    throw new NativeProcedureWriteError("locked");
-
-  persistLock(CREATE_LOCK);
-
-  let response: Response;
-  try {
-    response = await frappeRequest(
-      "clinic_ui.api.procedures_write.create",
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          [FRAPPE_CSRF_HEADER]: token,
-        },
-        body: JSON.stringify({
-          operation_key: input.operation_key,
-          service_request: input.service_request,
-        }),
-      },
-    );
-  } catch {
-    notifyLock();
-    throw new NativeProcedureWriteError("uncertain");
-  }
-
-  const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    notifyLock();
-    throw failure(response.status, body);
-  }
-
-  let parsed: { result: ProcedureCreateResult; ackToken: string };
-  try {
-    parsed = parseCreateResult(body);
-  } catch {
-    notifyLock();
-    throw new NativeProcedureWriteError("uncertain");
-  }
-
-  try {
-    await acknowledge(
-      token,
-      "procedure_create",
-      input.operation_key,
-      parsed.ackToken,
-    );
-  } catch {
-    notifyLock();
-    throw new NativeProcedureWriteError("uncertain");
-  }
-
-  clearLock(CREATE_LOCK);
-  return parsed.result;
+  return writeProcedure(
+    "clinic_ui.api.procedures_write.create",
+    {
+      operation_key: input.operation_key,
+      service_request: input.service_request,
+    },
+    parseCreateResult,
+  );
 }

@@ -1,140 +1,436 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  completeNativeProcedure,
   createNativeProcedure,
-  procedureCreateLocked,
-  procedureWriteLocked,
 } from "./procedure-write";
 
-vi.mock("./session", () => ({ nativeCsrfToken: () => "csrf" }));
+const session = vi.hoisted(() => ({ token: "csrf" as string | null }));
+vi.mock("./session", () => ({ nativeCsrfToken: () => session.token }));
 
-const input = { operation_key: "operation-1", service_request: "SR-0001" };
-const ackToken = "c".repeat(64);
-const CREATE_LOCK = "clinic.procedure-create-write.pending";
+const OPERATION = "operation-key-123456";
+const WORKSPACE = "WS-PROC-NATIVE-1";
+const NATIVE_DOCNAME = "PROC-0001";
 
-function success() {
+function completeInput() {
+  return { operation_key: OPERATION, procedure: WORKSPACE };
+}
+
+function createInput() {
+  return { operation_key: OPERATION, service_request: "SR-0001" };
+}
+
+function completed(
+  procedure: Record<string, unknown> = {
+    procedure_id: WORKSPACE,
+    state: "completed",
+    status: "Completed",
+  },
+  stockEntryCreated = true,
+) {
   return new Response(
     JSON.stringify({
-      message: {
-        status: "created",
-        ackToken,
-        procedure: {
-          procedure_id: "WS-PROC-NATIVE-1",
-          state: "pending",
-          status: "Pending",
-        },
-      },
+      message: { status: "completed", procedure, stockEntryCreated },
     }),
     { status: 200 },
   );
 }
 
-describe("native procedure creation", () => {
+function created(
+  procedure: Record<string, unknown> = {
+    procedure_id: NATIVE_DOCNAME,
+    state: "pending",
+    status: "Pending",
+  },
+) {
+  return new Response(
+    JSON.stringify({ message: { status: "created", procedure } }),
+    { status: 200 },
+  );
+}
+
+describe("native procedure completion", () => {
   beforeEach(() => {
     localStorage.clear();
+    session.token = "csrf";
     vi.restoreAllMocks();
   });
 
-  it("locks before dispatch and keeps the create lock after an uncertain response", async () => {
+  it("posts one completion request and never sends an acknowledgement", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async () => {
-        expect(procedureCreateLocked()).toBe(true);
-        // The completion lock is a different key and stays untouched.
-        expect(procedureWriteLocked()).toBe(false);
-        throw new Error("network");
-      });
-    await expect(createNativeProcedure(input)).rejects.toBeDefined();
-    expect(procedureCreateLocked()).toBe(true);
+      .mockResolvedValue(completed());
+
+    await expect(completeNativeProcedure(completeInput())).resolves.toEqual({
+      status: "completed",
+      procedure: {
+        procedure_id: WORKSPACE,
+        state: "completed",
+        status: "Completed",
+      },
+      stockEntryCreated: true,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "/api/method/clinic_ui.api.procedures_write.complete",
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      operation_key: OPERATION,
+      procedure: WORKSPACE,
+    });
+    expect(
+      (fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>)[
+        "X-Frappe-CSRF-Token"
+      ],
+    ).toBe("csrf");
+    expect(localStorage.length).toBe(0);
+  });
+
+  it("keeps the readable stock flag from the server result", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(completed(undefined, false));
+
     await expect(
-      createNativeProcedure({ ...input, operation_key: "operation-2" }),
-    ).rejects.toBeDefined();
+      completeNativeProcedure(completeInput()),
+    ).resolves.toMatchObject({ stockEntryCreated: false });
+  });
+
+  it("accepts a native docname as the workspace target", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        completed({
+          procedure_id: NATIVE_DOCNAME,
+          state: "completed",
+          status: "Completed",
+        }),
+      );
+
+    await expect(
+      completeNativeProcedure({ operation_key: OPERATION, procedure: NATIVE_DOCNAME }),
+    ).resolves.toMatchObject({
+      procedure: { procedure_id: NATIVE_DOCNAME },
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("posts the request selector and operation key, then acks once", async () => {
+  it.each([
+    [
+      "an acknowledgement token",
+      {
+        message: {
+          status: "completed",
+          procedure: {
+            procedure_id: WORKSPACE,
+            state: "completed",
+            status: "Completed",
+          },
+          stockEntryCreated: true,
+          ackToken: "c".repeat(64),
+        },
+      },
+    ],
+    [
+      "a missing stock flag",
+      {
+        message: {
+          status: "completed",
+          procedure: {
+            procedure_id: WORKSPACE,
+            state: "completed",
+            status: "Completed",
+          },
+        },
+      },
+    ],
+    [
+      "a non-boolean stock flag",
+      {
+        message: {
+          status: "completed",
+          procedure: {
+            procedure_id: WORKSPACE,
+            state: "completed",
+            status: "Completed",
+          },
+          stockEntryCreated: "true",
+        },
+      },
+    ],
+    [
+      "another procedure id",
+      {
+        message: {
+          status: "completed",
+          procedure: {
+            procedure_id: "PROC-OTHER",
+            state: "completed",
+            status: "Completed",
+          },
+          stockEntryCreated: true,
+        },
+      },
+    ],
+    [
+      "an unreadable state",
+      {
+        message: {
+          status: "completed",
+          procedure: {
+            procedure_id: WORKSPACE,
+            state: "pending",
+            status: "Completed",
+          },
+          stockEntryCreated: true,
+        },
+      },
+    ],
+    [
+      "an unreadable status",
+      {
+        message: {
+          status: "completed",
+          procedure: {
+            procedure_id: WORKSPACE,
+            state: "completed",
+            status: "  ",
+          },
+          stockEntryCreated: true,
+        },
+      },
+    ],
+    [
+      "a wrong operation status",
+      {
+        message: {
+          status: "created",
+          procedure: {
+            procedure_id: WORKSPACE,
+            state: "completed",
+            status: "Completed",
+          },
+          stockEntryCreated: true,
+        },
+      },
+    ],
+  ])("reports %s as an unknown outcome", async (_label, body) => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async (url, init) => {
-        expect(procedureCreateLocked()).toBe(true);
-        expect(localStorage.getItem(CREATE_LOCK)).toBe("1");
-        expect(JSON.stringify(localStorage)).not.toContain(ackToken);
-        expect(
-          (init?.headers as Record<string, string>)["X-Frappe-CSRF-Token"],
-        ).toBe("csrf");
-        if (String(url).endsWith(".create")) {
-          expect(JSON.parse(String(init?.body))).toEqual(input);
-          return success();
-        }
-        expect(String(url)).toBe(
-          "/api/method/clinic_ui.api.procedures_write.ack",
-        );
-        expect(JSON.parse(String(init?.body))).toEqual({
-          operation_key: input.operation_key,
-          kind: "procedure_create",
-          ack_token: ackToken,
-        });
-        return new Response(
-          JSON.stringify({ message: { acknowledged: true } }),
-          { status: 200 },
-        );
-      });
-    const result = await createNativeProcedure(input);
-    expect(result).toEqual({
+      .mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+
+    await expect(completeNativeProcedure(completeInput())).rejects.toMatchObject(
+      { code: "uncertain" },
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed without a CSRF token and never dispatches", async () => {
+    session.token = null;
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    await expect(completeNativeProcedure(completeInput())).rejects.toMatchObject(
+      { code: "uncertain" },
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("treats a lost response as an unknown outcome and never retries", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("network"));
+
+    await expect(completeNativeProcedure(completeInput())).rejects.toMatchObject(
+      { code: "uncertain" },
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(localStorage.length).toBe(0);
+  });
+});
+
+describe("native procedure creation", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    session.token = "csrf";
+    vi.restoreAllMocks();
+  });
+
+  it("posts the request selector and operation key, and returns the native docname", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(created());
+
+    await expect(createNativeProcedure(createInput())).resolves.toEqual({
       status: "created",
       procedure: {
-        procedure_id: "WS-PROC-NATIVE-1",
+        procedure_id: NATIVE_DOCNAME,
         state: "pending",
         status: "Pending",
       },
     });
-    expect(procedureCreateLocked()).toBe(false);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "/api/method/clinic_ui.api.procedures_write.create",
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      operation_key: OPERATION,
+      service_request: "SR-0001",
+    });
+    expect(
+      (fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>)[
+        "X-Frappe-CSRF-Token"
+      ],
+    ).toBe("csrf");
+    expect(localStorage.length).toBe(0);
   });
 
-  it("rejects an empty service request without dispatching", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch");
-    await expect(
-      createNativeProcedure({ ...input, service_request: "  " }),
-    ).rejects.toMatchObject({ code: "validation" });
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(procedureCreateLocked()).toBe(false);
-  });
-
-  it("keeps the lock when the server refuses and never retries", async () => {
+  it.each([
+    [
+      "an acknowledgement token",
+      {
+        message: {
+          status: "created",
+          procedure: {
+            procedure_id: NATIVE_DOCNAME,
+            state: "pending",
+            status: "Pending",
+          },
+          ackToken: "c".repeat(64),
+        },
+      },
+    ],
+    [
+      "a completion payload",
+      {
+        message: {
+          status: "created",
+          procedure: {
+            procedure_id: NATIVE_DOCNAME,
+            state: "pending",
+            status: "Pending",
+          },
+          stockEntryCreated: false,
+        },
+      },
+    ],
+    [
+      "a completed state",
+      {
+        message: {
+          status: "created",
+          procedure: {
+            procedure_id: NATIVE_DOCNAME,
+            state: "completed",
+            status: "Completed",
+          },
+        },
+      },
+    ],
+    [
+      "an empty procedure id",
+      {
+        message: {
+          status: "created",
+          procedure: { procedure_id: "", state: "pending", status: "Pending" },
+        },
+      },
+    ],
+    [
+      "a wrong operation status",
+      {
+        message: {
+          status: "completed",
+          procedure: {
+            procedure_id: NATIVE_DOCNAME,
+            state: "pending",
+            status: "Pending",
+          },
+        },
+      },
+    ],
+  ])("reports %s as an unknown outcome", async (_label, body) => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response(JSON.stringify({ message: { code: "VALIDATION" } }), {
-          status: 417,
-        }),
-      );
-    await expect(createNativeProcedure(input)).rejects.toMatchObject({
-      code: "validation",
-    });
-    expect(procedureCreateLocked()).toBe(true);
-    await expect(createNativeProcedure(input)).rejects.toMatchObject({
-      code: "locked",
+      .mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+
+    await expect(createNativeProcedure(createInput())).rejects.toMatchObject({
+      code: "uncertain",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["", "C".repeat(64), "c".repeat(63)])(
-    "does not acknowledge an invalid token",
-    async (token) => {
-      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            message: {
-              status: "created",
-              ackToken: token,
-              procedure: { procedure_id: "x", state: "pending", status: "Pending" },
-            },
-          }),
-          { status: 200 },
-        ),
-      );
-      await expect(createNativeProcedure(input)).rejects.toBeDefined();
-      expect(procedureCreateLocked()).toBe(true);
+  it.each([
+    ["an empty service request", { ...createInput(), service_request: "  " }],
+    ["an empty operation key", { ...createInput(), operation_key: "" }],
+  ])("rejects %s without dispatching", async (_label, input) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    await expect(createNativeProcedure(input)).rejects.toMatchObject({
+      code: "validation",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(localStorage.length).toBe(0);
+  });
+
+  it("treats a lost response as an unknown outcome and never retries", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("network"));
+
+    await expect(createNativeProcedure(createInput())).rejects.toMatchObject({
+      code: "uncertain",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("native procedure refusals", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    session.token = "csrf";
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    [409, "OPERATION_CONFLICT", "conflict"],
+    [409, "WRITE_UNCERTAIN", "uncertain"],
+    [422, "VALIDATION", "validation"],
+    [417, "VALIDATION", "validation"],
+    [403, "FORBIDDEN", "forbidden"],
+    [401, "AUTH", "auth"],
+    [500, "SERVER", "uncertain"],
+  ])(
+    "maps completion status %i code %s to %s without retrying",
+    async (status, code, kind) => {
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(
+          new Response(JSON.stringify({ message: { code } }), { status }),
+        );
+
+      await expect(
+        completeNativeProcedure(completeInput()),
+      ).rejects.toMatchObject({ code: kind });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    [409, "OPERATION_CONFLICT", "conflict"],
+    [409, "WRITE_UNCERTAIN", "uncertain"],
+    [422, "VALIDATION", "validation"],
+    [403, "FORBIDDEN", "forbidden"],
+    [401, "AUTH", "auth"],
+    [500, "SERVER", "uncertain"],
+  ])(
+    "maps creation status %i code %s to %s without retrying",
+    async (status, code, kind) => {
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(
+          new Response(JSON.stringify({ message: { code } }), { status }),
+        );
+
+      await expect(createNativeProcedure(createInput())).rejects.toMatchObject({
+        code: kind,
+      });
       expect(fetchMock).toHaveBeenCalledTimes(1);
     },
   );

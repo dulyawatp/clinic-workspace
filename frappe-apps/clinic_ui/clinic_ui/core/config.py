@@ -104,8 +104,9 @@ ENCOUNTER_COMPANY_KEY = "clinic_ui_encounter_company"
 PROCEDURE_WRITE_ENABLED_KEY = "clinic_ui_native_procedure_write_enabled"
 PROCEDURE_WRITE_SITE_KEY = "clinic_ui_native_procedure_write_site"
 # Server-owned allowlist of the workspace procedure targets this surface may
-# complete. The workspace id is the only procedure identifier returned to the
-# client; the native docname is never exposed.
+# complete. A created procedure is addressed by its native docname, which is
+# returned only to the caller that created it or that holds native read and
+# write authority on that row.
 PROCEDURES_KEY = "clinic_ui_synthetic_procedures"
 # Separate, default-off admin users + masters gate. Independent of every other
 # write flag: creating a user or a master needs this flag and the exact

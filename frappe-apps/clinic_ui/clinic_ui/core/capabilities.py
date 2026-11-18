@@ -182,12 +182,11 @@ def bootstrap_capabilities(
     # medication contract exists (the installed ``Drug Prescription.dosage_form``
     # is required and unsupplied).
     #
-    # Completing a procedure is the stock-consumption write (SPEC:185-220): the
-    # pair below is enabled by the one procedure gate, because the stock move is
-    # never a separate client operation.
+    # The converted procedure lane refuses stock-consuming procedures, so the
+    # procedure gate enables completion only. ``write.stock.consume`` stays
+    # ``read_only``: no reviewed workflow drives it from this surface.
     if write_procedure_complete is True:
         capabilities["write.procedure.complete"] = ENABLED_STATE
-        capabilities["write.stock.consume"] = ENABLED_STATE
     # Creating the Clinical Procedure is the family's one creation write
     # (Amendment A1); it rides the same site-config gate as completion.
     if write_procedure_create is True:

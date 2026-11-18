@@ -223,6 +223,7 @@ class RoleCodeSetTests(unittest.TestCase):
         "ENCOUNTER_COMPLETE_ROLE_CODES": {"DOC"},
         "ENCOUNTER_AMEND_ROLE_CODES": {"DOC"},
         "PROCEDURE_ROLE_CODES": {"DOC"},
+        "PROCEDURE_VIEW_ROLE_CODES": {"DOC", "NUR"},
         "STOCK_ROLE_CODES": {"PHA"},
         "ADJUST_ROLE_CODES": {"ADM"},
         "PO_ROLE_CODES": {"PHA", "MGR"},

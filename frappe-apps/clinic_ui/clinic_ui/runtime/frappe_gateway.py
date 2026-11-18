@@ -118,6 +118,13 @@ PATIENT_CREATE_TRIGGER_FIELDS = (
 # Exactly the fields a detail read may load. Every other Patient column stays
 # unread, so no identifier, contact value or clinical field can reach the DTO.
 PATIENT_VIEW_FIELDS = PATIENT_DOCFIELD_FIELDS + PATIENT_STANDARD_FIELDS
+# The only Clinical Procedure values a read surface may return. ``status`` is a
+# DocField with a permlevel and can be masked; ``name`` and ``docstatus`` are
+# standard columns without a permlevel or mask entry, read only after the
+# document and field-level checks. A linked identifier is never fetched here.
+PROCEDURE_STATUS_FIELD = "status"
+PROCEDURE_STANDARD_NAME_FIELD = "name"
+PROCEDURE_DOCSTATUS_VALUES = (0, 1, 2)
 APPOINTMENT_TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
 # The site timestamp recorded verbatim in an appended cancel/no-show note,
 # exactly as ``frappe.utils.now()`` returns it: whole seconds, or the seconds
@@ -3661,6 +3668,174 @@ class Gateway:
         except Exception:
             return False
 
+    def native_procedure_can_read(self, native_procedure_id):
+        """The current user's own document-level Clinical Procedure read authority."""
+
+        try:
+            return bool(
+                self.frappe.has_permission(
+                    procedure_contract.PROCEDURE_DOCTYPE,
+                    ptype="read",
+                    doc=native_procedure_id,
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
+    def native_procedure_read_detail(self, native_procedure_id):
+        """The committed procedure status under the current user's read authority.
+
+        The converted lane reads its own result back after the one commit. This
+        is the same three-field, field-level-checked read as
+        :meth:`native_procedure_view`: a denied document, a restricted or masked
+        ``status`` and a malformed row all return ``None``, so the caller
+        reports an uncertain outcome rather than publishing an unmasked status.
+        """
+
+        return self.native_procedure_view(native_procedure_id)
+
+    def _procedure_field_readable(self, fieldname):
+        """True when one Clinical Procedure DocField is readable and unmasked.
+
+        ``status`` and the ``service_request`` filter are DocFields that carry a
+        permlevel and can be masked. A missing, restricted or masked field is
+        refused before any value is fetched or any query is built.
+        """
+
+        meta = self.frappe.get_meta(procedure_contract.PROCEDURE_DOCTYPE)
+        accessible_permlevels = meta.get_permlevel_access(
+            "read", user=self.frappe.session.user
+        )
+        field_definition = meta.get_field(fieldname)
+        if (
+            field_definition is None
+            or field_definition.permlevel not in accessible_permlevels
+        ):
+            return False
+        masked_fields = meta.get_masked_fields() or ()
+        return not any(
+            getattr(masked, "fieldname", None) == fieldname
+            for masked in masked_fields
+        )
+
+    def native_procedure_view(self, native_procedure_id):
+        """Three-field procedure read under document and field-level rights.
+
+        The document read permission is checked first. ``status`` must then
+        exist at a readable permlevel and must not be masked for the current
+        user; ``name`` and ``docstatus`` are standard columns without a
+        permlevel or mask entry and are read only after that check. No linked
+        identifier (patient, practitioner, template, Service Request) is read
+        here. ``None`` covers a denied document, a restricted or masked status,
+        a malformed row and any adapter failure.
+        """
+
+        if (
+            not isinstance(native_procedure_id, str)
+            or not native_procedure_id.strip()
+        ):
+            return None
+        try:
+            frappe = self.frappe
+            user = frappe.session.user
+            if not frappe.has_permission(
+                procedure_contract.PROCEDURE_DOCTYPE,
+                ptype="read",
+                doc=native_procedure_id,
+                user=user,
+            ):
+                return None
+            if not self._procedure_field_readable(PROCEDURE_STATUS_FIELD):
+                return None
+            row = frappe.db.get_value(
+                procedure_contract.PROCEDURE_DOCTYPE,
+                native_procedure_id,
+                [PROCEDURE_STANDARD_NAME_FIELD, PROCEDURE_STATUS_FIELD, "docstatus"],
+                as_dict=True,
+            )
+        except Exception:
+            return None
+        if row is None:
+            return None
+        get = (
+            row.get
+            if hasattr(row, "get")
+            else (lambda key, default=None: default)
+        )
+        name = self._text_value(get(PROCEDURE_STANDARD_NAME_FIELD))
+        status = self._text_value(get(PROCEDURE_STATUS_FIELD))
+        docstatus = get("docstatus")
+        if not name or not status:
+            return None
+        if (
+            not isinstance(docstatus, int)
+            or isinstance(docstatus, bool)
+            or docstatus not in PROCEDURE_DOCSTATUS_VALUES
+        ):
+            return None
+        return {
+            "procedure_id": name,
+            "status": status,
+            "docstatus": docstatus,
+        }
+
+    def native_procedures_for_service_request(self, service_request, limit):
+        """Bounded, permission-aware procedure names linked to one request.
+
+        ``frappe.get_list`` applies the framework's own permission filtering and
+        permission-query conditions for the session user; ``get_all`` and raw
+        SQL are deliberately never used on this discovery path. The installed
+        filter column must exist and pass the current user's own field-level read
+        and mask check before the query is built. One row beyond the bound is
+        requested, so an over-full page is reported as ``None`` rather than
+        silently truncated. The caller still applies the document and field-level
+        checks per record.
+        """
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit < 1
+            or limit > 1000
+        ):
+            return None
+        try:
+            filter_field = self._procedure_field(
+                procedure_contract.PROCEDURE_DOCTYPE, "service_request"
+            )
+            if not filter_field:
+                return None
+            # The filter column is itself a DocField that can carry a permlevel
+            # or a mask, so the same field-level read check runs before the
+            # query is built. A restricted filter is refused, never dropped.
+            if not self._procedure_field_readable(filter_field):
+                return None
+            rows = self.frappe.get_list(
+                procedure_contract.PROCEDURE_DOCTYPE,
+                filters={filter_field: service_request},
+                fields=[PROCEDURE_STANDARD_NAME_FIELD],
+                order_by="modified desc, name asc",
+                limit_page_length=limit + 1,
+            )
+        except Exception:
+            return None
+        if not isinstance(rows, (list, tuple)):
+            return None
+        if len(rows) > limit:
+            return None
+        names = []
+        for row in rows:
+            name = (
+                row.get(PROCEDURE_STANDARD_NAME_FIELD)
+                if hasattr(row, "get")
+                else getattr(row, PROCEDURE_STANDARD_NAME_FIELD, None)
+            )
+            if not isinstance(name, str) or not name.strip():
+                return None
+            names.append(name.strip())
+        return names
+
     def native_procedure_can_create(self):
         """The acting user's native Clinical Procedure create + submit authority."""
 
@@ -4004,15 +4179,36 @@ class Gateway:
         }
 
     def lock_procedure_target(self, native_procedure_id):
-        """Lock the procedure row and read the contract decision fields."""
+        """Lock the procedure row and read the contract decision fields.
+
+        The native transaction snapshot is restarted first (no native write has
+        happened yet) and the current user's own native write authority is
+        re-checked under the lock, so a permission change between the request
+        checks and the lock is a definite refusal rather than a write.
+        """
 
         try:
-            doc = self.frappe.get_doc(
+            frappe = self.frappe
+            permission_error = frappe.PermissionError
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        try:
+            frappe.db.rollback()
+            doc = frappe.get_doc(
                 procedure_contract.PROCEDURE_DOCTYPE,
                 native_procedure_id,
                 for_update=True,
             )
+            if not frappe.has_permission(
+                procedure_contract.PROCEDURE_DOCTYPE,
+                ptype="write",
+                doc=native_procedure_id,
+                user=frappe.session.user,
+            ):
+                raise permission_error(DENIAL_MESSAGE)
             values = self._procedure_state_values(doc)
+        except permission_error:
+            raise
         except Exception:
             raise patient_write.WriteUncertain() from None
         return ProcedureLockedState(doc=doc, **values)

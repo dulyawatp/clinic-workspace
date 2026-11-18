@@ -168,14 +168,11 @@ def _procedure_write_flags(gateway, settings, role):
     """Return ``(complete, create)`` when the procedure surface is open.
 
     Independent of the other write flags: exact approved site, boundary and
-    installed-field preflight, the procedure flag, the deployment marker, a ready
-    fence store and the caller's own native Clinical Procedure authority. The
-    target and its price list / batch / stock state are decided per request;
-    these flags only advertise that the surface exists.
-
-    Completion also needs a resolvable target: the server-owned allowlist, or
-    the creation path, because a procedure created through the contract is
-    addressable through its own committed creation receipt.
+    installed-field preflight, the procedure flag and the caller's own native
+    Clinical Procedure authority. The historical deployment marker and fence
+    store no longer gate the converted lane. The target, its price list, batch
+    and stock state are decided per request; these flags only advertise that the
+    surface exists.
     """
 
     disabled = (False, False)
@@ -188,14 +185,8 @@ def _procedure_write_flags(gateway, settings, role):
             return disabled
         if not settings.procedure_write_enabled:
             return disabled
-        if gateway.write_deployment_approved() is not True:
-            return disabled
-        if gateway.write_fence_ready() is not True:
-            return disabled
         create_ok = gateway.native_procedure_can_create() is True
-        complete_ok = gateway.native_procedure_can_write() is True and (
-            bool(settings.procedure_allowlist) or create_ok
-        )
+        complete_ok = gateway.native_procedure_can_write() is True
         return complete_ok, create_ok
     except Exception:
         return disabled

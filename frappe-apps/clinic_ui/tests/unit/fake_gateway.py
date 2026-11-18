@@ -328,6 +328,17 @@ class FakeGateway:
         self.procedure_boundary_problem = None
         self.procedure_install_problem = None
         self.procedure_can_write = True
+        self.procedure_can_read = True
+        self.procedure_read_detail = True
+        self.procedure_read_status = {}
+        self.procedure_read_detail_calls = []
+        self.procedure_view_detail = {}
+        self.procedure_view_calls = []
+        self.procedure_view_error = None
+        self.procedure_view_authority = None
+        self.readable_procedures = {}
+        self.procedure_list_calls = []
+        self.procedure_list_error = None
         self.procedure_details = {}
         self.procedure_action_detail_calls = []
         self.procedure_locked = {}
@@ -1187,6 +1198,69 @@ class FakeGateway:
 
     def native_procedure_can_write(self, native_procedure_id=None):
         return self.procedure_can_write
+
+    def native_procedure_can_read(self, native_procedure_id):
+        return self.procedure_can_read
+
+    def native_procedure_read_detail(self, native_procedure_id):
+        """The committed status under the current user's read authority."""
+
+        self.procedure_read_detail_calls.append(native_procedure_id)
+        if self.procedure_read_detail is False:
+            return None
+        if self.procedure_can_read is not True:
+            return None
+        # The read-back models the committed state, which is independent of the
+        # pre-mutation detail the endpoint reads before dispatch.
+        values = {
+            "procedure_id": native_procedure_id,
+            "status": "Completed",
+            "docstatus": 1,
+        }
+        if (
+            native_procedure_id == self.created_procedure_id
+            and native_procedure_id not in self.procedure_read_status
+        ):
+            # A row created by the converted lane is submitted and pending.
+            values["status"] = "Pending"
+        values.update(self.procedure_read_status.get(native_procedure_id) or {})
+        return values
+
+    def native_procedure_view(self, native_procedure_id):
+        """The three read fields under the current user's read authority."""
+
+        self.procedure_view_calls.append(native_procedure_id)
+        if self.procedure_view_error is not None:
+            raise self.procedure_view_error
+        if self.procedure_can_read is not True:
+            return None
+        if (
+            self.procedure_view_authority is not None
+            and native_procedure_id not in self.procedure_view_authority
+        ):
+            return None
+        values = {
+            "procedure_id": native_procedure_id,
+            "status": "Completed",
+            "docstatus": 1,
+        }
+        values.update(self.procedure_read_status.get(native_procedure_id) or {})
+        values.update(self.procedure_view_detail.get(native_procedure_id) or {})
+        return dict(values)
+
+    def native_procedures_for_service_request(self, service_request, limit):
+        """Permission-filtered linked procedure names, bounded by ``limit``."""
+
+        self.procedure_list_calls.append((service_request, limit))
+        if self.procedure_list_error is not None:
+            raise self.procedure_list_error
+        names = self.readable_procedures
+        if isinstance(names, dict):
+            names = names.get(service_request) or ()
+        names = list(names)
+        if len(names) > limit:
+            return None
+        return names
 
     def native_procedure_action_detail(self, native_procedure_id):
         self.procedure_action_detail_calls.append(native_procedure_id)

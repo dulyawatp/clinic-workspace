@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useParams } from "react-router-dom";
 import { ROUTES } from "../../app/routes";
@@ -17,6 +17,8 @@ import { opsData } from "../../fixtures/data-ops";
 import { translateClinicalText } from "../../i18n";
 import { formatDate, formatDateTime } from "../../i18n/format";
 import { useLocale } from "../../i18n/LocaleProvider";
+import { nativeTransportEnabled } from "../../transport/native/flag";
+import { findProcedures, ProcedureReadError, viewProcedure, type ProcedureStatus } from "../../transport/native/procedure-read";
 import {
   completeNativeProcedure,
   createNativeProcedure,
@@ -32,10 +34,6 @@ import {
   roomLabel,
   templateName,
 } from "./sample-scope";
-import {
-  useProcedureCreateLock,
-  useProcedureWriteLock,
-} from "./useProcedureWriteLock";
 
 function createFailureKey(code: string): string {
   switch (code) {
@@ -46,10 +44,8 @@ function createFailureKey(code: string): string {
       return "procedureCreate.forbidden";
     case "conflict":
       return "procedureCreate.conflict";
-    case "uncertain":
-      return "procedureCreate.uncertain";
     default:
-      return "procedureCreate.locked";
+      return "procedureCreate.uncertain";
   }
 }
 
@@ -62,10 +58,8 @@ function nativeFailureKey(code: string): string {
       return "procedureWrite.forbidden";
     case "conflict":
       return "procedureWrite.conflict";
-    case "uncertain":
-      return "procedureWrite.uncertain";
     default:
-      return "procedureWrite.locked";
+      return "procedureWrite.uncertain";
   }
 }
 
@@ -74,21 +68,37 @@ function nativeFailureKey(code: string): string {
  *
  * The actor types the Service Request they were told to use (the encounter
  * cascade creates it); the server reads every procedure field from that request
- * and returns the workspace alias completion uses. One explicit submit, no
- * retry: the form locks after one attempt and stays locked until an operator
- * reconciles the server state.
+ * and returns the native docname it created. One request per submit and no
+ * automatic retry: a definite refusal leaves the form usable for a corrected
+ * attempt, while an uncertain outcome stops the form for this screen.
  */
 function NativeProcedureCreation() {
   const { t } = useTranslation();
-  const { locked, refreshLock } = useProcedureCreateLock();
   const [serviceRequest, setServiceRequest] = useState("");
   const [saving, setSaving] = useState(false);
+  const [halted, setHalted] = useState(false);
   const [created, setCreated] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const [results, setResults] = useState<ProcedureStatus[] | null>(null);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+  const [looking, setLooking] = useState(false);
+
+  async function lookup() {
+    setLooking(true);
+    setResults(null);
+    setLookupError(null);
+    try {
+      setResults(await findProcedures(serviceRequest.trim()));
+    } catch (error) {
+      setLookupError(error instanceof ProcedureReadError && error.kind === "permission" ? "procedureRead.permission" : "procedureRead.unavailable");
+    } finally {
+      setLooking(false);
+    }
+  }
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (saving || locked) return;
+    if (saving || halted) return;
     const request = serviceRequest.trim();
     if (!request) {
       setFailure("procedureCreate.invalid");
@@ -104,14 +114,13 @@ function NativeProcedureCreation() {
       setCreated(result.procedure.procedure_id);
       setServiceRequest("");
     } catch (error) {
-      setFailure(
-        error instanceof NativeProcedureWriteError
-          ? createFailureKey(error.code)
-          : "procedureCreate.uncertain",
-      );
+      const code =
+        error instanceof NativeProcedureWriteError ? error.code : "uncertain";
+      setFailure(createFailureKey(code));
+      // A pre-mutation refusal is a known outcome; an unknown one stops here.
+      if (code === "uncertain") setHalted(true);
     } finally {
       setSaving(false);
-      refreshLock();
     }
   }
 
@@ -128,6 +137,8 @@ function NativeProcedureCreation() {
             maxLength={140}
             value={serviceRequest}
             required
+            readOnly={saving || halted}
+            aria-describedby={halted ? "procedure-lookup-notice" : undefined}
             onChange={(event) => setServiceRequest(event.target.value)}
           />
         </div>
@@ -135,25 +146,42 @@ function NativeProcedureCreation() {
           <GateButton
             type="submit"
             variant="primary"
-            disabled={saving || locked}
+            disabled={saving || halted}
           >
             {saving ? t("procedureCreate.saving") : t("procedureCreate.action")}
           </GateButton>
-          {locked && (
-            <Badge tone="danger">{t("procedureCreate.locked")}</Badge>
-          )}
         </div>
       </form>
       {created && (
         <p className="pc-status-line" data-testid="procedure-created">
           {t("procedureCreate.created")}{" "}
-          <span className="ops-mono">{created}</span>
+          <Link className="ops-mono" to={ROUTES.procedure(created)}>{created}</Link>
         </p>
       )}
       {failure && (
         <p className="pc-error" role="alert">
           {t(failure)}
         </p>
+      )}
+      {halted && (
+        <div className="pc-stack">
+          <p id="procedure-lookup-notice" className="pc-note">{t("procedureRead.lookupNotice")}</p>
+          <GateButton type="button" onClick={() => void lookup()} disabled={looking}>
+            {looking ? t("procedureRead.loading") : t("procedureRead.lookup")}
+          </GateButton>
+          <div aria-live="polite" aria-atomic="true">
+            {looking && <p>{t("procedureRead.loading")}</p>}
+            {lookupError && <p className="pc-error">{t(lookupError)}</p>}
+            {results && (results.length ? (
+              <ul>
+                {results.map((item) => <li key={item.procedure_id}>
+                  <Link to={ROUTES.procedure(item.procedure_id)}>{item.procedure_id}</Link>
+                  {" · "}{item.status}{" · "}{t("procedureRead.docstatus")}: {item.docstatus}
+                </li>)}
+              </ul>
+            ) : <p>{t("procedureRead.noResults")}</p>)}
+          </div>
+        </div>
       )}
     </Card>
   );
@@ -162,25 +190,26 @@ function NativeProcedureCreation() {
 /**
  * Native completion of one server-owned procedure target.
  *
- * The workspace procedure id is the only identifier here; the consumables and
- * the stock preview stay read-only (the designed preview is unchanged) because
- * the stock movement belongs to the one server transaction. Completion is
- * confirmation-gated, DOC-only, and locked after one attempt: a second call
- * would post a second Stock Entry, so the server refuses it and this button
- * stays locked until an operator resolves the state.
+ * The workspace procedure id or native docname is the only identifier here; the
+ * consumables and the stock preview stay read-only (the designed preview is
+ * unchanged) because the stock movement belongs to the one server transaction.
+ * Completion is confirmation-gated and DOC-only. One request per submit and no
+ * automatic retry: a definite refusal leaves the action available for an
+ * explicit retry, while an uncertain outcome stops it for this screen. There is
+ * a separate card reports status only after a successful native read.
  */
-function NativeProcedureCompletionCard({ workspaceId }: { workspaceId: string }) {
+function NativeProcedureCompletionCard({ workspaceId, onCompleted }: { workspaceId: string; onCompleted: () => void }) {
   const { t } = useTranslation();
   const { session } = useSession();
   const roles = session?.user.roles ?? [];
   const isDoctor = roles.includes("DOC");
-  const { locked, refreshLock } = useProcedureWriteLock();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [halted, setHalted] = useState(false);
   const [completed, setCompleted] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
 
-  const unavailable = completed || locked;
+  const unavailable = completed || halted;
 
   async function submit() {
     if (saving || unavailable) return;
@@ -192,16 +221,16 @@ function NativeProcedureCompletionCard({ workspaceId }: { workspaceId: string })
         procedure: workspaceId,
       });
       setCompleted(true);
+      onCompleted();
       setOpen(false);
     } catch (error) {
-      setFailure(
-        error instanceof NativeProcedureWriteError
-          ? nativeFailureKey(error.code)
-          : "procedureWrite.uncertain",
-      );
+      const code =
+        error instanceof NativeProcedureWriteError ? error.code : "uncertain";
+      setFailure(nativeFailureKey(code));
+      // A pre-mutation refusal is a known outcome; an unknown one stops here.
+      if (code === "uncertain") setHalted(true);
     } finally {
       setSaving(false);
-      refreshLock();
     }
   }
 
@@ -212,9 +241,7 @@ function NativeProcedureCompletionCard({ workspaceId }: { workspaceId: string })
         actions={
           completed ? (
             <Badge tone="success">{t("procedureWrite.completed")}</Badge>
-          ) : (
-            <Badge tone="warning">{t("status.inProgress")}</Badge>
-          )
+          ) : null
         }
       >
         <p className="pc-note">{t("procedureWrite.notice")}</p>
@@ -234,9 +261,6 @@ function NativeProcedureCompletionCard({ workspaceId }: { workspaceId: string })
             </WriteGate>
           ) : (
             <p className="pc-note">{t("procedureWrite.doctorOnly")}</p>
-          )}
-          {unavailable && !completed && (
-            <Badge tone="danger">{t("procedureWrite.locked")}</Badge>
           )}
         </div>
         {completed && (
@@ -278,6 +302,40 @@ function NativeProcedureCompletionCard({ workspaceId }: { workspaceId: string })
   );
 }
 
+function NativeProcedureStatusCard({ workspaceId }: { workspaceId: string }) {
+  const { t } = useTranslation();
+  const [status, setStatus] = useState<ProcedureStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [revision, setRevision] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setStatus(null);
+    setError(null);
+    void viewProcedure(workspaceId).then((result) => {
+      if (active) setStatus(result);
+    }).catch((reason: unknown) => {
+      if (active) setError(reason instanceof ProcedureReadError && reason.kind === "permission" ? "procedureRead.permission" : "procedureRead.unavailable");
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [workspaceId, revision]);
+
+  return <Card title={t("procedureRead.title")}>
+    {loading && <p role="status">{t("procedureRead.loading")}</p>}
+    {error && <p role="alert" className="pc-error">{t(error)}</p>}
+    {status && <div role="status">
+      <p>{t("procedureRead.identifier")}: <span className="ops-mono">{status.procedure_id}</span></p>
+      <p>{t("procedureRead.status")}: {status.status}</p>
+      <p>{t("procedureRead.docstatus")}: {status.docstatus}</p>
+    </div>}
+    <GateButton type="button" disabled={loading} onClick={() => setRevision((value) => value + 1)}>{t("procedureRead.refresh")}</GateButton>
+  </Card>;
+}
+
 /**
  * The native DOC-03 surface: one page header and the two write cards the
  * deployment advertises (create the procedure, complete it).
@@ -292,6 +350,7 @@ function NativeProcedureSurface({
   complete: boolean;
 }) {
   const { t } = useTranslation();
+  const [statusRevision, setStatusRevision] = useState(0);
 
   return (
     <div data-surface="DOC-03" data-testid="procedure-native">
@@ -300,9 +359,10 @@ function NativeProcedureSurface({
         title={t("surface.DOC-03")}
       />
       <div className="pc-page__body">
+        {nativeTransportEnabled() && <NativeProcedureStatusCard key={statusRevision} workspaceId={workspaceId} />}
         {create && <NativeProcedureCreation />}
         {complete && (
-          <NativeProcedureCompletionCard workspaceId={workspaceId} />
+          <NativeProcedureCompletionCard workspaceId={workspaceId} onCompleted={() => setStatusRevision((value) => value + 1)} />
         )}
       </div>
     </div>
@@ -336,7 +396,7 @@ export function ProcedureDetailPage() {
   if (!procedure) {
     const canComplete = get("write.procedure.complete") === "enabled";
     const canCreate = get("write.procedure.create") === "enabled";
-    if (id && (canComplete || canCreate)) {
+    if (id && (canComplete || canCreate || (nativeTransportEnabled() && (roles.includes("DOC") || roles.includes("NUR"))))) {
       return (
         <NativeProcedureSurface
           workspaceId={id}

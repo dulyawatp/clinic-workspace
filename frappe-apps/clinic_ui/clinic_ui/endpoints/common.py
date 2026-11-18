@@ -133,13 +133,15 @@ def authorize_encounter_write(gateway, allowed_codes, csrf_token=None):
 
 
 def authorize_procedure_write(gateway, allowed_codes, csrf_token=None):
-    """Read gate, explicit CSRF, and the separate procedure-write gate.
+    """Read gate, explicit CSRF, and the converted procedure-write gate.
 
-    The procedure gate is independent of the patient, appointment and encounter
-    flags. It requires the exact approved site, the procedure flag and the same
-    private deployment marker bound to the fence store. The completion target is
-    decided per request from the server-owned procedure allowlist; no
-    configuration value is authority on its own.
+    The converted development lane relies on Frappe/Marley permissions,
+    validation and transactions instead of the historical operation fence,
+    deployment marker and acknowledgement barrier. It still requires the
+    authenticated session, a valid same-session CSRF token, the exact approved
+    site configuration and the clinic role code. The target is decided per
+    request: the server-owned allowlist, a read-only historical creation
+    receipt, or a native docname under the caller's own native permission.
     """
 
     settings, view, role = authorize(gateway, allowed_codes)
@@ -148,8 +150,6 @@ def authorize_procedure_write(gateway, allowed_codes, csrf_token=None):
     if not gateway.csrf_token_valid(csrf_token):
         gateway.deny()
     if not settings.procedure_write_enabled:
-        gateway.deny()
-    if not gateway.write_deployment_approved():
         gateway.deny()
     return settings, view, role
 

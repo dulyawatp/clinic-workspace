@@ -278,11 +278,12 @@ class BootstrapCapabilityTests(unittest.TestCase):
             "write.procedure.complete",
             "write.procedure.create",
             "write.invoice.submit",
-            # The procedure gate still implies its stock consumption write.
-            "write.stock.consume",
         ):
             with self.subTest(name=name):
                 self.assertEqual(capabilities[name], ENABLED_STATE)
+        # The converted procedure lane refuses stock-consuming procedures, so
+        # its gate never advertises the stock consumption write.
+        self.assertEqual(capabilities["write.stock.consume"], READ_ONLY_STATE)
         self.assertEqual(capabilities["write.medication.order"], READ_ONLY_STATE)
 
     def test_new_write_ids_are_published_read_only(self):

@@ -1,17 +1,20 @@
 """Framework-independent codecs for the Clinical Procedure write family.
 
 Nothing here imports Frappe, resolves a session, reads a record or performs a
-write. It defines the durable identifiers, the strict request bodies and the
-acknowledgement binding that surround the two native operations: creating one
+write. It defines the sealed identifiers, the strict request bodies and the
+receipt/acknowledgement codecs around the two native operations: creating one
 Clinical Procedure from a submitted Service Request, and driving the installed
-``complete_procedure`` document method.
+``complete_procedure`` document method. The converted development lane uses the
+strict bodies and the historical read-only codecs; it issues no acknowledgement.
 
 The kinds are ``procedure_create`` and ``procedure_complete`` and the alias
 prefix is ``wsp1_``, distinct from the patient ``wpa1_``, appointment ``wsa1_``
-and encounter ``wse1_`` namespaces. An alias names one workspace procedure and
-never embeds a native docname: for completion the target comes from the
-server-owned allowlist, for creation the committed creation receipt is the only
-map between the alias and the created row.
+and encounter ``wse1_`` namespaces. The converted development lane no longer
+writes these identifiers: creation returns the native docname of the row it
+created, and completion resolves the allowlist, the native docname or a
+historical sealed alias through its committed creation receipt. Alias and
+receipt codecs remain for that read-only historical resolution and for the
+untouched ``wsp1_`` links that already exist.
 """
 
 from __future__ import annotations
@@ -165,6 +168,17 @@ def build_alias(secret, site, actor, operation_key):
     if len(alias) > ALIAS_MAX_LENGTH:
         raise ProcedureWriteError("alias is too long")
     return alias
+
+
+def claims_alias_namespace(value):
+    """True when the value claims the sealed ``wsp1_`` namespace, valid or not.
+
+    A malformed alias-shaped value is never reinterpreted as a native docname:
+    it resolves only through the alias path, so a truncated or corrupted alias
+    cannot address an arbitrary native record.
+    """
+
+    return isinstance(value, str) and value.startswith(ALIAS_PREFIX)
 
 
 def parse_alias(secret, site, actor, alias):

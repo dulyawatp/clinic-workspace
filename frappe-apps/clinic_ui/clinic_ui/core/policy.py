@@ -64,6 +64,12 @@ ENCOUNTER_ROLE_CODES = frozenset({"DOC", "NUR"})
 ENCOUNTER_COMPLETE_ROLE_CODES = frozenset({"DOC"})
 ENCOUNTER_AMEND_ROLE_CODES = frozenset({"DOC"})
 PROCEDURE_ROLE_CODES = frozenset({"DOC"})
+# The procedure read surface admits the two clinical roles that inspect a
+# procedure's status. The code gate is not a native grant: the current user's
+# own Clinical Procedure document and field-level read checks still run per
+# record and stay authoritative. Write and create keep the narrower
+# ``PROCEDURE_ROLE_CODES``.
+PROCEDURE_VIEW_ROLE_CODES = frozenset({"DOC", "NUR"})
 STOCK_ROLE_CODES = frozenset({"PHA"})
 ADJUST_ROLE_CODES = frozenset({"ADM"})
 PO_ROLE_CODES = frozenset({"PHA", "MGR"})

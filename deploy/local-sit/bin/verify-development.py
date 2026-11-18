@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Opt-in, read-only development check for the converted native write lanes.
 
-The isolated synthetic site converted the patient and appointment lanes to
-native Frappe/Marley authority; the other families still require the historical
-fence and the deferred clinical capabilities stay closed. This reads the DOC
-bootstrap, the synthetic directory and the historical ledger, and compares the
-exact counts the caller supplies. It writes, retries and repairs nothing, and it
-claims nothing about the deployment as a whole: the strict gate is verify.py.
+The isolated synthetic site converted the patient, appointment and procedure
+lanes to native Frappe/Marley authority; the other families still require the
+historical fence and the deferred clinical capabilities stay closed. The
+procedure lane is non-consuming - it creates and completes without touching
+stock, so ``write.stock.consume`` stays read_only whatever its gate flag says -
+and it converted with its site gate still off, so it is checked as disabled
+until that flag is opened. This reads the DOC bootstrap, the synthetic directory
+and the historical ledger, and compares the exact counts the caller supplies. It
+writes, retries and repairs nothing, and it claims nothing about the deployment
+as a whole: the strict gate is verify.py.
 """
 
 from __future__ import annotations
@@ -22,16 +26,48 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verify as strict  # noqa: E402
 
+CONVERTED_FAMILIES = ("patient", "appointment", "procedure")
+
+# Open on this site and expected to stay open.
+ALWAYS_OPEN_FAMILIES = ("patient", "appointment")
+
+# Converted writes that must never read ``enabled``, whatever the site gates
+# say. The procedure lane completes and creates without consuming stock; stock
+# consumption keeps its own review and stays read_only even with the procedure
+# flag on. The strict verifier still lists ``write.stock.consume`` under the
+# procedure family, so this check overrides that legacy classification rather
+# than inheriting it.
+NEVER_ENABLED = frozenset({"write.stock.consume"})
+
 CONVERTED = tuple(
     name
     for name, (family, _roles) in strict.WRITE_CAPABILITY_GATES.items()
-    if family in ("patient", "appointment")
+    if family in CONVERTED_FAMILIES
 )
 SEEDED_PATIENT = ("WS-SIT-1", strict.EXPECTED_PATIENT_NAME)
 
 
+def _converted(families):
+    return {
+        name
+        for name, (family, _roles) in strict.WRITE_CAPABILITY_GATES.items()
+        if family in families
+    }
+
+
 def lane_problems(capabilities, gates, role="DOC"):
-    """Return problems when the converted lanes or the deferral disagree."""
+    """Return problems when the converted lanes or the deferral disagree.
+
+    The patient and appointment lanes are open here and must stay enabled. The
+    procedure lane converted with its site gate still off: while the flag is
+    off its capabilities must be published and ``read_only``, and while it is
+    on ``write.procedure.create`` and ``write.procedure.complete`` must be
+    enabled. That lane completes without consuming stock, so
+    ``write.stock.consume`` must stay ``read_only`` even with the flag on - the
+    strict verifier's legacy family classification does not open it here. The
+    stock, purchase, finance, admin and deferred clinical lanes are never
+    asserted ready.
+    """
 
     if not isinstance(capabilities, dict):
         return ["capabilities are not a map"]
@@ -39,19 +75,41 @@ def lane_problems(capabilities, gates, role="DOC"):
     absent = sorted(set(CONVERTED) - set(capabilities))
     if absent:
         problems.append(f"converted capabilities missing: {absent}")
-    expected = set(CONVERTED) & strict.expected_enabled_writes(gates, role)
-    closed = sorted(set(CONVERTED) - expected)
+    expected = (
+        set(CONVERTED) & strict.expected_enabled_writes(gates, role)
+    ) - NEVER_ENABLED
+    closed = sorted(_converted(ALWAYS_OPEN_FAMILIES) - expected)
     if closed:
         problems.append(f"site gates do not open converted lanes: {closed}")
     enabled = {name for name, state in capabilities.items() if state == "enabled"}
+    if expected - enabled:
+        problems.append(f"converted lanes not enabled: {sorted(expected - enabled)}")
+    unexpected = sorted((enabled & set(CONVERTED)) - expected - NEVER_ENABLED)
+    if unexpected:
+        problems.append(f"converted lanes enabled while closed: {unexpected}")
+    forbidden = sorted(enabled & NEVER_ENABLED)
+    if forbidden:
+        problems.append(f"non-consuming procedure lane enabled: {forbidden}")
     if strict.DEFERRED_WRITE_CAPABILITIES & enabled:
         problems.append(
             f"deferred capabilities enabled: "
             f"{sorted(strict.DEFERRED_WRITE_CAPABILITIES & enabled)}"
         )
-    if expected - enabled:
-        problems.append(f"converted lanes not enabled: {sorted(expected - enabled)}")
     return problems
+
+
+def lane_report(capabilities, gates, role="DOC"):
+    """Return each converted lane's expected and observed capability states."""
+
+    expected = strict.expected_enabled_writes(gates, role) - NEVER_ENABLED
+    return {
+        family: {
+            name: {"expected": name in expected, "observed": capabilities.get(name)}
+            for name, (cap_family, _roles) in strict.WRITE_CAPABILITY_GATES.items()
+            if cap_family == family
+        }
+        for family in CONVERTED_FAMILIES
+    }
 
 
 def fence_problems(ledger, expected_events, expected_unresolved):
@@ -183,6 +241,7 @@ def main(argv=None):
         not problems,
         {
             "converted": sorted(CONVERTED),
+            "lanes": lane_report(capabilities, gates),
             "deferred": {
                 name: capabilities.get(name)
                 for name in sorted(strict.DEFERRED_WRITE_CAPABILITIES)

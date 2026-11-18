@@ -24,6 +24,7 @@ from clinic_ui.core import (
     encounter_contract,
     fence_store,
     patient_write,
+    procedure_contract,
     write_fence,
 )
 from clinic_ui.runtime import frappe_gateway
@@ -5749,6 +5750,272 @@ class EncounterOperationLookupTests(GatewayTestCase):
                 )
         finally:
             del gateway._ledger
+
+
+class NativeProcedureViewAdapterTests(GatewayTestCase):
+    """The three-field read applies document and field-level read authority."""
+
+    NATIVE = "HLC-CPR-1"
+
+    def stub(self, *, permitted=True):
+        stub = FakeFrappe(
+            site="marley-sit.local",
+            session=types.SimpleNamespace(
+                user="doctor@example.test", sid="sid-abc123"
+            ),
+        )
+        stub.db.values[("__perm__", self.NATIVE, "read")] = permitted
+        stub.db.values[("Clinical Procedure", self.NATIVE, "name")] = self.NATIVE
+        stub.db.values[("Clinical Procedure", self.NATIVE, "status")] = "Pending"
+        stub.db.values[("Clinical Procedure", self.NATIVE, "docstatus")] = 1
+        return stub
+
+    def test_reads_only_the_three_contract_fields(self):
+        stub = self.stub()
+
+        detail = self.gateway(stub).native_procedure_view(self.NATIVE)
+
+        self.assertEqual(
+            detail,
+            {
+                "procedure_id": self.NATIVE,
+                "status": "Pending",
+                "docstatus": 1,
+            },
+        )
+        self.assertEqual(
+            stub.permission_calls,
+            [
+                (
+                    "Clinical Procedure",
+                    "read",
+                    self.NATIVE,
+                    "doctor@example.test",
+                )
+            ],
+        )
+        self.assertEqual(
+            stub.db.calls,
+            [
+                (
+                    "Clinical Procedure",
+                    self.NATIVE,
+                    ["name", "status", "docstatus"],
+                )
+            ],
+        )
+        self.assertEqual(stub.meta.masked_calls, 1)
+
+    def test_a_denied_document_reads_nothing(self):
+        stub = self.stub(permitted=False)
+
+        self.assertIsNone(
+            self.gateway(stub).native_procedure_view(self.NATIVE)
+        )
+        self.assertEqual(stub.db.calls, [])
+        self.assertEqual(stub.meta.masked_calls, 0)
+
+    def test_a_restricted_status_permlevel_fails_closed_before_any_read(self):
+        stub = self.stub()
+        stub.meta.permlevels["status"] = 1
+
+        self.assertIsNone(
+            self.gateway(stub).native_procedure_view(self.NATIVE)
+        )
+        self.assertEqual(stub.db.calls, [])
+
+    def test_a_masked_status_fails_closed_before_any_read(self):
+        stub = self.stub()
+        stub.meta.masked = ["status"]
+
+        self.assertIsNone(
+            self.gateway(stub).native_procedure_view(self.NATIVE)
+        )
+        self.assertEqual(stub.meta.masked_calls, 1)
+        self.assertEqual(stub.db.calls, [])
+
+    def test_a_missing_status_field_fails_closed_before_any_read(self):
+        stub = self.stub()
+        del stub.meta.permlevels["status"]
+
+        self.assertIsNone(
+            self.gateway(stub).native_procedure_view(self.NATIVE)
+        )
+        self.assertEqual(stub.db.calls, [])
+
+    def test_a_malformed_row_fails_closed(self):
+        for field, value in (
+            ("status", ""),
+            ("status", None),
+            ("name", ""),
+            ("docstatus", "1"),
+            ("docstatus", True),
+            ("docstatus", 7),
+            ("docstatus", None),
+        ):
+            with self.subTest(field=field, value=value):
+                stub = self.stub()
+                stub.db.values[("Clinical Procedure", self.NATIVE, field)] = value
+                self.assertIsNone(
+                    self.gateway(stub).native_procedure_view(self.NATIVE)
+                )
+
+    def test_a_read_failure_fails_closed(self):
+        stub = self.stub()
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("database unavailable")
+
+        stub.db.get_value = boom
+        self.assertIsNone(
+            self.gateway(stub).native_procedure_view(self.NATIVE)
+        )
+
+    def test_the_write_read_back_uses_the_same_field_level_checks(self):
+        masked = self.stub()
+        masked.meta.masked = ["status"]
+        self.assertIsNone(
+            self.gateway(masked).native_procedure_read_detail(self.NATIVE)
+        )
+        self.assertEqual(masked.db.calls, [])
+
+        restricted = self.stub()
+        restricted.meta.permlevels["status"] = 1
+        self.assertIsNone(
+            self.gateway(restricted).native_procedure_read_detail(self.NATIVE)
+        )
+        self.assertEqual(restricted.db.calls, [])
+
+        readable = self.stub()
+        self.assertEqual(
+            self.gateway(readable).native_procedure_read_detail(self.NATIVE),
+            {
+                "procedure_id": self.NATIVE,
+                "status": "Pending",
+                "docstatus": 1,
+            },
+        )
+
+    def test_a_malformed_id_is_refused_before_any_permission_check(self):
+        for value in (None, "", " ", 7):
+            with self.subTest(value=value):
+                stub = self.stub()
+                self.assertIsNone(
+                    self.gateway(stub).native_procedure_view(value)
+                )
+                self.assertEqual(stub.permission_calls, [])
+
+
+class NativeProcedureListAdapterTests(GatewayTestCase):
+    """Linked discovery uses permission-filtered ``get_list`` only."""
+
+    REQUEST = "HLC-SR-1"
+
+    def stub(self, rows=None):
+        stub = FakeFrappe(
+            site="marley-sit.local",
+            session=types.SimpleNamespace(
+                user="doctor@example.test", sid="sid-abc123"
+            ),
+        )
+        stub.meta.fields = [
+            FakeField(0, fieldname=name)
+            for name in ("name", "status", "docstatus", "service_request")
+        ]
+        stub.meta.default_fields = ["name", "docstatus", "modified"]
+        stub.get_list_rows = (
+            [{"name": "HLC-CPR-2"}, {"name": "HLC-CPR-1"}]
+            if rows is None
+            else rows
+        )
+        return stub
+
+    def test_uses_the_installed_filter_field_and_one_row_past_the_bound(self):
+        stub = self.stub()
+
+        names = self.gateway(stub).native_procedures_for_service_request(
+            self.REQUEST, 2
+        )
+
+        self.assertEqual(names, ["HLC-CPR-2", "HLC-CPR-1"])
+        self.assertEqual(
+            stub.get_list_calls,
+            [
+                (
+                    "Clinical Procedure",
+                    ["name"],
+                    "modified desc, name asc",
+                    3,
+                    {"filters": {"service_request": self.REQUEST}},
+                )
+            ],
+        )
+
+    def test_an_over_full_page_is_refused_not_truncated(self):
+        stub = self.stub([{"name": f"HLC-CPR-{index}"} for index in range(3)])
+
+        self.assertIsNone(
+            self.gateway(stub).native_procedures_for_service_request(
+                self.REQUEST, 2
+            )
+        )
+
+    def test_a_missing_installed_filter_field_refuses(self):
+        stub = self.stub()
+        stub.meta.fields = [FakeField(0, fieldname="name")]
+
+        self.assertIsNone(
+            self.gateway(stub).native_procedures_for_service_request(
+                self.REQUEST, 2
+            )
+        )
+        self.assertEqual(stub.get_list_calls, [])
+
+    def test_a_masked_or_restricted_filter_field_refuses_before_the_query(self):
+        masked = self.stub()
+        masked.meta.masked = ["service_request"]
+        self.assertIsNone(
+            self.gateway(masked).native_procedures_for_service_request(
+                self.REQUEST, 2
+            )
+        )
+        self.assertEqual(masked.get_list_calls, [])
+
+        restricted = self.stub()
+        restricted.meta.permlevels["service_request"] = 1
+        self.assertIsNone(
+            self.gateway(restricted).native_procedures_for_service_request(
+                self.REQUEST, 2
+            )
+        )
+        self.assertEqual(restricted.get_list_calls, [])
+
+    def test_an_unreadable_row_or_list_fails_closed(self):
+        malformed = self.stub([{"name": ""}])
+        self.assertIsNone(
+            self.gateway(malformed).native_procedures_for_service_request(
+                self.REQUEST, 2
+            )
+        )
+
+        failing = self.stub()
+        failing.get_list_error = RuntimeError("database unavailable")
+        self.assertIsNone(
+            self.gateway(failing).native_procedures_for_service_request(
+                self.REQUEST, 2
+            )
+        )
+
+    def test_an_invalid_bound_is_refused(self):
+        for limit in (0, -1, 1001, True, "2"):
+            with self.subTest(limit=limit):
+                stub = self.stub()
+                self.assertIsNone(
+                    self.gateway(stub).native_procedures_for_service_request(
+                        self.REQUEST, limit
+                    )
+                )
+                self.assertEqual(stub.get_list_calls, [])
 
 
 if __name__ == "__main__":
