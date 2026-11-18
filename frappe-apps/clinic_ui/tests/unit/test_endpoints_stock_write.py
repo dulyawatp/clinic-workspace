@@ -8,8 +8,9 @@ closed-world side-effect check, the receipt and the one-shot ack.
 """
 
 import unittest
+from unittest import mock
 
-from clinic_ui.core import config, patient_write, stock_contract
+from clinic_ui.core import config, patient_write, stock_contract, write_fence
 from clinic_ui.endpoints import session, stock_write
 
 from .fake_gateway import (
@@ -539,6 +540,159 @@ class FenceTests(unittest.TestCase):
 
         self.assertEqual(fake.stock_ack_calls, [])
         self.assertEqual(len(fake.stock_fence_claim.committed), 1)
+
+    def test_the_receipt_is_encoded_before_the_commit_and_the_terminal_claim(self):
+        """The receipt is validated while the native write is still uncommitted.
+
+        A receipt the fence would reject cannot be an established outcome, so it
+        is encoded before the one native commit rather than after it.
+        """
+
+        fake = gateway()
+        real_encode = stock_contract.encode_receipt
+        real_claim_commit = fake.stock_fence_claim.commit
+
+        def recording_encode(**kwargs):
+            fake.call_order.append("encode_receipt")
+            return real_encode(**kwargs)
+
+        def recording_claim_commit(receipt):
+            fake.call_order.append("claim_commit")
+            real_claim_commit(receipt)
+
+        fake.stock_fence_claim.commit = recording_claim_commit
+        with mock.patch.object(stock_contract, "encode_receipt", recording_encode):
+            payload = stock_write.receive(fake, receive_body(), CSRF)
+
+        self.assertEqual(payload["status"], "received")
+        order = fake.call_order
+        self.assertLess(order.index("stock_fence"), order.index("encode_receipt"))
+        self.assertLess(order.index("encode_receipt"), order.index("commit"))
+        self.assertLess(order.index("commit"), order.index("claim_commit"))
+        self.assertEqual(len(fake.stock_fence_claim.committed), 1)
+
+    def test_a_receipt_encode_failure_never_reaches_the_native_commit(self):
+        fake = gateway()
+
+        with mock.patch.object(
+            stock_contract,
+            "encode_receipt",
+            side_effect=stock_contract.StockContractError("receipt is too long"),
+        ):
+            payload = stock_write.receive(fake, receive_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        # The encode refusal lands while the native transaction is still
+        # uncommitted: only the rollback attempt is recorded and the key stays
+        # locked as UNKNOWN with no COMMITTED terminal.
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.stock_fence_claim.committed, [])
+        self.assertTrue(fake.stock_fence_claim.unknowns)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_the_ack_token_binds_the_one_committed_receipt(self):
+        """The receipt is encoded once and the committed one is reused verbatim.
+
+        Re-encoding after the commit would validate an already durable receipt a
+        second time, so a failure there would be indistinguishable from a failed
+        native write.
+        """
+
+        fake = gateway()
+        encoded = []
+        real_encode = stock_contract.encode_receipt
+
+        def counting_encode(**kwargs):
+            encoded.append(kwargs)
+            return real_encode(**kwargs)
+
+        with mock.patch.object(stock_contract, "encode_receipt", counting_encode):
+            payload = stock_write.receive(fake, receive_body(), CSRF)
+
+        self.assertEqual(len(encoded), 1)
+        self.assertEqual(len(fake.stock_fence_claim.committed), 1)
+        receipt = fake.stock_fence_claim.committed[0]
+        self.assertEqual(encoded[0]["reference"], "PR-1")
+        self.assertEqual(
+            payload["ackToken"],
+            stock_contract.ack_token(
+                SECRET.encode(),
+                SITE,
+                fake.current_session.user,
+                "stock_receive",
+                KEY,
+                receipt,
+            ),
+        )
+
+    def test_a_rollback_failure_escapes_instead_of_returning_a_response(self):
+        """A failed rollback must fail loudly, never become a normal 409.
+
+        Returning an envelope would let Frappe's request-end commit persist the
+        partial native write; the dedicated exception propagates to cleanup.
+        """
+
+        fake = gateway()
+
+        def failing_rollback():
+            raise RuntimeError("rollback exploded")
+
+        with mock.patch.object(
+            stock_contract,
+            "encode_receipt",
+            side_effect=stock_contract.StockContractError("receipt is too long"),
+        ), mock.patch.object(fake, "rollback", failing_rollback):
+            with self.assertRaises(stock_write.RollbackFailed):
+                stock_write.receive(fake, receive_body(), CSRF)
+
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.stock_fence_claim.committed, [])
+
+    def test_a_named_handler_rollback_failure_marks_nothing_and_responds_nothing(
+        self,
+    ):
+        """A named exception path never marks UNKNOWN before its rollback.
+
+        Only the generic handler appends ``UNKNOWN``; the named handlers attempt
+        the rollback and re-raise, so the key stays ``DISPATCHED``. The escape
+        itself must not be converted by any handler: ``RollbackFailed`` derives
+        from ``RuntimeError``, not from ``WriteUncertain`` or ``FenceError``.
+        """
+
+        fake = gateway()
+        fake.stock_mutation_error = patient_write.WriteUncertain()
+
+        def failing_rollback():
+            raise RuntimeError("rollback exploded")
+
+        with mock.patch.object(fake, "rollback", failing_rollback):
+            with self.assertRaises(stock_write.RollbackFailed):
+                stock_write.receive(fake, receive_body(), CSRF)
+
+        self.assertEqual(fake.stock_fence_claim.unknowns, [])
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(fake.stock_fence_claim.committed, [])
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertFalse(
+            issubclass(stock_write.RollbackFailed, patient_write.WriteUncertain)
+        )
+        self.assertFalse(issubclass(stock_write.RollbackFailed, write_fence.FenceError))
+
+    def test_a_native_commit_failure_appends_no_committed_terminal(self):
+        fake = gateway()
+
+        def failing_commit():
+            fake.call_order.append("commit")
+            raise RuntimeError("native commit failed")
+
+        with mock.patch.object(fake, "commit", failing_commit):
+            payload = stock_write.receive(fake, receive_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.stock_fence_claim.committed, [])
+        self.assertTrue(fake.stock_fence_claim.unknowns)
+        self.assertEqual(fake.rollback_calls, 1)
 
 
 class AckTests(unittest.TestCase):

@@ -13,8 +13,11 @@ Order is fixed and test-asserted:
    any customer/contact/address/email/phone/user/invite trigger before insert,
 9. persistent operation fence (site-wide unresolved block),
 10. native ``Patient`` insert/save with no ``ignore_permissions``,
-11. one explicit site DB commit,
-12. terminal receipt appended to the fence,
+11. the terminal receipt encoded while the native transaction is still
+    uncommitted, so a receipt refusal (an invalid alias or native id) is
+    deterministic and ends ``UNKNOWN`` with no commit,
+12. one explicit site DB commit, then the terminal receipt appended to the
+    fence,
 13. success DTO construction; if it fails after the committed terminal, write a
     durable site-wide manual-investigation latch under the same fence.
 
@@ -22,10 +25,11 @@ A post-dispatch failure of any kind is uncertain: the key stays locked and the
 response is ``409 {"code": "WRITE_LOCKED"}``. There is no automatic retry, no
 inferred no-commit and no success claim after a failed receipt. The endpoint
 rolls back the partial transaction; a rollback failure raises
-``RollbackFailed`` instead of returning a normal error. A post-commit success
-construction failure latches the whole deployment; if neither latch nor its
-fallback can be recorded, ``ManualInvestigationRequired`` is raised to Frappe
-cleanup rather than returning a normal response.
+``RollbackFailed`` instead of returning a normal error. A commit that may have
+landed without its terminal append is uncertain, not retryable. A post-commit
+success construction failure latches the whole deployment; if neither latch nor
+its fallback can be recorded, ``ManualInvestigationRequired`` is raised to
+Frappe cleanup rather than returning a normal response.
 """
 
 from clinic_ui.core import dto, patient_alias, patient_write
@@ -173,12 +177,12 @@ def create(gateway, body, csrf_token=None):
         ) as claim:
             try:
                 native_patient_id = gateway.insert_native_patient(prepared)
-                gateway.commit()
                 receipt = patient_write.encode_receipt(
                     kind="create",
                     alias=alias,
                     native_patient_id=native_patient_id,
                 )
+                gateway.commit()
                 claim.commit(receipt)
             except (
                 patient_write.WriteLocked,
@@ -279,12 +283,12 @@ def update(gateway, body, csrf_token=None):
                     payload["fields"],
                     payload["base_modified"],
                 )
-                gateway.commit()
                 receipt = patient_write.encode_receipt(
                     kind="update",
                     alias=payload["workspace_patient_id"],
                     native_patient_id=native_patient_id,
                 )
+                gateway.commit()
                 claim.commit(receipt)
             except patient_write.StaleVersion:
                 _mark_unknown(claim, "stale version at commit")

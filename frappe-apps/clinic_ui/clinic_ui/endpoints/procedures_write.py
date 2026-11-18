@@ -24,14 +24,18 @@ Order is fixed and test-asserted:
    pre-fence decisions again against current rows,
 8. the native mutation (the installed ``complete_procedure`` document method, or
    one insert-and-submit of the Clinical Procedure for the locked request), a
-   closed-world re-read against the EXPECTED list, one explicit commit and the
-   terminal receipt,
+   closed-world re-read against the EXPECTED list, the encoded terminal receipt,
+   one explicit commit and its append — encoded before the commit, so a
+   fence-rejected receipt cannot follow a durable native write,
 9. the one-shot acknowledgement token.
 
 Every designed refusal in 3-6 happens **before** the fence claim. A refusal
 inside a held fence would terminate the operation ``UNKNOWN`` and latch the whole
 site. A post-dispatch failure is uncertain: the key stays locked and the response
-is ``409 {"code": "WRITE_LOCKED"}`` with no retry.
+is ``409 {"code": "WRITE_LOCKED"}`` with no retry. The endpoint rolls back the
+partial transaction; a rollback failure raises :class:`RollbackFailed` to Frappe
+cleanup instead of returning that 409, since a normal response could let the
+framework's request-end commit persist the partial write.
 """
 
 from clinic_ui.core import (
@@ -79,11 +83,36 @@ def _mark_unknown(claim, reason):
         return
 
 
+class RollbackFailed(RuntimeError):
+    """The failed write could not be rolled back; the request must fail loudly.
+
+    Returning a normal 409 would let Frappe's end-of-request commit for an
+    unsafe method persist a partial native write. The caller propagates this to
+    Frappe cleanup instead. The fence key is left as the failing path left it —
+    ``UNKNOWN`` on the generic path, otherwise ``DISPATCHED``, or already
+    ``COMMITTED`` if the terminal append had persisted before the error. An
+    unresolved ``UNKNOWN``/``DISPATCHED`` key blocks new operations until it is
+    reconciled; a persisted ``COMMITTED`` key keeps its one-shot acknowledgement
+    available under the recovery conditions the ack endpoint checks. It derives
+    from ``RuntimeError`` alone, so neither the ``WriteUncertain`` handler nor
+    the fence's ``FenceError`` translation turns it into a response.
+    """
+
+
 def _rollback_or_raise(gateway):
+    """Discard the partial transaction; a rollback failure must escape.
+
+    Do not swallow this: a normal error response could trigger Frappe's implicit
+    request-end commit. The generic handler marks the operation ``UNKNOWN``
+    (best effort) before calling this; the named handlers mark nothing, so their
+    key stays ``DISPATCHED``. Either way the fence is retained when the rollback
+    itself fails, and this raises :class:`RollbackFailed` instead of responding.
+    """
+
     try:
         gateway.rollback()
     except BaseException as exc:
-        raise patient_write.WriteUncertain(
+        raise RollbackFailed(
             "native procedure write rollback failed"
         ) from exc
 
@@ -136,13 +165,41 @@ def _create_digest_fields(payload):
 
 
 def _finish_fence(gateway, claim, alias, native_procedure_id, stock_entry):
-    gateway.commit()
+    """Encode the receipt, commit the native write, then append the terminal.
+
+    The fence is held across all three steps, but the two stores are never one
+    transaction, so the commit-to-terminal gap is not atomic.
+
+    The receipt is encoded (and so validated by the fence codec) before the one
+    site commit, so an encoder refusal is deterministic and lands while the
+    native transaction is still uncommitted. That error is not one of the
+    family's named refusals, so it takes the generic failure path: the caller
+    marks the key ``UNKNOWN`` best effort — if that append fails the key stays
+    ``DISPATCHED`` — and then attempts ``gateway.rollback()``. A rollback that
+    fails raises :class:`RollbackFailed` instead of any response, because a
+    normal envelope would let Frappe's request-end commit persist the partial
+    native write; the escape leaves the native transaction's state no longer
+    established.
+
+    The named handlers (ineligible target, exhausted budget, locked,
+    conflicting, unavailable, uncertain, unsafe side effect) mark nothing: they
+    attempt the same rollback and re-raise, so their key stays ``DISPATCHED``
+    unless its terminal append had already persisted ``COMMITTED`` before the
+    error. A failed native commit leaves the commit outcome uncertain — it may
+    or may not have landed. An unresolved ``UNKNOWN`` or ``DISPATCHED`` key
+    blocks all new operations site-wide until it is reconciled, and nothing here
+    retries or reconciles it. A key whose terminal append did persist
+    ``COMMITTED`` is not unresolved: it keeps its one-shot acknowledgement
+    available under the recovery conditions the ack endpoint checks.
+    """
+
     receipt = procedure_write.encode_receipt(
         kind=procedure_contract.PROCEDURE_COMPLETE_KIND,
         alias=alias,
         native_procedure_id=native_procedure_id,
         stock_entry=stock_entry,
     )
+    gateway.commit()
     claim.commit(receipt)
     return receipt
 

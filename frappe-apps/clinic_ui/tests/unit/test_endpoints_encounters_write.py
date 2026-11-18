@@ -10,6 +10,7 @@ import contextlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from clinic_ui.core import (
     appointment_write,
@@ -36,6 +37,7 @@ from .fake_gateway import (
 
 SITE = config.APPROVED_WRITE_SITE
 ACTOR = "doctor@example.test"
+OTHER_ACTOR = "nurse@example.test"
 CSRF = "csrf-token-value"
 BOOK_KEY = "appt-book-key-0001-012345"
 DRAFT_KEY = "enc-draft-key-0001-0123"
@@ -596,7 +598,178 @@ class LeaseLedgerIntegrationTests(unittest.TestCase):
         self.assertEqual(len(fake.create_encounter_calls), 1)
 
 
-    # -- fresh-role authority guard (deny only) --------------------------
+    def test_a_receipt_encode_failure_ends_unknown_with_no_committed_receipt(self):
+        """The one deterministic post-dispatch refusal.
+
+        The receipt is encoded before the native commit, so a rejected receipt
+        ends in ``UNKNOWN`` while the native transaction is still uncommitted:
+        the site commit is never called, the fake gateway records only the
+        rollback attempt, and the operation has no ``COMMITTED`` receipt.
+        """
+
+        fake = self.integration_gateway()
+        booked(fake)
+
+        with mock.patch.object(
+            encounter_write,
+            "encode_receipt",
+            side_effect=encounter_write.EncounterWriteError("invalid receipt alias"),
+        ):
+            payload = encounters_write._save_draft_undeferred(
+                fake, draft_body(), CSRF
+            )
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(len(fake.encounter_lease_dispatches), 1)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+        record = self.ledger.lookup(
+            actor=ACTOR, kind="encounter_draft", operation_key=DRAFT_KEY
+        )
+        self.assertEqual(record.state, write_fence.UNKNOWN)
+        self.assertIsNone(record.receipt)
+
+    def test_an_unknown_key_refuses_every_other_operation_site_wide(self):
+        """No ``ABORTED`` terminal, no auto-clear: the barrier locks the store.
+
+        A key left ``UNKNOWN`` by the post-dispatch receipt refusal blocks a
+        different actor's different kind, and nothing here clears it: the store
+        sequence does not move and the refusal is the ledger's own ``SiteLocked``.
+        """
+
+        fake = self.integration_gateway()
+        booked(fake)
+
+        with mock.patch.object(
+            encounter_write,
+            "encode_receipt",
+            side_effect=encounter_write.EncounterWriteError("invalid receipt alias"),
+        ):
+            payload = encounters_write._save_draft_undeferred(
+                fake, draft_body(), CSRF
+            )
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        record = self.ledger.lookup(
+            actor=ACTOR, kind="encounter_draft", operation_key=DRAFT_KEY
+        )
+        self.assertEqual(record.state, write_fence.UNKNOWN)
+
+        sequence = self.ledger.info().sequence
+        with self.assertRaises(write_fence.SiteLocked):
+            with self.ledger.lease(
+                actor=OTHER_ACTOR,
+                kind="encounter_complete",
+                operation_key=COMPLETE_KEY,
+                payload_digest="cd" * 32,
+            ) as lease:
+                lease.dispatch()
+        self.assertEqual(self.ledger.info().sequence, sequence)
+
+    def test_a_failed_terminal_append_before_persistence_leaves_dispatched(self):
+        """The append that never persisted: the key stays ``DISPATCHED``.
+
+        The native commit already ran, so the reply is ``WRITE_LOCKED`` and the
+        unresolved key keeps blocking every new operation; nothing appends a
+        second terminal or resolves the barrier.
+        """
+
+        fake = self.integration_gateway()
+        booked(fake)
+        real_append = write_fence._append
+
+        def failing_commit_append(connection, ledger, **kwargs):
+            if kwargs.get("state") == write_fence.COMMITTED:
+                raise write_fence.StoreUnavailable("terminal append failed")
+            return real_append(connection, ledger, **kwargs)
+
+        with mock.patch.object(write_fence, "_append", failing_commit_append):
+            payload = encounters_write._save_draft_undeferred(
+                fake, draft_body(), CSRF
+            )
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.commit_calls, 1)
+        record = self.ledger.lookup(
+            actor=ACTOR, kind="encounter_draft", operation_key=DRAFT_KEY
+        )
+        self.assertEqual(record.state, write_fence.DISPATCHED)
+        self.assertIsNone(record.receipt)
+
+        sequence = self.ledger.info().sequence
+        with self.assertRaises(write_fence.SiteLocked):
+            with self.ledger.lease(
+                actor=OTHER_ACTOR,
+                kind="encounter_complete",
+                operation_key=COMPLETE_KEY,
+                payload_digest="cd" * 32,
+            ) as lease:
+                lease.dispatch()
+        self.assertEqual(self.ledger.info().sequence, sequence)
+
+    def test_a_terminal_append_that_persisted_before_the_error_stays_committed(self):
+        """The append that did persist: ``COMMITTED`` exists, the reply is locked.
+
+        A lost acknowledgement after the durable append leaves the receipt in the
+        fence while the caller is told ``WRITE_LOCKED``; no path rewrites that
+        terminal, resolves the barrier or claims success.
+        """
+
+        fake = self.integration_gateway()
+        booked(fake)
+        real_append = write_fence._append
+
+        def append_then_fail(connection, ledger, **kwargs):
+            result = real_append(connection, ledger, **kwargs)
+            if kwargs.get("state") == write_fence.COMMITTED:
+                raise write_fence.StoreUnavailable("connection lost after append")
+            return result
+
+        with mock.patch.object(write_fence, "_append", append_then_fail):
+            payload = encounters_write._save_draft_undeferred(
+                fake, draft_body(), CSRF
+            )
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.commit_calls, 1)
+        record = self.ledger.lookup(
+            actor=ACTOR, kind="encounter_draft", operation_key=DRAFT_KEY
+        )
+        self.assertEqual(record.state, write_fence.COMMITTED)
+        self.assertEqual(
+            encounter_write.decode_receipt(record.receipt).kind, "encounter_draft"
+        )
+
+        sequence = self.ledger.info().sequence
+        with self.assertRaises(write_fence.SiteLocked):
+            with self.ledger.lease(
+                actor=OTHER_ACTOR,
+                kind="encounter_complete",
+                operation_key=COMPLETE_KEY,
+                payload_digest="cd" * 32,
+            ) as lease:
+                lease.dispatch()
+        self.assertEqual(self.ledger.info().sequence, sequence)
+
+    def test_a_native_commit_failure_appends_no_committed_receipt(self):
+        fake = self.integration_gateway()
+        booked(fake)
+
+        def failing_commit():
+            fake.call_order.append("commit")
+            raise RuntimeError("native commit failed")
+
+        with mock.patch.object(fake, "commit", failing_commit):
+            payload = encounters_write._save_draft_undeferred(
+                fake, draft_body(), CSRF
+            )
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.rollback_calls, 1)
+        record = self.ledger.lookup(
+            actor=ACTOR, kind="encounter_draft", operation_key=DRAFT_KEY
+        )
+        self.assertEqual(record.state, write_fence.UNKNOWN)
+        self.assertIsNone(record.receipt)
 
     def test_a_cached_allow_with_a_revoked_db_role_refuses_before_dispatch(self):
         """The pinned ``get_roles`` answer can outlive the Has Role row."""
@@ -1229,6 +1402,92 @@ class DraftTests(unittest.TestCase):
         self.assertLess(order.index("encounter_create"), order.index("commit"))
         self.assertLess(order.index("commit"), order.index("encounter_claim_commit"))
 
+    def test_the_receipt_is_encoded_before_the_commit_and_the_terminal_claim(self):
+        """The receipt is validated while the native write is still uncommitted.
+
+        A receipt the fence would reject cannot be an established outcome, so it
+        must be refused before the one native commit rather than after it.
+        """
+
+        fake = gateway()
+        booked(fake)
+        real_encode = encounter_write.encode_receipt
+
+        def recording_encode(**kwargs):
+            fake.call_order.append("encode_receipt")
+            return real_encode(**kwargs)
+
+        with mock.patch.object(encounter_write, "encode_receipt", recording_encode):
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
+
+        order = fake.call_order
+        self.assertLess(order.index("encounter_create"), order.index("encode_receipt"))
+        self.assertLess(order.index("encode_receipt"), order.index("commit"))
+        self.assertLess(order.index("commit"), order.index("encounter_claim_commit"))
+        self.assertEqual(len(fake.encounter_lease_claim.committed), 1)
+
+    def test_a_receipt_encode_failure_never_reaches_the_native_commit(self):
+        fake = gateway()
+        booked(fake)
+
+        with mock.patch.object(
+            encounter_write,
+            "encode_receipt",
+            side_effect=encounter_write.EncounterWriteError("receipt is too long"),
+        ):
+            payload = encounters_write._save_draft_undeferred(
+                fake, draft_body(), CSRF
+            )
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        # The fake proves the call order only: the dispatched key stays locked,
+        # no commit was attempted and no committed receipt was recorded.
+        self.assertEqual(len(fake.encounter_lease_dispatches), 1)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.encounter_lease_claim.committed, [])
+        self.assertTrue(fake.encounter_lease_claim.unknowns)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_native_commit_failure_appends_no_committed_terminal(self):
+        fake = gateway()
+        booked(fake)
+
+        def failing_commit():
+            fake.call_order.append("commit")
+            raise RuntimeError("native commit failed")
+
+        with mock.patch.object(fake, "commit", failing_commit):
+            payload = encounters_write._save_draft_undeferred(
+                fake, draft_body(), CSRF
+            )
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.encounter_lease_claim.committed, [])
+        self.assertTrue(fake.encounter_lease_claim.unknowns)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_rollback_failure_escapes_as_rollback_failed(self):
+        """A normal 409 could let Frappe's request-end commit keep a partial write."""
+
+        fake = gateway()
+        booked(fake)
+
+        def failing_commit():
+            fake.call_order.append("commit")
+            raise RuntimeError("native commit failed")
+
+        def failing_rollback():
+            fake.call_order.append("rollback")
+            raise RuntimeError("native rollback failed")
+
+        fake.commit = failing_commit
+        fake.rollback = failing_rollback
+
+        with self.assertRaises(encounters_write.RollbackFailed):
+            encounters_write._save_draft_undeferred(fake, draft_body(), CSRF)
+
+        self.assertEqual(len(fake.encounter_lease_claim.unknowns), 1)
+
     def test_medication_rows_require_drug_code_before_the_fence(self):
         fake = gateway()
         booked(fake)
@@ -1529,6 +1788,26 @@ class CompleteTests(unittest.TestCase):
         committed_encounter(fake, "encounter_draft", DRAFT_KEY)
         return fake
 
+    def test_a_rollback_failure_escapes_the_complete_path(self):
+        fake = self.ready()
+        fake.submitted_service_requests = 2
+
+        def failing_commit():
+            fake.call_order.append("commit")
+            raise RuntimeError("native commit failed")
+
+        def failing_rollback():
+            fake.call_order.append("rollback")
+            raise RuntimeError("native rollback failed")
+
+        fake.commit = failing_commit
+        fake.rollback = failing_rollback
+
+        with self.assertRaises(encounters_write.RollbackFailed):
+            encounters_write._complete_undeferred(fake, complete_body(), CSRF)
+
+        self.assertEqual(len(fake.encounter_lease_claim.unknowns), 1)
+
     def test_completes_and_verifies_the_expected_cascade(self):
         fake = self.ready()
         fake.submitted_service_requests = 2
@@ -1671,6 +1950,25 @@ class AmendTests(unittest.TestCase):
             docstatus=1, status="Completed"
         )
         return fake
+
+    def test_a_rollback_failure_escapes_the_amend_path(self):
+        fake = self.finalized()
+
+        def failing_commit():
+            fake.call_order.append("commit")
+            raise RuntimeError("native commit failed")
+
+        def failing_rollback():
+            fake.call_order.append("rollback")
+            raise RuntimeError("native rollback failed")
+
+        fake.commit = failing_commit
+        fake.rollback = failing_rollback
+
+        with self.assertRaises(encounters_write.RollbackFailed):
+            encounters_write._amend_undeferred(fake, amend_body(), CSRF)
+
+        self.assertEqual(len(fake.encounter_lease_claim.unknowns), 1)
 
     def test_creates_an_addendum_and_never_rewrites_the_original(self):
         fake = self.finalized()

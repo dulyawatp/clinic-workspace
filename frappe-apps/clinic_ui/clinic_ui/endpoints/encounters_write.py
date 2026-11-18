@@ -40,9 +40,11 @@ Order is fixed and test-asserted:
    gates are re-read here too. The durable budget is re-read here too,
 8. ``Lease.dispatch``: the single call that appends ``DISPATCHED``, taken
    immediately before the designed native operation (draft save, submit with the
-   expected cascade, or a new Clinical Note addendum). The lease and the row
-   locks stay held across the write, one explicit commit and the terminal
-   receipt,
+   expected cascade, or a new Clinical Note addendum). The fence lease is held
+   across the write, the one explicit commit and the terminal receipt; the
+   ``FOR UPDATE`` row locks are not held that long. The site commit releases
+   them with the transaction, so only the file fence spans the gap between the
+   commit and the terminal append,
 9. the one-shot acknowledgement token.
 
 ``Ledger.lease`` appends nothing until ``dispatch``, so a refusal taken under the
@@ -51,8 +53,33 @@ medication race, an exhausted budget or a lease/dispatch failure) writes no
 event, drops the row locks it took, and lets the next operation run. Once
 ``dispatch`` has appended the claim there is no refusal left: an exception there
 means a native write may be in flight, which is exactly when the key must stay
-``DISPATCHED`` (the operation becomes ``UNKNOWN``/locked, the response is
-``409 {"code": "WRITE_LOCKED"}`` with no retry).
+``DISPATCHED`` or ``UNKNOWN`` and locked, and the response is
+``409 {"code": "WRITE_LOCKED"}`` with no retry.
+
+Post-dispatch failures do not all leave the same state. The one deterministic
+refusal is the receipt encode/validate step, which runs before the native
+commit: the caller's dispatch-failure path appends the ``UNKNOWN`` terminal when
+the marker can be written (otherwise the key stays ``DISPATCHED``), leaves the
+native transaction uncommitted and locks every new operation site-wide. A failed
+fence terminal append happens *after* that commit and is never rewritten here:
+the caller cannot tell from the failure whether the append persisted, so the key
+stays ``DISPATCHED`` if it did not and is ``COMMITTED`` with a receipt if it did.
+Either way the stored outcome is uncertain and the reply is ``409
+WRITE_LOCKED``. There is no ``ABORTED`` terminal and no auto-clear: no failure
+path appends a second terminal or resolves a barrier, so an
+``UNKNOWN``/``DISPATCHED`` key needs offline operator reconciliation, which this
+code does not implement. A persisted ``COMMITTED`` receipt is not lost: an exact
+replay of that operation is answered from the receipt, and the caller's
+acknowledgement still resolves that operation's barrier.
+
+A rollback is attempted on the applicable post-dispatch failure paths, and that
+rollback can itself fail. A normal ``409`` would be unsafe then: Frappe commits
+an unsafe request at request end, so the response would let a partial native
+write persist. That path raises :class:`RollbackFailed` to Frappe cleanup
+instead, as the other fenced write families do. The lock does not depend on this
+escape: the key is already terminal or still ``DISPATCHED``, and it is neither
+unlocked nor rewritten here. Only the retained ``_*_undeferred`` implementations
+reach this path: the deferred public endpoints still refuse every new mutation.
 
 Authority changes made outside this process are not serialisable: the gate is
 re-read under the held lease, which narrows the window to the gap between that
@@ -122,6 +149,16 @@ REPLAY_RESULTS = {
 }
 
 
+class RollbackFailed(RuntimeError):
+    """The failed write could not be rolled back; the request must fail loudly.
+
+    Returning a normal 409 would let Frappe's end-of-request commit for an
+    unsafe method persist a partial native write. The caller propagates this to
+    Frappe cleanup instead; the fence key keeps whatever terminal, or
+    ``DISPATCHED`` state, the failure left and is not unlocked here.
+    """
+
+
 class SuccessUncertain(Exception):
     """The native write committed but the success response could not be built."""
 
@@ -139,6 +176,8 @@ def _locked_response(gateway):
 
 
 def _mark_unknown(claim, reason):
+    """Append an ``UNKNOWN`` terminal when possible; never raise from this helper."""
+
     try:
         claim.unknown(reason)
     except Exception:
@@ -146,11 +185,20 @@ def _mark_unknown(claim, reason):
 
 
 def _rollback_or_raise(gateway):
+    """Discard the partial transaction; a rollback failure must escape.
+
+    Do not swallow this: a normal error response could trigger Frappe's implicit
+    request-end commit for an unsafe method. The key keeps the state the failure
+    left it in - a successful ``UNKNOWN`` marker, a still-``DISPATCHED`` key (the
+    marker is best effort), or an already persisted ``COMMITTED`` terminal - and
+    is not unlocked or rewritten even when the rollback fails.
+    """
+
     try:
         gateway.rollback()
     except BaseException as exc:
-        raise patient_write.WriteUncertain(
-            "native encounter write rollback failed"
+        raise RollbackFailed(
+            "native encounter write rollback failed after a post-dispatch error"
         ) from exc
 
 
@@ -273,10 +321,43 @@ def _digest_fields(payload):
 
 
 def _finish_fence(gateway, claim, kind, alias, native_encounter_id):
-    gateway.commit()
+    """Encode the receipt, commit the native write, then append the terminal.
+
+    The receipt is encoded (and so validated by the fence codec) before the one
+    site commit, so an encoder refusal is deterministic and lands while the
+    native transaction is still uncommitted: the caller's existing
+    dispatch-failure path discards that transaction with ``gateway.rollback()``
+    (the fake gateway records only that attempt) and the key ends ``UNKNOWN``.
+    Encoding after the commit would instead leave the native write durable with
+    an unestablished receipt.
+
+    The fence lease is held across all three steps; the ``FOR UPDATE`` row locks
+    are not. The native commit releases them with the site transaction, so only
+    the file fence spans the commit-to-terminal gap and the two stores are never
+    one transaction. Each failure in that gap has its own durable state:
+
+    * the native commit raises: the claim is still open, so the caller's
+      dispatch-failure path appends the ``UNKNOWN`` terminal when the marker can
+      be written, and otherwise leaves the key ``DISPATCHED``;
+    * the fence terminal append raises: it is never rewritten, so the key stays
+      ``DISPATCHED`` when the append did not persist and is ``COMMITTED`` with a
+      receipt when it persisted before the error - the caller cannot tell which
+      happened, so the outcome is uncertain and the reply is
+      ``409 WRITE_LOCKED``;
+    * an interrupt: the claim is never closed and the key stays ``DISPATCHED``.
+
+    No failure path here appends an ``ABORTED`` terminal or resolves a barrier.
+    An unresolved key plus its barrier block every new operation site-wide until
+    an operator reconciles it; that reconciliation is offline and is not
+    implemented here. A persisted ``COMMITTED`` receipt is still answered by an
+    exact replay, and its barrier is resolved only by the caller's
+    acknowledgement.
+    """
+
     receipt = encounter_write.encode_receipt(
         kind=kind, alias=alias, native_encounter_id=native_encounter_id
     )
+    gateway.commit()
     claim.commit(receipt)
     return receipt
 

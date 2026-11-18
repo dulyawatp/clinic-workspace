@@ -23,7 +23,8 @@ stock family:
 7. one mutation unit through the installed submittable document (for the
    PO-referenced receipt: the batch master creation first, then the submitted
    ``Purchase Receipt``), a closed-world re-read against the EXPECTED
-   side-effect list, one explicit commit and the terminal receipt,
+   side-effect list, the expected receipt encoded before that commit, one
+   explicit commit and then the terminal append,
 8. the one-shot acknowledgement token.
 
 A draft purchase order never submits itself: there is no submit flag anywhere in
@@ -31,9 +32,12 @@ the draft body or the prepared document. Closing a purchase order is designed
 but unwired this wave (no close kind, no close budget line).
 
 Every designed refusal happens **before** the fence claim. A refusal inside a
-held fence would terminate the operation ``UNKNOWN`` and latch the whole site.
+held fence would leave the operation unresolved — a best-effort ``UNKNOWN``
+marker, otherwise ``DISPATCHED`` — and latch the whole site.
 A post-dispatch failure is uncertain: the key stays locked and the response is
-``409 {"code": "WRITE_LOCKED"}`` with no retry.
+``409 {"code": "WRITE_LOCKED"}`` with no retry. The endpoint rolls back the
+partial transaction; a rollback failure raises ``RollbackFailed`` instead of
+returning a normal error.
 """
 
 from clinic_ui.core import patient_write, purchase_contract
@@ -85,11 +89,28 @@ def _mark_unknown(claim, reason):
         return
 
 
+class RollbackFailed(RuntimeError):
+    """The failed write could not be rolled back; the request must fail loudly.
+
+    Returning a normal 409 would let Frappe's end-of-request commit for an
+    unsafe method persist a partial native write. The caller propagates this to
+    Frappe cleanup instead; the fence key stays ``UNKNOWN``/``DISPATCHED``.
+    """
+
+
 def _rollback_or_raise(gateway):
+    """Discard the partial transaction; a rollback failure must escape.
+
+    Do not swallow this: a normal error response could trigger Frappe's implicit
+    request-end commit. The key stays unresolved — ``UNKNOWN`` when the caller
+    could mark it, otherwise ``DISPATCHED`` — so the lock is retained even when
+    rollback itself fails.
+    """
+
     try:
         gateway.rollback()
     except BaseException as exc:
-        raise patient_write.WriteUncertain(
+        raise RollbackFailed(
             "native purchasing write rollback failed"
         ) from exc
 
@@ -278,10 +299,31 @@ def _receipt_kwargs(payload, reference):
 
 
 def _finish_fence(gateway, claim, payload, reference):
-    gateway.commit()
+    """Encode the receipt, commit the native write, then append the terminal.
+
+    The receipt is encoded by the contract codec before the site commit.
+    On encoder refusal the caller attempts to mark the key ``UNKNOWN`` and
+    then attempts rollback. If rollback fails, ``RollbackFailed`` escapes;
+    the native transaction outcome is not established.
+
+    The fence spans all three steps; the ``FOR UPDATE`` row locks do not, so the
+    native commit and the terminal append are never one transaction, and a
+    failure after the commit is uncertain rather than retryable. A native commit
+    failure is itself uncertain: the commit may have applied before it raised,
+    and the caller's fallback ``UNKNOWN`` marker is a best-effort append that can
+    fail or be interrupted. A terminal append failure leaves the outcome
+    unresolved as well: the append may never have landed, leaving the key
+    ``DISPATCHED``, or it may have been durable before the error surfaced,
+    leaving ``COMMITTED`` with the receipt. There is no ``ABORTED`` terminal, no
+    automatic recovery and no unlock: an unresolved ``DISPATCHED`` or
+    ``UNKNOWN`` row locks the whole site for every actor until an operator
+    reconciles it.
+    """
+
     receipt = purchase_contract.encode_receipt(
         **_receipt_kwargs(payload, reference)
     )
+    gateway.commit()
     claim.commit(receipt)
     return receipt
 
@@ -416,7 +458,7 @@ def _perform(
                     is not None
                 ):
                     raise patient_write.WriteUncertain()
-                _finish_fence(gateway, claim, payload, reference)
+                receipt = _finish_fence(gateway, claim, payload, reference)
             except (
                 purchase_contract.PurchaseTargetNotEligible,
                 purchase_contract.PurchaseBudgetExhausted,
@@ -455,9 +497,6 @@ def _perform(
         gateway.deny()
 
     try:
-        receipt = purchase_contract.encode_receipt(
-            **_receipt_kwargs(payload, reference)
-        )
         ack_token = purchase_contract.ack_token(
             settings.epoch_secret,
             gateway.site,

@@ -15,14 +15,25 @@ Order is fixed and test-asserted for both operations:
 6. one native mutation (a User with its roles and optional practitioner link,
    or one master row with its bundled price/account child) and one closed-world
    re-read,
-7. one explicit commit and the terminal receipt that carries the created name
+7. the receipt encoded while the native transaction is still uncommitted, so a
+   receipt refusal is deterministic and ends ``UNKNOWN`` with no commit, then
+   one explicit commit and the terminal receipt that carries the created name
    only — never a credential,
-8. the one-shot acknowledgement token.
+8. the one-shot acknowledgement token, bound to that exact committed receipt
+   rather than to a second post-commit encode.
 
-Every designed refusal happens **before** the fence claim. A post-claim
-refusal is a bug: it rolls back and locks the operation rather than leaving the
-site latched. A post-dispatch failure is uncertain: the key stays locked and
-the response is ``409 {"code": "WRITE_LOCKED"}`` with no retry.
+Every designed refusal happens **before** the fence claim. A post-claim refusal
+is a bug: the partial transaction is rolled back and the operation is locked
+rather than silently dropped. A post-dispatch failure is uncertain and is never
+auto-reconciled: the key keeps its ``DISPATCHED`` record, or gains an
+``UNKNOWN`` terminal when the outcome cannot be established (including a commit
+that may have landed without its terminal append). Both are unresolved for the
+whole deployment: the fence's unresolved check refuses every actor and every new
+key site-wide until an operator reconciles it, and the response is
+``409 {"code": "WRITE_LOCKED"}`` with no retry. If rolling back the partial
+native transaction itself fails, the endpoint raises :class:`RollbackFailed` to
+Frappe cleanup instead of returning that 409 — a normal response could let the
+framework's request-end commit persist the partial write.
 """
 
 from clinic_ui.core import admin_contract, patient_write
@@ -49,6 +60,16 @@ class ManualInvestigationRequired(RuntimeError):
     """Neither the site latch nor the operation fallback could be persisted."""
 
 
+class RollbackFailed(RuntimeError):
+    """The failed write could not be rolled back; the request must fail loudly.
+
+    Returning a normal 409 would let Frappe's end-of-request commit for an
+    unsafe method persist a partial native write. The caller propagates this to
+    Frappe cleanup instead; the key stays ``DISPATCHED``/``UNKNOWN`` and blocks
+    every new operation site-wide until an operator reconciles it.
+    """
+
+
 def _respond_error(gateway, status, code):
     return gateway.respond_write(status, {"code": code})
 
@@ -73,10 +94,18 @@ def _mark_unknown(claim, reason):
 
 
 def _rollback_or_raise(gateway):
+    """Discard the partial transaction; a rollback failure must escape.
+
+    Do not swallow this into ``WriteUncertain``: that becomes a normal 409, and
+    Frappe's request-end commit could then persist the partial native write. The
+    caller has already marked the operation ``UNKNOWN``, so the lock holds even
+    when rollback itself fails, but the failure must reach Frappe cleanup.
+    """
+
     try:
         gateway.rollback()
     except BaseException as exc:
-        raise patient_write.WriteUncertain(
+        raise RollbackFailed(
             "native admin write rollback failed"
         ) from exc
 
@@ -219,10 +248,23 @@ def _master_digest_fields(payload):
 
 
 def _finish_fence(gateway, claim, *, kind, identifier, master_type=""):
-    gateway.commit()
+    """Encode the receipt, commit the native write, then append the terminal.
+
+    The receipt is encoded (and so validated by the contract codec) before the
+    one commit. A refusal is then deterministic and lands while the native
+    transaction is still uncommitted, so the caller's existing failure path
+    rolls that transaction back and the key stays locked. Encoding after the
+    commit would instead land a native write whose only record is ``UNKNOWN``.
+
+    The returned receipt is the one appended to the fence. Callers bind the
+    acknowledgement token to it rather than encoding again after the commit,
+    where a second encode could fail and turn a committed write into a latch.
+    """
+
     receipt = admin_contract.encode_receipt(
         kind=kind, identifier=identifier, master_type=master_type
     )
+    gateway.commit()
     claim.commit(receipt)
     return receipt
 
@@ -296,6 +338,7 @@ def create_user(gateway, body, csrf_token=None):
 
     user = None
     roles = ()
+    receipt = None
     try:
         with gateway.admin_write_fence(
             actor, kind, payload["operation_key"], digest
@@ -329,7 +372,7 @@ def create_user(gateway, body, csrf_token=None):
                 }
                 if admin_contract.user_facts_problem(facts, expected) is not None:
                     raise patient_write.WriteUncertain()
-                _finish_fence(
+                receipt = _finish_fence(
                     gateway, claim, kind=kind, identifier=user
                 )
             except (
@@ -376,7 +419,7 @@ def create_user(gateway, body, csrf_token=None):
             actor,
             kind,
             payload["operation_key"],
-            admin_contract.encode_receipt(kind=kind, identifier=user),
+            receipt,
         )
         return _success_user(
             gateway, user, roles, payload["practitioner"], ack_token
@@ -435,6 +478,7 @@ def edit_master(gateway, body, csrf_token=None):
         return _locked_response(gateway)
 
     name = None
+    receipt = None
     try:
         with gateway.admin_write_fence(
             actor, kind, payload["operation_key"], digest
@@ -473,7 +517,7 @@ def edit_master(gateway, body, csrf_token=None):
                     is not None
                 ):
                     raise patient_write.WriteUncertain()
-                _finish_fence(
+                receipt = _finish_fence(
                     gateway,
                     claim,
                     kind=kind,
@@ -518,9 +562,6 @@ def edit_master(gateway, body, csrf_token=None):
         gateway.deny()
 
     try:
-        receipt = admin_contract.encode_receipt(
-            kind=kind, identifier=name, master_type=master_type
-        )
         ack_token = admin_contract.ack_token(
             settings.epoch_secret,
             gateway.site,

@@ -18,14 +18,32 @@ Order is fixed and test-asserted:
    pre-fence decisions again against current rows,
 8. the designed transition (pinned ``cancel_appointment`` plus a terminal
    status save, or the native ``No Show`` save), a closed-world re-read of the
-   returned state, then one explicit commit and the terminal receipt,
+   returned state, the receipt encoded by the ``appointment_write`` receipt
+   codec, one explicit commit and the terminal append,
 9. the one-shot acknowledgement token; the ack endpoint is unchanged.
 
-Every designed refusal in 3-6 happens **before** the fence claim. A refusal
-inside a held fence would terminate the operation ``UNKNOWN`` and latch the
-whole site. A post-dispatch failure is uncertain: the key stays locked and the
-response is ``409 {"code": "WRITE_LOCKED"}`` with no retry. Status is never
-written to match a client badge; the client never sends a status.
+Every designed refusal in 3-6 happens **before** the fence claim. The claim
+itself is appended when the fence is taken, so every refusal after that point
+blocks the site and none is retried or cleared here. The two designed in-fence
+refusals (a target that went terminal under the lock, a budget that filled
+before the re-read there) raise without marking anything: the key stays
+``DISPATCHED`` and no site-wide latch is written. A failure that marks an
+unestablished native outcome leaves the key ``UNKNOWN``; a process interrupt
+leaves it ``DISPATCHED``. There is no ``ABORTED`` terminal and no auto-clear,
+and neither ``DISPATCHED`` nor ``UNKNOWN`` can be acknowledged: no call in this
+endpoint resolves those keys.
+
+``COMMITTED`` is a different state. Every claim also appends a reserved barrier
+key, and the terminal append commits only the operation key, so a completed
+cancel still blocks new operations. The unchanged ``appointments_write.ack``
+acknowledgement of that receipt commits the barrier; the site unblocks when the
+client confirms the receipt it was given. The response for a refused operation
+is ``409 {"code": "WRITE_LOCKED"}`` with no retry. The endpoint rolls back the
+partial transaction on a post-dispatch failure; a rollback failure raises
+``RollbackFailed`` to Frappe cleanup instead of returning a normal error, since
+Frappe's implicit end-of-request commit for an unsafe method could otherwise
+persist a partial native write. Status is never written to match a client
+badge; the client never sends a status.
 """
 
 from clinic_ui.core import (
@@ -57,6 +75,15 @@ class SuccessUncertain(Exception):
     """The native write committed but the success response could not be built."""
 
 
+class RollbackFailed(RuntimeError):
+    """The failed write could not be rolled back; the request must fail loudly.
+
+    Returning a normal 409 would let Frappe's end-of-request commit for an
+    unsafe method persist a partial native write. The caller propagates this to
+    Frappe cleanup instead; the fence key stays ``UNKNOWN``/``DISPATCHED``.
+    """
+
+
 class ManualInvestigationRequired(RuntimeError):
     """Neither the site latch nor the operation fallback could be persisted."""
 
@@ -77,10 +104,18 @@ def _mark_unknown(claim, reason):
 
 
 def _rollback_or_raise(gateway):
+    """Discard the partial transaction; a rollback failure must escape.
+
+    Do not swallow this into ``WriteUncertain``: a normal 409 could let Frappe's
+    implicit request-end commit persist the partial native write. The dispatched
+    key is left ``UNKNOWN`` or ``DISPATCHED``, so it still blocks the site when
+    the rollback itself fails.
+    """
+
     try:
         gateway.rollback()
     except BaseException as exc:
-        raise patient_write.WriteUncertain(
+        raise RollbackFailed(
             "native appointment transition rollback failed"
         ) from exc
 
@@ -147,10 +182,38 @@ def _digest_fields(payload):
 
 
 def _finish_fence(gateway, claim, kind, alias, native_appointment_id):
-    gateway.commit()
+    """Encode the receipt, commit the native write, then append the terminal.
+
+    The receipt is encoded and validated by the ``appointment_write`` receipt
+    codec before the one site commit, so a rejected alias raises while the
+    native transaction is still uncommitted; the caller's existing
+    dispatch-failure path then discards that transaction with
+    ``gateway.rollback()`` and the key stays locked. Encoding after the commit
+    would instead land a native write whose only durable record is ``UNKNOWN``.
+
+    The append is a separate durable step from the site commit, so the two
+    stores are never one transaction:
+
+    * the append never applies: the native write may be durable and the key
+      stays ``DISPATCHED`` — or ``UNKNOWN`` when the caller marked an
+      unestablished outcome before the append;
+    * the append applies but the call fails, or the process dies before the
+      response leaves: the key is ``COMMITTED`` with its receipt and the success
+      response is lost.
+
+    A successful append does not by itself unblock the site. Every claim also
+    appends a reserved barrier key, and only the unchanged
+    ``appointments_write.ack`` acknowledgement commits that barrier, so a
+    completed cancel blocks new operations until the client acknowledges its
+    receipt. ``DISPATCHED`` and ``UNKNOWN`` keys accept no acknowledgement, and
+    the restore/quarantine protocol is not implemented: those states have no
+    path out of this endpoint.
+    """
+
     receipt = appointment_write.encode_receipt(
         kind=kind, alias=alias, native_appointment_id=native_appointment_id
     )
+    gateway.commit()
     claim.commit(receipt)
     return receipt
 
@@ -291,8 +354,11 @@ def _transition(
                 if state.patient != native_patient_id:
                     raise patient_write.UnsafeSideEffect("target patient changed")
                 if target_problem(state) is not None:
-                    # Nothing was dispatched: this is an eligibility refusal,
-                    # not an uncertain outcome.
+                    # The claim is already DISPATCHED here. This is an
+                    # eligibility refusal rather than an unestablished native
+                    # outcome, so nothing is marked and no latch is written:
+                    # the key stays DISPATCHED and blocks the site, and no call
+                    # in this endpoint resolves it.
                     raise appointment_write.AppointmentTargetNotEligible()
                 if gateway.native_patient_can_read(state.patient) is not True:
                     gateway.deny()

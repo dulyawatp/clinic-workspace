@@ -15,8 +15,9 @@ and the installed child are both present.
 """
 
 import unittest
+from unittest import mock
 
-from clinic_ui.core import config, finance_contract, patient_write
+from clinic_ui.core import config, finance_contract, patient_write, write_fence
 from clinic_ui.endpoints import finance_write, session
 
 from .fake_gateway import (
@@ -748,6 +749,223 @@ class FenceAndUncertaintyTests(unittest.TestCase):
 
         self.assertEqual(fake.finance_ack_calls, [])
         self.assertEqual(len(fake.finance_fence_claim.committed), 1)
+
+
+class ReceiptEncodeBeforeCommitTests(unittest.TestCase):
+    """The terminal receipt is encoded before the one native commit.
+
+    Encoding after the commit would land an invoice or a payment whose only
+    durable record is ``UNKNOWN``; encoding first makes a codec refusal
+    deterministic while the native transaction is still uncommitted, so the
+    rollback discards it and no ``COMMITTED`` terminal is appended.
+    """
+
+    def test_the_receipt_is_encoded_before_the_commit_and_the_terminal(self):
+        fake = gateway()
+        real_encode = finance_contract.encode_receipt
+
+        def recording_encode(**kwargs):
+            fake.call_order.append("encode_receipt")
+            self.assertEqual(len(fake.finance_invoice_calls), 1)
+            return real_encode(**kwargs)
+
+        claim = fake.finance_fence_claim
+        real_claim_commit = claim.commit
+
+        def recording_claim_commit(receipt):
+            fake.call_order.append("claim_commit")
+            return real_claim_commit(receipt)
+
+        claim.commit = recording_claim_commit
+
+        with mock.patch.object(
+            finance_contract, "encode_receipt", recording_encode
+        ):
+            payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        order = fake.call_order
+        self.assertLess(order.index("encode_receipt"), order.index("commit"))
+        self.assertLess(order.index("commit"), order.index("claim_commit"))
+        self.assertEqual(len(claim.committed), 1)
+        # The wire body is what the ordering change must not move.
+        self.assertEqual(payload["status"], "submitted")
+        self.assertEqual(payload["invoice"], "SINV-1")
+        self.assertEqual(payload["total"], 20.0)
+        self.assertRegex(payload["ackToken"], r"^[0-9a-f]{64}$")
+
+    def test_a_receipt_encode_failure_never_reaches_the_native_commit(self):
+        fake = gateway()
+
+        with mock.patch.object(
+            finance_contract,
+            "encode_receipt",
+            side_effect=finance_contract.FinanceContractError(
+                "invalid receipt reference"
+            ),
+        ):
+            payload = finance_write.receive_payment(fake, payment_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(len(fake.finance_payment_calls), 1)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.finance_fence_claim.committed, [])
+        self.assertTrue(fake.finance_fence_claim.unknowns)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.finance_receipt_records, [])
+
+    def test_the_ack_token_is_bound_to_the_receipt_that_was_stored(self):
+        fake = gateway()
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        (stored,) = fake.finance_fence_claim.committed
+        self.assertEqual(
+            payload["ackToken"],
+            finance_contract.ack_token(
+                SECRET.encode(),
+                SITE,
+                fake.current_session.user,
+                "invoice_submit",
+                KEY,
+                stored,
+            ),
+        )
+
+    def test_a_native_commit_failure_ends_unknown_without_a_terminal(self):
+        fake = gateway()
+
+        def failing_commit():
+            fake.call_order.append("commit")
+            raise RuntimeError("native commit failed")
+
+        fake.commit = failing_commit
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.call_order.count("commit"), 1)
+        self.assertEqual(fake.finance_fence_claim.committed, [])
+        self.assertTrue(fake.finance_fence_claim.unknowns)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.finance_receipt_records, [])
+
+    def test_a_terminal_claim_failure_after_the_commit_stays_uncertain(self):
+        """The native write is durable, so the answer cannot be a retry."""
+
+        fake = gateway()
+
+        def failing_claim_commit(receipt):
+            fake.call_order.append("claim_commit")
+            raise RuntimeError("terminal append failed")
+
+        fake.finance_fence_claim.commit = failing_claim_commit
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.commit_calls, 1)
+        self.assertEqual(fake.finance_fence_claim.committed, [])
+        self.assertTrue(fake.finance_fence_claim.unknowns)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.finance_receipt_records, [])
+
+
+class RollbackFailureTests(unittest.TestCase):
+    """A failed rollback must escape the endpoint, never become a normal 409.
+
+    A normal response would let Frappe's end-of-request commit for an unsafe
+    POST persist the partial native write, so the failure is raised to Frappe
+    cleanup instead.
+    """
+
+    def test_a_rollback_failure_escapes_instead_of_returning_a_response(self):
+        fake = gateway()
+        fake.finance_mutation_error = patient_write.WriteUncertain()
+
+        def failing_rollback():
+            fake.rollback_calls += 1
+            raise RuntimeError("native rollback failed")
+
+        fake.rollback = failing_rollback
+
+        with self.assertRaises(finance_write.RollbackFailed):
+            finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(fake.finance_fence_claim.committed, [])
+
+    def test_an_encoder_refusal_with_a_failed_rollback_escapes_from_the_generic_branch(
+        self,
+    ):
+        """The unexpected-failure branch marks ``UNKNOWN`` first, then rolls back.
+
+        Encoding is patched to raise a plain error (not a contract or fence
+        type), so the operation falls into the generic handler: the marker is
+        attempted before the rollback, and a failed rollback must still escape
+        rather than answer with a normal 409.
+        """
+
+        fake = gateway()
+        order = []
+        claim = fake.finance_fence_claim
+        real_unknown = claim.unknown
+
+        def recording_unknown(reason):
+            order.append("marker")
+            return real_unknown(reason)
+
+        def failing_rollback():
+            order.append("rollback")
+            fake.rollback_calls += 1
+            raise RuntimeError("native rollback failed")
+
+        claim.unknown = recording_unknown
+        fake.rollback = failing_rollback
+
+        with mock.patch.object(
+            finance_contract,
+            "encode_receipt",
+            side_effect=RuntimeError("receipt encoder failed"),
+        ):
+            with self.assertRaises(finance_write.RollbackFailed) as caught:
+                finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(order, ["marker", "rollback"])
+        self.assertEqual(len(claim.unknowns), 1)
+        self.assertEqual(claim.committed, [])
+        self.assertEqual(fake.write_responses, [])
+        self.assertIs(type(caught.exception), finance_write.RollbackFailed)
+        self.assertNotIsInstance(
+            caught.exception,
+            (write_fence.FenceError, patient_write.WriteUncertain),
+        )
+
+    def test_a_named_refusal_with_a_failed_rollback_escapes_without_a_marker(self):
+        """A named dispatch refusal rolls back only; no ``UNKNOWN`` is written."""
+
+        fake = gateway()
+        fake.finance_detail_sequence = [
+            payment_detail(),
+            payment_detail(payment_exists=True),
+        ]
+
+        def failing_rollback():
+            fake.rollback_calls += 1
+            raise RuntimeError("native rollback failed")
+
+        fake.rollback = failing_rollback
+
+        with self.assertRaises(finance_write.RollbackFailed) as caught:
+            finance_write.receive_payment(fake, payment_body(), CSRF)
+
+        self.assertEqual(fake.finance_fence_claim.unknowns, [])
+        self.assertEqual(fake.finance_fence_claim.committed, [])
+        self.assertEqual(fake.write_responses, [])
+        self.assertIs(type(caught.exception), finance_write.RollbackFailed)
+        self.assertNotIsInstance(
+            caught.exception,
+            (write_fence.FenceError, patient_write.WriteUncertain),
+        )
 
 
 class AckTests(unittest.TestCase):

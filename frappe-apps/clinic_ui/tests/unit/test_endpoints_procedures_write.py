@@ -7,8 +7,9 @@ closed-world side-effect check, the exactly-once receipt and the one-shot ack.
 """
 
 import unittest
+from unittest import mock
 
-from clinic_ui.core import config, patient_write
+from clinic_ui.core import config, patient_write, write_fence
 from clinic_ui.core import procedure_write
 from clinic_ui.endpoints import procedures_write, session
 
@@ -399,6 +400,126 @@ class FenceTests(unittest.TestCase):
         self.assertEqual(fake.procedure_ack_calls, [])
         self.assertEqual(len(fake.procedure_fence_claim.committed), 1)
 
+    def test_the_receipt_is_encoded_before_the_commit_and_the_terminal_claim(self):
+        """The receipt is validated while the native write is still uncommitted.
+
+        A receipt the fence would reject cannot be an established outcome, so it
+        is encoded before the one native commit rather than after it.
+        """
+
+        fake = gateway()
+        real_encode = procedure_write.encode_receipt
+        real_claim_commit = fake.procedure_fence_claim.commit
+
+        def recording_encode(**kwargs):
+            fake.call_order.append("encode_receipt")
+            return real_encode(**kwargs)
+
+        def recording_claim_commit(receipt):
+            fake.call_order.append("claim_commit")
+            real_claim_commit(receipt)
+
+        fake.procedure_fence_claim.commit = recording_claim_commit
+        with mock.patch.object(procedure_write, "encode_receipt", recording_encode):
+            payload = procedures_write.complete(fake, body(), CSRF)
+
+        self.assertEqual(payload["status"], "completed")
+        order = fake.call_order
+        self.assertEqual(len(fake.complete_procedure_calls), 1)
+        self.assertLess(order.index("encode_receipt"), order.index("commit"))
+        self.assertLess(order.index("commit"), order.index("claim_commit"))
+        self.assertEqual(len(fake.procedure_fence_claim.committed), 1)
+
+    def test_a_receipt_encode_failure_never_reaches_the_native_commit(self):
+        fake = gateway()
+
+        with mock.patch.object(
+            procedure_write,
+            "encode_receipt",
+            side_effect=procedure_write.ProcedureWriteError("invalid receipt"),
+        ):
+            payload = procedures_write.complete(fake, body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        # The encode refusal lands while the native transaction is still
+        # uncommitted: only the rollback attempt is recorded and the key stays
+        # locked as UNKNOWN with no COMMITTED terminal.
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.procedure_fence_claim.committed, [])
+        self.assertTrue(fake.procedure_fence_claim.unknowns)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_rollback_failure_escapes_instead_of_returning_a_response(self):
+        """A failed rollback must fail loudly, never become a normal 409.
+
+        Returning an envelope would let Frappe's request-end commit persist the
+        partial native write; the dedicated exception propagates to cleanup.
+        """
+
+        fake = gateway()
+
+        def failing_rollback():
+            raise RuntimeError("rollback exploded")
+
+        with mock.patch.object(
+            procedure_write,
+            "encode_receipt",
+            side_effect=procedure_write.ProcedureWriteError("invalid receipt"),
+        ), mock.patch.object(fake, "rollback", failing_rollback):
+            with self.assertRaises(procedures_write.RollbackFailed):
+                procedures_write.complete(fake, body(), CSRF)
+
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.procedure_fence_claim.committed, [])
+
+    def test_a_named_handler_rollback_failure_marks_nothing_and_responds_nothing(
+        self,
+    ):
+        """A named exception path never marks UNKNOWN before its rollback.
+
+        Only the generic handler appends ``UNKNOWN``; the named handlers attempt
+        the rollback and re-raise, so the key stays ``DISPATCHED``. The escape
+        itself must not be converted by any handler: ``RollbackFailed`` derives
+        from ``RuntimeError``, not from ``WriteUncertain`` or ``FenceError``.
+        """
+
+        fake = gateway()
+        fake.complete_procedure_error = patient_write.WriteUncertain()
+
+        def failing_rollback():
+            raise RuntimeError("rollback exploded")
+
+        with mock.patch.object(fake, "rollback", failing_rollback):
+            with self.assertRaises(procedures_write.RollbackFailed):
+                procedures_write.complete(fake, body(), CSRF)
+
+        self.assertEqual(fake.procedure_fence_claim.unknowns, [])
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(fake.procedure_fence_claim.committed, [])
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertFalse(
+            issubclass(procedures_write.RollbackFailed, patient_write.WriteUncertain)
+        )
+        self.assertFalse(
+            issubclass(procedures_write.RollbackFailed, write_fence.FenceError)
+        )
+
+    def test_a_native_commit_failure_appends_no_committed_terminal(self):
+        fake = gateway()
+
+        def failing_commit():
+            fake.call_order.append("commit")
+            raise RuntimeError("native commit failed")
+
+        with mock.patch.object(fake, "commit", failing_commit):
+            payload = procedures_write.complete(fake, body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.procedure_fence_claim.committed, [])
+        self.assertTrue(fake.procedure_fence_claim.unknowns)
+        self.assertEqual(fake.rollback_calls, 1)
+
 
 class CreateTests(unittest.TestCase):
     """D4: the creation path from a submitted Service Request."""
@@ -431,6 +552,24 @@ class CreateTests(unittest.TestCase):
         self.assertEqual(receipt.service_request, SERVICE_REQUEST)
         self.assertEqual(receipt.native_procedure_id, fake.created_procedure_id)
         self.assertEqual(receipt.stock_entry, "")
+
+    def test_the_create_path_encodes_the_receipt_before_the_commit(self):
+        """The creation path already encodes before the one commit; keep it."""
+
+        fake = gateway()
+        real_encode = procedure_write.encode_receipt
+
+        def recording_encode(**kwargs):
+            fake.call_order.append("encode_receipt")
+            return real_encode(**kwargs)
+
+        with mock.patch.object(procedure_write, "encode_receipt", recording_encode):
+            payload = procedures_write.create(fake, create_body(), CSRF)
+
+        self.assertEqual(payload["status"], "created")
+        order = fake.call_order
+        self.assertLess(order.index("encode_receipt"), order.index("commit"))
+        self.assertEqual(len(fake.procedure_fence_claim.committed), 1)
 
     def test_the_created_alias_completes_through_its_receipt(self):
         fake = gateway(
@@ -465,6 +604,26 @@ class CreateTests(unittest.TestCase):
             fake.complete_procedure_calls[0].as_dict()["service_request"],
             SERVICE_REQUEST,
         )
+
+    def test_a_rollback_failure_escapes_on_the_creation_path(self):
+        """The creation path shares the escape-not-respond rollback rule."""
+
+        fake = gateway()
+
+        def failing_rollback():
+            raise RuntimeError("rollback exploded")
+
+        with mock.patch.object(
+            procedure_write,
+            "encode_receipt",
+            side_effect=procedure_write.ProcedureWriteError("invalid receipt"),
+        ), mock.patch.object(fake, "rollback", failing_rollback):
+            with self.assertRaises(procedures_write.RollbackFailed):
+                procedures_write.create(fake, create_body(), CSRF)
+
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.procedure_fence_claim.committed, [])
 
     def test_a_missing_service_request_is_refused_before_the_fence(self):
         fake = gateway()

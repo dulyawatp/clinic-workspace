@@ -7,6 +7,7 @@ semantics; the adapter tests cover the locked native calls.
 """
 
 import unittest
+from unittest import mock
 
 from clinic_ui.core import appointment_write, config, patient_write
 from clinic_ui.core.appointment_write import (
@@ -438,12 +439,15 @@ class BookingTests(unittest.TestCase):
         self.assertEqual(fake.appointment_fence_calls, [])
         self.assertEqual(fake.insert_appointment_calls, [])
 
-    def test_a_receipt_failure_after_commit_keeps_the_key_locked(self):
+    def test_a_receipt_failure_before_commit_keeps_the_key_locked(self):
+        """A real alias the fence codec rejects never reaches the native commit."""
+
         fake = gateway()
         fake.created_appointment_id = "X" * 141
         payload = appointments_write.book(fake, book_body(), CSRF)
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(fake.commit_calls, 1)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
         self.assertEqual(len(fake.appointment_fence_claim.committed), 0)
         self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
 
@@ -506,6 +510,75 @@ class BookingTests(unittest.TestCase):
         fake.latch_operation_uncertain = boom
         with self.assertRaises(appointments_write.ManualInvestigationRequired):
             appointments_write.book(fake, book_body(), CSRF)
+
+    def test_the_receipt_is_encoded_before_the_commit_and_the_terminal_claim(self):
+        """The receipt is validated while the native write is still uncommitted.
+
+        A receipt the fence would reject cannot be an established outcome, so it
+        must be refused before the one native commit rather than after it.
+        """
+
+        fake = gateway()
+        real_encode = appointment_write.encode_receipt
+        committed_at_commit = []
+
+        def recording_encode(**kwargs):
+            fake.call_order.append("encode_receipt")
+            return real_encode(**kwargs)
+
+        def recording_commit():
+            committed_at_commit.append(len(fake.appointment_fence_claim.committed))
+            fake.call_order.append("commit")
+            fake.commit_calls += 1
+
+        with mock.patch.object(appointment_write, "encode_receipt", recording_encode):
+            with mock.patch.object(fake, "commit", recording_commit):
+                payload = appointments_write.book(fake, book_body(), CSRF)
+
+        self.assertEqual(payload["status"], "booked")
+        order = fake.call_order
+        self.assertLess(order.index("insert"), order.index("encode_receipt"))
+        self.assertLess(order.index("encode_receipt"), order.index("commit"))
+        # The terminal claim is appended after the commit, never before it.
+        self.assertEqual(committed_at_commit, [0])
+        self.assertEqual(len(fake.appointment_fence_claim.committed), 1)
+
+    def test_a_receipt_encode_failure_never_reaches_the_native_commit(self):
+        """The receipt is encoded before the commit, so a refusal is deterministic.
+
+        The dispatched key stays locked: the site commit is never called, the
+        native transaction is rolled back and no ``COMMITTED`` receipt exists.
+        """
+
+        fake = gateway()
+
+        with mock.patch.object(
+            appointment_write,
+            "encode_receipt",
+            side_effect=appointment_write.AppointmentWriteError("invalid alias"),
+        ):
+            payload = appointments_write.book(fake, book_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.appointment_fence_claim.committed, [])
+        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_native_commit_failure_appends_no_committed_receipt(self):
+        fake = gateway()
+
+        def failing_commit():
+            fake.call_order.append("commit")
+            raise RuntimeError("native commit failed")
+
+        with mock.patch.object(fake, "commit", failing_commit):
+            payload = appointments_write.book(fake, book_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.appointment_fence_claim.committed, [])
+        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
+        self.assertEqual(fake.rollback_calls, 1)
 
 
 class WriteGateTests(unittest.TestCase):

@@ -5,14 +5,27 @@ fence-before-native ordering, the pinned post-condition handling and the
 commit/receipt/acknowledgement chain. It does not claim native permission
 semantics; the adapter tests cover the locked native calls.
 
-Every designed refusal is asserted to happen *before* the fence claim: a refusal
-inside a held fence would terminate the operation ``UNKNOWN`` and latch the
-whole site, which is a blocking defect in this wave.
+Every designed refusal in steps 3-6 is asserted to happen *before* the fence
+claim. A refusal taken after the claim is not free: the claim is already
+``DISPATCHED``, so it blocks the whole site and writes no latch.
+``FenceLedgerIntegrationTests`` holds the production ledger to show that, and
+that a ``COMMITTED`` operation leaves its reserved barrier ``DISPATCHED`` until
+the client acknowledges the receipt.
 """
 
+import contextlib
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from clinic_ui.core import appointment_write, config, patient_write
+from clinic_ui.core import (
+    appointment_write,
+    config,
+    fence_store,
+    patient_write,
+    write_fence,
+)
 from clinic_ui.core.appointment_write import build_alias
 from clinic_ui.endpoints import appointments_cancel_write, appointments_write
 
@@ -81,7 +94,7 @@ def action_detail(**overrides):
     return values
 
 
-def gateway(**overrides):
+def _fake_gateway(factory, *args, **overrides):
     values = {
         "site": SITE,
         "settings": write_settings(),
@@ -89,8 +102,8 @@ def gateway(**overrides):
     }
     values.update(overrides)
     init_keys = {"site", "settings", "current_session", "csrf_token"}
-    fake = FakeGateway(
-        **{key: value for key, value in values.items() if key in init_keys}
+    fake = factory(
+        *args, **{key: value for key, value in values.items() if key in init_keys}
     )
     for key, value in values.items():
         if key not in init_keys:
@@ -106,6 +119,10 @@ def gateway(**overrides):
         "modified": MODIFIED,
     }
     return fake
+
+
+def gateway(**overrides):
+    return _fake_gateway(FakeGateway, **overrides)
 
 
 def alias_for(key):
@@ -309,14 +326,17 @@ class CancelTests(unittest.TestCase):
         payload = appointments_cancel_write.cancel_appointment(fake, body(), CSRF)
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
 
-    def test_a_fence_refusal_of_the_locked_target_does_not_latch(self):
+    def test_a_fence_refusal_of_the_locked_target_writes_no_explicit_latch(self):
         fake = gateway()
         booked_target(fake)
         # The target became terminal between the pre-fence read and the lock.
         fake.appointment_locked[NATIVE_TARGET] = {"status": "Cancelled"}
         payload = appointments_cancel_write.cancel_appointment(fake, body(), CSRF)
-        # The in-fence eligibility refusal is post-dispatch by definition and is
+        # The in-fence eligibility refusal is post-claim by definition and is
         # reported locked; the designed refusals above are the pre-fence ones.
+        # No explicit site latch is written, which does not mean the claim is
+        # resolved: the key stays DISPATCHED and blocks the site, and no call in
+        # this endpoint resolves it (see FenceLedgerIntegrationTests).
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.latch_calls, [])
         self.assertEqual(fake.cancel_calls, [])
@@ -337,6 +357,126 @@ class CancelTests(unittest.TestCase):
         payload = appointments_cancel_write.cancel_appointment(fake, body(), CSRF)
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(len(fake.latch_calls), 1)
+
+    def test_the_receipt_is_encoded_before_the_commit_and_the_terminal_claim(self):
+        """The receipt is validated while the native write is still uncommitted."""
+
+        fake = gateway()
+        booked_target(fake)
+        real_encode = appointment_write.encode_receipt
+        committed_at_commit = []
+
+        def recording_encode(**kwargs):
+            fake.call_order.append("encode_receipt")
+            return real_encode(**kwargs)
+
+        def recording_commit():
+            committed_at_commit.append(len(fake.appointment_fence_claim.committed))
+            fake.call_order.append("commit")
+            fake.commit_calls += 1
+
+        with mock.patch.object(appointment_write, "encode_receipt", recording_encode):
+            with mock.patch.object(fake, "commit", recording_commit):
+                payload = appointments_cancel_write.cancel_appointment(
+                    fake, body(), CSRF
+                )
+
+        self.assertEqual(payload["status"], "cancelled")
+        order = fake.call_order
+        self.assertLess(order.index("encode_receipt"), order.index("commit"))
+        self.assertEqual(committed_at_commit, [0])
+        self.assertEqual(len(fake.appointment_fence_claim.committed), 1)
+
+    def test_a_receipt_encode_failure_never_reaches_the_native_commit(self):
+        """An encoder refusal is deterministic and leaves the native write undone.
+
+        The site commit is never called, the transaction is rolled back and the
+        dispatched key has no ``COMMITTED`` receipt.
+        """
+
+        fake = gateway()
+        booked_target(fake)
+
+        with mock.patch.object(
+            appointment_write,
+            "encode_receipt",
+            side_effect=appointment_write.AppointmentWriteError("invalid alias"),
+        ):
+            payload = appointments_cancel_write.cancel_appointment(fake, body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.appointment_fence_claim.committed, [])
+        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_native_commit_failure_appends_no_committed_receipt(self):
+        fake = gateway()
+        booked_target(fake)
+
+        def failing_commit():
+            fake.call_order.append("commit")
+            raise RuntimeError("native commit failed")
+
+        with mock.patch.object(fake, "commit", failing_commit):
+            payload = appointments_cancel_write.cancel_appointment(fake, body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.appointment_fence_claim.committed, [])
+        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_rollback_failure_escapes_instead_of_returning_a_response(self):
+        """A rollback that fails must never become a normal response.
+
+        The endpoint cannot prove the partial native transaction was discarded,
+        so Frappe's implicit end-of-request commit for an unsafe method could
+        persist it. The failure escapes to framework cleanup instead; the fence
+        key stays locked and no response is written.
+        """
+
+        fake = gateway()
+        booked_target(fake)
+        fake.cancel_error = patient_write.WriteUncertain()
+
+        def rollback_boom():
+            fake.rollback_calls += 1
+            raise RuntimeError("rollback failed")
+
+        fake.rollback = rollback_boom
+        with self.assertRaises(appointments_cancel_write.RollbackFailed):
+            appointments_cancel_write.cancel_appointment(fake, body(), CSRF)
+
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(fake.appointment_fence_claim.committed, [])
+        # The transition failure was already reasoned about, so no ``UNKNOWN``
+        # marker is written here: the key is left ``DISPATCHED`` and blocks the
+        # site, and no call in this endpoint resolves it.
+        self.assertEqual(fake.appointment_fence_claim.unknowns, [])
+
+    def test_a_receipt_encode_failure_with_a_failed_rollback_escapes(self):
+        """The pre-commit refusal still has to escape when rollback fails."""
+
+        fake = gateway()
+        booked_target(fake)
+
+        def rollback_boom():
+            fake.rollback_calls += 1
+            raise RuntimeError("rollback failed")
+
+        fake.rollback = rollback_boom
+        with mock.patch.object(
+            appointment_write,
+            "encode_receipt",
+            side_effect=appointment_write.AppointmentWriteError("invalid alias"),
+        ):
+            with self.assertRaises(appointments_cancel_write.RollbackFailed):
+                appointments_cancel_write.cancel_appointment(fake, body(), CSRF)
+
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.appointment_fence_claim.committed, [])
+        self.assertEqual(len(fake.appointment_fence_claim.unknowns), 1)
 
 
 class NoShowTests(unittest.TestCase):
@@ -376,6 +516,27 @@ class NoShowTests(unittest.TestCase):
         self.assertEqual(fake.appointment_fence_calls, [])
         self.assertEqual(fake.no_show_calls, [])
 
+    def test_a_no_show_rollback_failure_escapes_instead_of_returning_a_response(self):
+        """The no-show transition shares the escape-not-respond rollback rule."""
+
+        fake = gateway()
+        booked_target(fake)
+        fake.no_show_error = patient_write.WriteUncertain()
+
+        def rollback_boom():
+            fake.rollback_calls += 1
+            raise RuntimeError("rollback failed")
+
+        fake.rollback = rollback_boom
+        with self.assertRaises(appointments_cancel_write.RollbackFailed):
+            appointments_cancel_write.record_no_show(
+                fake, body(operation_key=NO_SHOW_KEY), CSRF
+            )
+
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(fake.appointment_fence_claim.committed, [])
+        self.assertEqual(fake.appointment_fence_claim.unknowns, [])
+
     def test_checked_in_target_is_refused_before_the_fence(self):
         fake = gateway()
         booked_target(fake)
@@ -406,6 +567,173 @@ class NoShowTests(unittest.TestCase):
         )
         self.assertEqual(payload, {"code": "VALIDATION"})
         self.assertEqual(allowed.appointment_fence_calls, [])
+
+
+class RealLedgerFenceGateway(FakeGateway):
+    """Fake native site, real temporary fence ledger.
+
+    ``FakeClaim`` cannot show a durable ``DISPATCHED`` key, so these tests hold
+    the production fence. Only the fence is real; every native call is still the
+    in-memory stub.
+    """
+
+    def __init__(self, store, **kwargs):
+        super().__init__(**kwargs)
+        self._store = store
+
+    @contextlib.contextmanager
+    def appointment_write_fence(
+        self, actor, kind, operation_key, payload_digest
+    ):
+        self.call_order.append("fence")
+        self.appointment_fence_calls.append(
+            (actor, kind, operation_key, payload_digest)
+        )
+        # Mirrors ``frappe_gateway.Gateway.appointment_write_fence`` mapping.
+        try:
+            with self._store.fence(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                payload_digest=payload_digest,
+            ) as claim:
+                yield claim
+        except write_fence.OperationLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.SiteLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.OperationConflict as exc:
+            raise patient_write.WriteConflict() from exc
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+
+class FenceLedgerIntegrationTests(unittest.TestCase):
+    """A durable key, not an explicit latch, is what blocks the site.
+
+    The endpoint writes no site-wide latch for an in-fence refusal. These tests
+    use the production ledger to show the unresolved key that remains instead.
+    """
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        root = Path(self._temp.name)
+        fence_store.initialize_store(
+            root / fence_store.STORE_DIRNAME, root / fence_store.ANCHOR_FILENAME
+        )
+        self.ledger = fence_store.open_store(
+            root / fence_store.STORE_DIRNAME, root / fence_store.ANCHOR_FILENAME
+        )
+
+    def ledger_gateway(self):
+        fake = _fake_gateway(RealLedgerFenceGateway, self.ledger)
+        booked_target(fake)
+        return fake
+
+    def assert_site_blocked(self):
+        with self.assertRaises(write_fence.SiteLocked):
+            with self.ledger.fence(
+                actor=ACTOR,
+                kind="appointment_no_show",
+                operation_key=NO_SHOW_KEY,
+                payload_digest="cd" * 32,
+            ) as probe:
+                probe.unknown("site must have been blocked")
+
+    def test_an_in_fence_target_refusal_leaves_the_key_dispatched(self):
+        fake = self.ledger_gateway()
+        # The target turned terminal between the pre-fence read and the lock.
+        fake.appointment_locked[NATIVE_TARGET] = {"status": "Cancelled"}
+
+        payload = appointments_cancel_write.cancel_appointment(fake, body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.latch_calls, [])
+        self.assertEqual(fake.write_responses, [(409, {"code": "WRITE_LOCKED"})])
+        record = self.ledger.lookup(
+            actor=ACTOR, kind="appointment_cancel", operation_key=CANCEL_KEY
+        )
+        self.assertEqual(record.state, write_fence.DISPATCHED)
+        self.assertIsNone(record.receipt)
+        self.assert_site_blocked()
+
+    def test_an_in_fence_budget_refusal_leaves_the_key_dispatched(self):
+        fake = self.ledger_gateway()
+        # The budget fills between the pre-fence read and the re-read in fence.
+        with mock.patch.object(
+            appointments_cancel_write,
+            "_require_budget",
+            side_effect=appointment_write.AppointmentBudgetExhausted(),
+        ):
+            payload = appointments_cancel_write.cancel_appointment(
+                fake, body(), CSRF
+            )
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.latch_calls, [])
+        record = self.ledger.lookup(
+            actor=ACTOR, kind="appointment_cancel", operation_key=CANCEL_KEY
+        )
+        self.assertEqual(record.state, write_fence.DISPATCHED)
+        self.assertIsNone(record.receipt)
+        self.assert_site_blocked()
+
+    def test_a_receipt_encode_failure_leaves_the_key_unknown(self):
+        fake = self.ledger_gateway()
+
+        with mock.patch.object(
+            appointment_write,
+            "encode_receipt",
+            side_effect=appointment_write.AppointmentWriteError("invalid alias"),
+        ):
+            payload = appointments_cancel_write.cancel_appointment(fake, body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.latch_calls, [])
+        record = self.ledger.lookup(
+            actor=ACTOR, kind="appointment_cancel", operation_key=CANCEL_KEY
+        )
+        self.assertEqual(record.state, write_fence.UNKNOWN)
+        self.assertIsNone(record.receipt)
+        self.assert_site_blocked()
+
+    def test_a_completed_cancel_persists_the_committed_terminal(self):
+        fake = self.ledger_gateway()
+
+        payload = appointments_cancel_write.cancel_appointment(fake, body(), CSRF)
+
+        self.assertEqual(payload["status"], "cancelled")
+        record = self.ledger.lookup(
+            actor=ACTOR, kind="appointment_cancel", operation_key=CANCEL_KEY
+        )
+        self.assertEqual(record.state, write_fence.COMMITTED)
+        self.assertEqual(
+            appointment_write.decode_receipt(record.receipt).kind,
+            "appointment_cancel",
+        )
+        # The operation is committed, but its reserved barrier is not: the site
+        # stays blocked until the acknowledgement of that receipt.
+        self.assert_site_blocked()
+        self.assertEqual(
+            self.ledger.acknowledge_barrier(
+                actor=ACTOR,
+                kind="appointment_cancel",
+                operation_key=CANCEL_KEY,
+                ack_receipt="ack:" + payload["ackToken"],
+            ),
+            "acked",
+        )
+        # Only now does the site admit a new operation.
+        with self.ledger.fence(
+            actor=ACTOR,
+            kind="appointment_no_show",
+            operation_key=NO_SHOW_KEY,
+            payload_digest="cd" * 32,
+        ) as admitted:
+            admitted.unknown("probe terminated")
 
 
 if __name__ == "__main__":

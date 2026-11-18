@@ -8,6 +8,7 @@ never enter a receipt or a response.
 """
 
 import unittest
+from unittest import mock
 
 from clinic_ui.core import admin_contract, config, patient_write
 from clinic_ui.endpoints import admin_write, session
@@ -371,6 +372,118 @@ class CreateUserFenceTests(unittest.TestCase):
         self.assertEqual(fake.rollback_calls, 1)
         self.assertEqual(fake.commit_calls, 0)
 
+    def test_the_user_receipt_is_encoded_before_the_commit_and_the_claim(self):
+        """The receipt is validated while the native write is uncommitted."""
+
+        fake = gateway()
+        real_encode = admin_contract.encode_receipt
+        real_claim_commit = fake.admin_fence_claim.commit
+
+        def recording_encode(**kwargs):
+            fake.call_order.append("encode_receipt")
+            return real_encode(**kwargs)
+
+        def recording_claim_commit(receipt):
+            fake.call_order.append("claim_commit")
+            return real_claim_commit(receipt)
+
+        with mock.patch.object(
+            admin_contract, "encode_receipt", recording_encode
+        ), mock.patch.object(
+            fake.admin_fence_claim, "commit", recording_claim_commit
+        ):
+            payload = admin_write.create_user(fake, user_body(), CSRF)
+
+        self.assertEqual(payload["status"], "created")
+        order = fake.call_order
+        self.assertLess(order.index("encode_receipt"), order.index("commit"))
+        self.assertLess(order.index("commit"), order.index("claim_commit"))
+        self.assertEqual(len(fake.admin_fence_claim.committed), 1)
+
+    def test_a_user_receipt_encode_failure_never_reaches_the_commit(self):
+        fake = gateway()
+
+        with mock.patch.object(
+            admin_contract,
+            "encode_receipt",
+            side_effect=admin_contract.AdminContractError(
+                "invalid receipt identifier"
+            ),
+        ):
+            payload = admin_write.create_user(fake, user_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(len(fake.admin_user_create_calls), 1)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.admin_fence_claim.committed, [])
+        self.assertEqual(len(fake.admin_fence_claim.unknowns), 1)
+
+    def test_the_committed_receipt_binds_the_ack_token_without_a_re_encode(self):
+        """The exact committed receipt is reused; nothing re-encodes it."""
+
+        fake = gateway()
+        real_encode = admin_contract.encode_receipt
+        encodes = []
+
+        def counting_encode(**kwargs):
+            encodes.append(dict(kwargs))
+            return real_encode(**kwargs)
+
+        with mock.patch.object(
+            admin_contract, "encode_receipt", counting_encode
+        ):
+            payload = admin_write.create_user(fake, user_body(), CSRF)
+
+        self.assertEqual(len(encodes), 1)
+        receipt = fake.admin_fence_claim.committed[0]
+        self.assertEqual(
+            payload["ackToken"],
+            admin_contract.ack_token(
+                SECRET.encode(),
+                SITE,
+                ACTOR,
+                admin_contract.ADMIN_USER_KIND,
+                USER_KEY,
+                receipt,
+            ),
+        )
+
+    def test_a_user_commit_failure_is_uncertain_and_locked(self):
+        fake = gateway()
+
+        def boom():
+            raise RuntimeError("commit outcome unknown")
+
+        fake.commit = boom
+        payload = admin_write.create_user(fake, user_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(len(fake.admin_fence_claim.unknowns), 1)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.admin_fence_claim.committed, [])
+
+    def test_a_failed_user_rollback_escapes_to_frappe_cleanup(self):
+        """A rollback failure must never become a normal response.
+
+        Returning a 409 would let Frappe's request-end commit persist the
+        partial native write, so this propagates instead; the key is already
+        ``UNKNOWN`` and blocks every new operation site-wide.
+        """
+
+        fake = gateway()
+        fake.admin_user_create_error = RuntimeError("native failed")
+
+        def rollback_failure():
+            raise RuntimeError("rollback failed")
+
+        fake.rollback = rollback_failure
+        with self.assertRaises(admin_write.RollbackFailed):
+            admin_write.create_user(fake, user_body(), CSRF)
+
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(len(fake.admin_fence_claim.unknowns), 1)
+
 
 class EditMasterTests(unittest.TestCase):
     def test_creates_one_warehouse_and_receipts_the_variant(self):
@@ -640,6 +753,107 @@ class EditMasterTests(unittest.TestCase):
         self.assertEqual(fake.admin_fence_claim.committed, [])
         self.assertEqual(fake.commit_calls, 0)
         self.assertEqual(fake.rollback_calls, 1)
+
+    def test_the_master_receipt_is_encoded_before_the_commit_and_the_claim(self):
+        fake = gateway()
+        real_encode = admin_contract.encode_receipt
+        real_claim_commit = fake.admin_fence_claim.commit
+
+        def recording_encode(**kwargs):
+            fake.call_order.append("encode_receipt")
+            return real_encode(**kwargs)
+
+        def recording_claim_commit(receipt):
+            fake.call_order.append("claim_commit")
+            return real_claim_commit(receipt)
+
+        with mock.patch.object(
+            admin_contract, "encode_receipt", recording_encode
+        ), mock.patch.object(
+            fake.admin_fence_claim, "commit", recording_claim_commit
+        ):
+            payload = admin_write.edit_master(fake, master_body(), CSRF)
+
+        self.assertEqual(payload["status"], "created")
+        order = fake.call_order
+        self.assertLess(order.index("encode_receipt"), order.index("commit"))
+        self.assertLess(order.index("commit"), order.index("claim_commit"))
+        self.assertEqual(len(fake.admin_fence_claim.committed), 1)
+
+    def test_a_master_receipt_encode_failure_never_reaches_the_commit(self):
+        fake = gateway()
+
+        with mock.patch.object(
+            admin_contract,
+            "encode_receipt",
+            side_effect=admin_contract.AdminContractError(
+                "invalid receipt identifier"
+            ),
+        ):
+            payload = admin_write.edit_master(fake, master_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(len(fake.admin_master_create_calls), 1)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.admin_fence_claim.committed, [])
+        self.assertEqual(len(fake.admin_fence_claim.unknowns), 1)
+
+    def test_the_committed_master_receipt_binds_the_ack_without_a_re_encode(self):
+        fake = gateway()
+        real_encode = admin_contract.encode_receipt
+        encodes = []
+
+        def counting_encode(**kwargs):
+            encodes.append(dict(kwargs))
+            return real_encode(**kwargs)
+
+        with mock.patch.object(
+            admin_contract, "encode_receipt", counting_encode
+        ):
+            payload = admin_write.edit_master(fake, master_body(), CSRF)
+
+        self.assertEqual(len(encodes), 1)
+        receipt = fake.admin_fence_claim.committed[0]
+        self.assertEqual(
+            payload["ackToken"],
+            admin_contract.ack_token(
+                SECRET.encode(),
+                SITE,
+                ACTOR,
+                admin_contract.ADMIN_MASTER_KIND,
+                MASTER_KEY,
+                receipt,
+            ),
+        )
+
+    def test_a_master_commit_failure_is_uncertain_and_locked(self):
+        fake = gateway()
+
+        def boom():
+            raise RuntimeError("commit outcome unknown")
+
+        fake.commit = boom
+        payload = admin_write.edit_master(fake, master_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(len(fake.admin_fence_claim.unknowns), 1)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.admin_fence_claim.committed, [])
+
+    def test_a_failed_master_rollback_escapes_to_frappe_cleanup(self):
+        fake = gateway()
+        fake.admin_master_create_error = RuntimeError("native failed")
+
+        def rollback_failure():
+            raise RuntimeError("rollback failed")
+
+        fake.rollback = rollback_failure
+        with self.assertRaises(admin_write.RollbackFailed):
+            admin_write.edit_master(fake, master_body(), CSRF)
+
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(len(fake.admin_fence_claim.unknowns), 1)
 
 
 class PractitionerMasterTests(unittest.TestCase):

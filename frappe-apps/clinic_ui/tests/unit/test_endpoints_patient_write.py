@@ -1,6 +1,7 @@
 """Endpoint tests for the local synthetic Patient create/edit methods."""
 
 import unittest
+from unittest import mock
 
 from clinic_ui.core import config, patient_alias, patient_write
 from clinic_ui.endpoints import patients_write
@@ -207,6 +208,52 @@ class CreateEndpointTests(unittest.TestCase):
         self.assertEqual(len(fake.fence_claim.unknowns), 1)
         self.assertEqual(fake.rollback_calls, 1)
 
+    def test_the_receipt_is_encoded_before_the_commit_and_the_terminal_claim(self):
+        """The receipt is validated while the native write is uncommitted."""
+
+        fake = gateway()
+        real_encode = patient_write.encode_receipt
+        real_claim_commit = fake.fence_claim.commit
+
+        def recording_encode(**kwargs):
+            fake.call_order.append("encode_receipt")
+            return real_encode(**kwargs)
+
+        def recording_claim_commit(receipt):
+            fake.call_order.append("claim_commit")
+            return real_claim_commit(receipt)
+
+        with mock.patch.object(
+            patient_write, "encode_receipt", recording_encode
+        ), mock.patch.object(
+            fake.fence_claim, "commit", recording_claim_commit
+        ):
+            payload = create(fake, create_body())
+
+        self.assertEqual(payload["status"], "created")
+        order = fake.call_order
+        self.assertLess(order.index("encode_receipt"), order.index("commit"))
+        self.assertLess(order.index("commit"), order.index("claim_commit"))
+        self.assertEqual(len(fake.fence_claim.committed), 1)
+
+    def test_a_receipt_encode_failure_never_reaches_the_native_commit(self):
+        """A rejected receipt is deterministic and lands before the commit."""
+
+        fake = gateway()
+
+        with mock.patch.object(
+            patient_write,
+            "encode_receipt",
+            side_effect=patient_write.WriteInputError("invalid receipt alias"),
+        ):
+            payload = create(fake, create_body())
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(len(fake.create_calls), 1)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.fence_claim.committed, [])
+        self.assertEqual(len(fake.fence_claim.unknowns), 1)
 
     def test_missing_or_wrong_csrf_is_denied_before_dispatch(self):
         for supplied in (None, "", "wrong-token"):
@@ -401,6 +448,61 @@ class UpdateEndpointTests(unittest.TestCase):
         self.assertEqual(len(fake.fence_claim.unknowns), 1)
         self.assertEqual(fake.rollback_calls, 1)
 
+    def test_the_update_receipt_is_encoded_before_the_commit_and_the_claim(self):
+        fake = gateway()
+        real_encode = patient_write.encode_receipt
+        real_claim_commit = fake.fence_claim.commit
+
+        def recording_encode(**kwargs):
+            fake.call_order.append("encode_receipt")
+            return real_encode(**kwargs)
+
+        def recording_claim_commit(receipt):
+            fake.call_order.append("claim_commit")
+            return real_claim_commit(receipt)
+
+        with mock.patch.object(
+            patient_write, "encode_receipt", recording_encode
+        ), mock.patch.object(
+            fake.fence_claim, "commit", recording_claim_commit
+        ):
+            payload = update(fake, update_body())
+
+        self.assertEqual(payload["status"], "updated")
+        order = fake.call_order
+        self.assertLess(order.index("encode_receipt"), order.index("commit"))
+        self.assertLess(order.index("commit"), order.index("claim_commit"))
+        self.assertEqual(len(fake.fence_claim.committed), 1)
+
+    def test_an_update_receipt_encode_failure_never_commits(self):
+        fake = gateway()
+
+        with mock.patch.object(
+            patient_write,
+            "encode_receipt",
+            side_effect=patient_write.WriteInputError("invalid receipt alias"),
+        ):
+            payload = update(fake, update_body())
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(len(fake.update_calls), 1)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.fence_claim.committed, [])
+        self.assertEqual(len(fake.fence_claim.unknowns), 1)
+
+    def test_an_update_commit_failure_is_uncertain_and_locked(self):
+        fake = gateway()
+
+        def boom():
+            raise RuntimeError("commit outcome unknown")
+
+        fake.commit = boom
+        payload = update(fake, update_body())
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(len(fake.fence_claim.unknowns), 1)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.fence_claim.committed, [])
 
     def test_missing_or_wrong_csrf_is_denied_before_dispatch(self):
         for supplied in (None, "", "wrong-token"):

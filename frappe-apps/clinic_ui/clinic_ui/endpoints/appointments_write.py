@@ -169,12 +169,20 @@ def _digest_fields(payload):
 
 
 def _finish_fence(gateway, claim, kind, alias, native_appointment_id):
-    """Commit the native transaction then append the terminal receipt."""
+    """Encode the receipt, commit the native write, then append the terminal.
 
-    gateway.commit()
+    The receipt is encoded (and so validated by the fence codec) before the one
+    site commit. An encoder refusal is then deterministic and lands while the
+    native transaction is still uncommitted, so the caller's existing
+    dispatch-failure path discards that transaction with ``gateway.rollback()``
+    and the key stays locked. Encoding after the commit would instead land a
+    native write whose only durable record is ``UNKNOWN``.
+    """
+
     receipt = appointment_write.encode_receipt(
         kind=kind, alias=alias, native_appointment_id=native_appointment_id
     )
+    gateway.commit()
     claim.commit(receipt)
     return receipt
 
