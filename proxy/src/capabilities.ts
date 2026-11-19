@@ -52,6 +52,8 @@ export type Capability =
   | "write.purchase_order.submit"
   | "write.invoice.submit"
   | "write.invoice.void_amend"
+  | "write.visit_invoice.submit"
+  | "write.visit_invoice.discount"
   | "write.payment.receive"
   | "write.payment.refund"
   | "write.admin.user"
@@ -104,6 +106,8 @@ export const CAPABILITY_NAMES = [
   "write.purchase_order.submit",
   "write.invoice.submit",
   "write.invoice.void_amend",
+  "write.visit_invoice.submit",
+  "write.visit_invoice.discount",
   "write.payment.receive",
   "write.payment.refund",
   "write.admin.user",

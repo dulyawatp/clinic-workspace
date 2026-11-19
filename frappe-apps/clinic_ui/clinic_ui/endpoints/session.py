@@ -372,6 +372,21 @@ def _admin_write_flags(gateway, settings, role):
     return True, True
 
 
+def _visit_invoice_write_flags(gateway, role, actor):
+    from clinic_ui.runtime.visit_invoice import visit_invoice_write_enabled
+
+    try:
+        if (role != "DOC" or not visit_invoice_write_enabled(gateway, actor)
+                or gateway.visit_invoice_native_create_submit_allowed() is not True):
+            return False, False
+    except Exception:
+        return False, False
+    try:
+        return True, gateway.visit_invoice_discount_allowed() is True
+    except Exception:
+        return True, False
+
+
 def bootstrap(gateway):
     common.begin(gateway)
 
@@ -421,6 +436,7 @@ def bootstrap(gateway):
         write_invoice_submit, write_payment_receive = _finance_write_flags(
             gateway, settings, role
         )
+        visit_submit, visit_discount = _visit_invoice_write_flags(gateway, role, view.user)
         capabilities = bootstrap_capabilities(
             write_patient_create=write_create,
             write_patient_update=write_update,
@@ -442,6 +458,8 @@ def bootstrap(gateway):
             write_purchase_order_draft=write_purchase_order_draft,
             write_purchase_order_submit=write_purchase_order_submit,
             write_invoice_submit=write_invoice_submit,
+            write_visit_invoice_submit=visit_submit,
+            write_visit_invoice_discount=visit_discount,
             write_payment_receive=write_payment_receive,
             write_admin_user=write_admin_user,
             write_admin_master=write_admin_master,

@@ -1,4 +1,4 @@
-import { type CapabilityMap, isCapability } from "../../domain/capability";
+import { type CapabilityMap, isCapability, type RoleCode } from "../../domain/capability";
 import type { AppError } from "../../domain/errors";
 import { isSessionDTO, type SessionDTO } from "../../domain/session";
 import { mapHttpError } from "../error-map";
@@ -106,20 +106,23 @@ const NATIVE_ENABLEABLE = new Set<string>([
   "write.purchase_order.draft",
   "write.purchase_order.submit",
   "write.invoice.submit",
+  "write.visit_invoice.submit",
+  "write.visit_invoice.discount",
   "write.payment.receive",
   "write.admin.user",
   "write.admin.master",
 ]);
 
-function nativeCapabilities(value: unknown): CapabilityMap {
+function nativeCapabilities(value: unknown, roles: readonly RoleCode[]): CapabilityMap {
   const capabilities: CapabilityMap = {};
   if (!isRecord(value)) return capabilities;
   for (const name of Object.keys(value)) {
-    if (isCapability(name))
-      capabilities[name] =
-        NATIVE_ENABLEABLE.has(name) && value[name] === "enabled"
-          ? "enabled"
-          : "read_only";
+    if (!isCapability(name)) continue;
+    const doctorInvoice =
+      name === "write.visit_invoice.submit" || name === "write.visit_invoice.discount";
+    const enableable = NATIVE_ENABLEABLE.has(name) && (!doctorInvoice || roles.includes("DOC"));
+    capabilities[name] =
+      enableable && value[name] === "enabled" ? "enabled" : "read_only";
   }
   return capabilities;
 }
@@ -145,7 +148,7 @@ function parseBootstrap(body: unknown): {
       mode: "live",
       sessionEpoch: message.sessionEpoch,
       user: message.user,
-      capabilities: nativeCapabilities(message.capabilities),
+      capabilities: nativeCapabilities(message.capabilities, message.user.roles),
     },
     csrfToken: message.csrfToken,
   };

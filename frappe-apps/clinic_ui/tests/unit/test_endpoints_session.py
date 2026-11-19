@@ -31,6 +31,46 @@ def gateway(**overrides):
 
 
 class BootstrapSuccessTests(unittest.TestCase):
+    def test_visit_invoice_flags_require_gate_native_and_independent_discount(self):
+        fake = gateway(site="clinic-visit-invoice.local")
+        fake._configuration = lambda: {
+            "clinic_ui_visit_invoice_write_enabled": 1,
+            "clinic_ui_visit_invoice_write_user": "doctor@example.test",
+            "use_mysqlclient": 0,
+        }
+        fake.visit_invoice_token_key = lambda: b"k" * 32
+        fake.visit_invoice_native_create_submit_allowed = lambda: True
+        fake.visit_invoice_discount_allowed = lambda: False
+        self.assertEqual(session_endpoint._visit_invoice_write_flags(
+            fake, "DOC", "doctor@example.test"), (True, False))
+        fake.visit_invoice_discount_allowed = lambda: True
+        self.assertEqual(session_endpoint._visit_invoice_write_flags(
+            fake, "DOC", "doctor@example.test"), (True, True))
+        for role, actor in (("NUR", "doctor@example.test"), ("DOC", "other")):
+            self.assertEqual(session_endpoint._visit_invoice_write_flags(
+                fake, role, actor), (False, False))
+        fake.visit_invoice_native_create_submit_allowed = lambda: False
+        self.assertEqual(session_endpoint._visit_invoice_write_flags(
+            fake, "DOC", "doctor@example.test"), (False, False))
+
+    def test_bootstrap_publishes_visit_invoice_for_approved_doctor(self):
+        fake = gateway(site="clinic-visit-invoice.local",
+            settings=settings(clinic_ui_synthetic_site="clinic-visit-invoice.local"),
+            current_session=session_view(
+            sid=SID, user="doctor@example.test", roles=("Physician",)))
+        fake._configuration = lambda: {
+            "clinic_ui_visit_invoice_write_enabled": 1,
+            "clinic_ui_visit_invoice_write_user": "doctor@example.test",
+            "use_mysqlclient": 0,
+        }
+        fake.visit_invoice_token_key = lambda: b"k" * 32
+        fake.visit_invoice_native_create_submit_allowed = lambda: True
+        fake.visit_invoice_discount_allowed = lambda: False
+        capabilities = session_endpoint.bootstrap(fake)["capabilities"]
+        self.assertEqual(capabilities["write.visit_invoice.submit"], "enabled")
+        self.assertEqual(capabilities["write.visit_invoice.discount"], "read_only")
+        self.assertEqual(capabilities["write.invoice.submit"], "read_only")
+
     def test_returns_live_bootstrap_for_a_mapped_role(self):
         fake = gateway()
         payload = session_endpoint.bootstrap(fake)

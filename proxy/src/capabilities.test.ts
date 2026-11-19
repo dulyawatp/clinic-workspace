@@ -31,6 +31,16 @@ describe("capability contract", () => {
     );
   });
 
+  it("keeps visit invoice writes read-only even when flags are active", () => {
+    const names = ["write.visit_invoice.submit", "write.visit_invoice.discount"];
+    const map = buildCapabilityMap(new Set(contractNames));
+    for (const name of names) {
+      expect(contractNames).toContain(name);
+      expect(isCapability(name)).toBe(true);
+      expect(map[name as Capability]).toBe("read_only");
+    }
+  });
+
   it("does not treat active flags as verified contracts", () => {
     const map = buildCapabilityMap(
       new Set([...contractNames, "write.patient.delete"]),

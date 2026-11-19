@@ -46,6 +46,8 @@ CAPABILITY_NAMES = (
     "write.purchase_order.submit",
     "write.invoice.submit",
     "write.invoice.void_amend",
+    "write.visit_invoice.submit",
+    "write.visit_invoice.discount",
     "write.payment.receive",
     "write.payment.refund",
     "write.admin.user",
@@ -106,6 +108,8 @@ DEPLOYMENT_GATED_WRITE_NAMES = frozenset(
         "write.purchase_order.draft",
         "write.purchase_order.submit",
         "write.invoice.submit",
+        "write.visit_invoice.submit",
+        "write.visit_invoice.discount",
         "write.payment.receive",
         "write.admin.user",
         "write.admin.master",
@@ -142,6 +146,8 @@ def bootstrap_capabilities(
     write_purchase_order_draft=False,
     write_purchase_order_submit=False,
     write_invoice_submit=False,
+    write_visit_invoice_submit=False,
+    write_visit_invoice_discount=False,
     write_payment_receive=False,
     write_admin_user=False,
     write_admin_master=False,
@@ -211,6 +217,10 @@ def bootstrap_capabilities(
     # that gate passes. Void/amend and refund stay read_only (both cut).
     if write_invoice_submit is True:
         capabilities["write.invoice.submit"] = ENABLED_STATE
+    if write_visit_invoice_submit is True:
+        capabilities["write.visit_invoice.submit"] = ENABLED_STATE
+        if write_visit_invoice_discount is True:
+            capabilities["write.visit_invoice.discount"] = ENABLED_STATE
     if write_payment_receive is True:
         capabilities["write.payment.receive"] = ENABLED_STATE
     # Admin users and masters are two independent contract surfaces that share

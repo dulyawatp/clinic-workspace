@@ -90,6 +90,26 @@ class CapabilityTests(unittest.TestCase):
 
 
 class BootstrapCapabilityTests(unittest.TestCase):
+    def test_visit_invoice_writes_never_enable_with_finance_flags(self):
+        names = ("write.visit_invoice.submit", "write.visit_invoice.discount")
+        capabilities = bootstrap_capabilities(
+            write_invoice_submit=True, write_payment_receive=True
+        )
+        for name in names:
+            with self.subTest(name=name):
+                self.assertIn(name, CAPABILITY_NAMES)
+                self.assertEqual(capabilities[name], READ_ONLY_STATE)
+
+    def test_visit_invoice_flags_are_independent_of_legacy_finance(self):
+        capabilities = bootstrap_capabilities(write_visit_invoice_submit=True)
+        self.assertEqual(capabilities["write.visit_invoice.submit"], ENABLED_STATE)
+        self.assertEqual(capabilities["write.visit_invoice.discount"], READ_ONLY_STATE)
+        self.assertEqual(capabilities["write.invoice.submit"], READ_ONLY_STATE)
+        capabilities = bootstrap_capabilities(write_visit_invoice_submit=True,
+                                               write_visit_invoice_discount=True)
+        self.assertEqual(capabilities["write.visit_invoice.discount"], ENABLED_STATE)
+        validate_capabilities(capabilities)
+
     def test_defaults_to_every_capability_read_only(self):
         capabilities = bootstrap_capabilities()
         self.assertEqual(set(capabilities), set(CAPABILITY_NAMES))
@@ -215,6 +235,8 @@ class BootstrapCapabilityTests(unittest.TestCase):
             "write.purchase_order.draft",
             "write.purchase_order.submit",
             "write.invoice.submit",
+            "write.visit_invoice.submit",
+            "write.visit_invoice.discount",
             "write.payment.receive",
             "write.admin.user",
             "write.admin.master",

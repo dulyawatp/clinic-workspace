@@ -8,6 +8,8 @@ alias mapping and fail-closed behaviour, not real Frappe permission semantics.
 
 import inspect
 import unittest
+from decimal import Decimal
+from unittest.mock import patch
 
 from clinic_ui.core import appointment_write, config, patient_write
 from clinic_ui.core.appointment_write import build_alias
@@ -82,6 +84,77 @@ def gateway(**overrides):
 
 
 class AppointmentSuccessTests(unittest.TestCase):
+    def test_visit_invoice_reference_requires_exact_owned_native_context(self):
+        fake = gateway(current_session=session_view(roles=("Physician",)))
+        fake.appointment_detail_map["NATIVE-APPT-3"] = {
+            "patient": "PAT-1", "appointment_date": "2026-11-20",
+            "appointment_time": "09:30:00", "status": "Open",
+            "modified": "2026-11-14 09:30:00.123456",
+        }
+        evidence = {
+            "metadata_verified": True, "record_fields_readable": True,
+            "billing_history_complete": True, "prior_billing": False,
+            "appointment_id": "NATIVE-APPT-3", "practitioner": "DOC-1",
+            "actor_practitioner": "DOC-1", "status": "Open", "docstatus": 0,
+            "encounter_id": None, "invoiced": 0, "ref_sales_invoice": None,
+            "patient": "PAT-1", "customer": "CUST-1", "company": "COMP-1",
+            "currency": "THB", "service": "ITEM-1", "price": Decimal("100"),
+        }
+        fake.visit_invoice_evidence = lambda _: evidence
+        with patch("clinic_ui.endpoints.appointments.lookup_visit_invoice", create=True, return_value=None):
+            payload = appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+            self.assertEqual(payload["visit_invoice_appointment_id"], "NATIVE-APPT-3")
+            evidence["actor_practitioner"] = "DOC-2"
+            payload = appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+            self.assertNotIn("visit_invoice_appointment_id", payload)
+            evidence["actor_practitioner"] = "DOC-1"
+            evidence["metadata_verified"] = False
+            payload = appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+            self.assertNotIn("visit_invoice_appointment_id", payload)
+
+    def test_visit_invoice_reference_allows_verified_submitted_read_only_context(self):
+        fake = gateway(current_session=session_view(roles=("Physician",)))
+        fake.appointment_detail_map["NATIVE-APPT-3"] = {
+            "patient": "PAT-1", "appointment_date": "2026-11-20",
+            "appointment_time": "09:30:00", "status": "Closed",
+            "modified": "2026-11-14 09:30:00.123456",
+        }
+        with patch("clinic_ui.endpoints.appointments.lookup_visit_invoice", create=True, return_value={"invoice_id": "INV-1"}):
+            payload = appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+        self.assertEqual(payload["visit_invoice_appointment_id"], "NATIVE-APPT-3")
+
+    def test_visit_invoice_reference_never_exposes_static_alias_or_native_mapping(self):
+        fake = gateway(current_session=session_view(roles=("Physician",)))
+        fake.appointment_detail_map["NATIVE-APPT-1"] = {
+            **DETAILS["NATIVE-APPT-1"], "modified": "2026-11-14 09:30:00.123456",
+        }
+        with patch("clinic_ui.endpoints.appointments.lookup_visit_invoice", create=True, return_value={"invoice_id": "INV-1"}):
+            for target in ("APPT-1", "NATIVE-APPT-1"):
+                with self.subTest(target=target):
+                    payload = appointments_endpoint.appointment_detail(fake, target)
+                    self.assertNotIn("visit_invoice_appointment_id", payload)
+
+    def test_visit_invoice_reference_omitted_for_booked_alias_and_reception(self):
+        fake = gateway(current_session=session_view(user=ACTOR, roles=("Physician",)))
+        alias = build_alias(SECRET.encode(), SITE, ACTOR, BOOK_KEY)
+        fake.appointment_receipt_records.append(FakeAppointmentReceipt(
+            "book", ACTOR, BOOK_KEY,
+            appointment_write.encode_receipt(
+                kind="book", alias=alias, native_appointment_id="NATIVE-APPT-3"
+            ),
+        ))
+        fake.appointment_detail_map["NATIVE-APPT-3"] = {
+            "patient": "PAT-1", "appointment_date": "2026-11-20",
+            "appointment_time": "09:30:00", "status": "Open",
+            "modified": "2026-11-14 09:30:00.123456",
+        }
+        with patch("clinic_ui.endpoints.appointments.lookup_visit_invoice", create=True, return_value={"invoice_id": "INV-1"}):
+            self.assertNotIn("visit_invoice_appointment_id",
+                             appointments_endpoint.appointment_detail(fake, alias))
+            fake.current_session = session_view(user=ACTOR, roles=("Clinic Reception",))
+            self.assertNotIn("visit_invoice_appointment_id",
+                             appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3"))
+
     def test_returns_the_five_field_rows_for_reception(self):
         fake = gateway()
         payload = appointments_endpoint.synthetic_appointments(fake)

@@ -1,0 +1,82 @@
+# Gateway profile is opt-in; frontend has no published port. Do not start yet.
+# Merge after deploy/local-sit/compose.yaml using the explicit project name.
+name: clinic-visit-invoice-disposable
+services:
+  builder:
+    profiles: ["image-build-only"]
+    image: clinic-visit-invoice-disposable/build:local
+    build:
+      context: ../..
+      dockerfile: deploy/local-sit/backend.Dockerfile
+      args:
+        CLINIC_SOURCE_REV: ${CLINIC_SOURCE_REV:?record approved immutable source revision}
+    entrypoint: ["/bin/false"]
+  gateway:
+    profiles: ["visit-invoice-gateway"]
+    image: ${CLINIC_VISIT_INVOICE_IMAGE:?record verified image ID}
+    pull_policy: never
+    entrypoint: ["/home/frappe/frappe-bench/env/bin/python", "/opt/visit-invoice-sit/gateway.py"]
+    volumes:
+      - ../visit-invoice-sit:/opt/visit-invoice-sit:ro
+    ports:
+      - "127.0.0.1:18082:8080"
+    depends_on:
+      - frontend
+  backend:
+    image: ${CLINIC_VISIT_INVOICE_IMAGE:?record verified image ID}
+    build: !reset null
+  frontend:
+    image: ${CLINIC_VISIT_INVOICE_IMAGE:?record verified image ID}
+    build: !reset null
+    environment:
+      FRAPPE_SITE_NAME_HEADER: clinic-visit-invoice.local
+    ports: !reset []
+  configurator:
+    image: ${CLINIC_VISIT_INVOICE_IMAGE:?record verified image ID}
+    build: !reset null
+    command:
+      - >
+        set -e;
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host db;
+        bench set-config -gp db_port 3306;
+        bench set-config -g redis_cache "redis://redis-cache:6379";
+        bench set-config -g redis_queue "redis://redis-queue:6379";
+        bench set-config -g redis_socketio "redis://redis-queue:6379";
+        bench set-config -gp socketio_port 9000;
+        bench set-config -gp use_mysqlclient 0
+  create-site:
+    image: ${CLINIC_VISIT_INVOICE_IMAGE:?record verified image ID}
+    build: !reset null
+    environment:
+      SIT_SITE: clinic-visit-invoice.local
+  provision:
+    image: ${CLINIC_VISIT_INVOICE_IMAGE:?record verified image ID}
+    build: !reset null
+    profiles: ["disabled-until-reviewed"]
+    environment:
+      SIT_SITE: clinic-visit-invoice.local
+  websocket:
+    image: ${CLINIC_VISIT_INVOICE_IMAGE:?record verified image ID}
+    build: !reset null
+  queue-short:
+    image: ${CLINIC_VISIT_INVOICE_IMAGE:?record verified image ID}
+    build: !reset null
+    profiles: ["disabled-background"]
+  queue-long:
+    image: ${CLINIC_VISIT_INVOICE_IMAGE:?record verified image ID}
+    build: !reset null
+    profiles: ["disabled-background"]
+  scheduler:
+    image: ${CLINIC_VISIT_INVOICE_IMAGE:?record verified image ID}
+    build: !reset null
+    profiles: ["disabled-background"]
+volumes:
+  sites:
+    name: clinic-visit-invoice-disposable-sites
+  logs:
+    name: clinic-visit-invoice-disposable-logs
+  db-data:
+    name: clinic-visit-invoice-disposable-db-data
+  redis-queue-data:
+    name: clinic-visit-invoice-disposable-redis-queue-data

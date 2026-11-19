@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { ROUTES } from "../../app/routes";
+import { useSession } from "../../app/SessionProvider";
 import { toI18nKey } from "../../domain/errors";
 import { Button } from "../../ui/Button";
 import { PageHeader } from "../../ui/PageHeader";
@@ -16,6 +17,9 @@ import {
 } from "../../transport/native/appointment-write";
 import { useLiveAppointment } from "./live-appointment";
 import { ReturnVisitLink } from "./ReturnVisitLink";
+import { VisitInvoice } from "./VisitInvoice";
+import { nativeTransportEnabled } from "../../transport/native/flag";
+import { useCapabilities } from "../shell/CapabilityProvider";
 
 const TERMINAL_STATUSES = new Set(["Closed", "Cancelled", "No Show", "Checked Out"]);
 
@@ -38,6 +42,8 @@ function failureKey(code: string): string {
 export function LiveAppointmentPage({ id }: { id: string }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const { session, authGeneration } = useSession();
+  const { get } = useCapabilities();
   const detail = useLiveAppointment(id);
   const [open, setOpen] = useState(false);
   const [date, setDate] = useState("");
@@ -401,6 +407,17 @@ export function LiveAppointmentPage({ id }: { id: string }) {
             </form>
           )}
         </section>
+        {nativeTransportEnabled() &&
+          session?.mode === "live" &&
+          session.user.roles.includes("DOC") &&
+          appointment.visit_invoice_appointment_id !== undefined && (
+            <VisitInvoice
+              key={`${authGeneration}:${appointment.visit_invoice_appointment_id}`}
+              appointmentId={appointment.visit_invoice_appointment_id}
+              canSubmit={get("write.visit_invoice.submit") === "enabled"}
+              canDiscount={get("write.visit_invoice.discount") === "enabled"}
+            />
+          )}
       </div>
     </>
   );

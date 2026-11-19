@@ -29,6 +29,7 @@ const ITEM_KEYS = [
 ] as const;
 const DETAIL_KEYS = [...ITEM_KEYS, "modified"] as const;
 const READ_KEYS = [...DETAIL_KEYS, "can_reschedule", "can_checkin"] as const;
+const INVOICE_READ_KEYS = [...READ_KEYS, "visit_invoice_appointment_id"] as const;
 
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const TIME = /^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/;
@@ -125,10 +126,11 @@ export interface NativeAppointmentDetail extends NativeAppointmentItem {
   modified: string;
 }
 
-/** The read detail adds only the two server-computed action flags. */
+/** The read detail adds server-computed action context. */
 export interface NativeAppointmentRead extends NativeAppointmentDetail {
   can_reschedule: boolean;
   can_checkin: boolean;
+  visit_invoice_appointment_id?: string;
 }
 
 /**
@@ -170,8 +172,11 @@ export function parseNativeAppointmentRead(
   value: unknown,
   expectedId?: string,
 ): NativeAppointmentRead {
-  if (!isRecord(value) || !hasExactKeys(value, READ_KEYS))
-    throw unavailable();
+  if (!isRecord(value)) throw unavailable();
+  const hasInvoiceId = Object.hasOwn(value, "visit_invoice_appointment_id");
+  if (!hasExactKeys(value, hasInvoiceId ? INVOICE_READ_KEYS : READ_KEYS)) throw unavailable();
+  const invoiceId = value.visit_invoice_appointment_id;
+  if (hasInvoiceId && (!isSafeId(invoiceId) || invoiceId.length > 140)) throw unavailable();
   const detail = readDetailFields(value, expectedId);
   if (
     typeof value.can_reschedule !== "boolean" ||
@@ -182,6 +187,7 @@ export function parseNativeAppointmentRead(
     ...detail,
     can_reschedule: value.can_reschedule,
     can_checkin: value.can_checkin,
+    ...(typeof invoiceId === "string" ? { visit_invoice_appointment_id: invoiceId } : {}),
   };
 }
 

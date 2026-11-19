@@ -392,6 +392,7 @@ class Gateway:
         self._frappe = frappe_module
         self._site_config = None
         self._write_ledger = None
+        self._visit_invoice_lane = None
 
     @property
     def frappe(self):
@@ -400,6 +401,88 @@ class Gateway:
 
             self._frappe = frappe
         return self._frappe
+
+    def visit_invoice_evidence(self, appointment_id):
+        from clinic_ui.runtime.visit_invoice_native import visit_invoice_evidence
+
+        return visit_invoice_evidence(self, appointment_id)
+
+    def visit_invoice_serialized(self, appointment_id):
+        from clinic_ui.runtime.visit_invoice_serialization import SerializationError, VisitInvoiceLane
+
+        if self._visit_invoice_lane is not None:
+            raise SerializationError("visit invoice lane already allocated")
+        self._visit_invoice_lane = VisitInvoiceLane(self.frappe.db, appointment_id)
+        return self._visit_invoice_lane
+
+    def commit_visit_invoice(self):
+        from clinic_ui.runtime.visit_invoice_serialization import SerializationError
+
+        if self._visit_invoice_lane is None:
+            raise SerializationError("visit invoice lane unavailable")
+        self._visit_invoice_lane.commit()
+
+    def rollback_visit_invoice(self):
+        from clinic_ui.runtime.visit_invoice_serialization import SerializationError
+
+        if self._visit_invoice_lane is None:
+            raise SerializationError("visit invoice lane unavailable")
+        self._visit_invoice_lane.rollback()
+
+    def build_visit_invoice_preview(self, appointment_id, discount):
+        from clinic_ui.runtime.visit_invoice_binding import build_visit_invoice_preview
+
+        return build_visit_invoice_preview(self, appointment_id, discount)
+
+    def prepare_visit_invoice_submission(self, appointment_id, discount):
+        from clinic_ui.runtime.visit_invoice_binding import prepare_visit_invoice_submission
+
+        return prepare_visit_invoice_submission(self, appointment_id, discount)
+
+    def post_visit_invoice_and_verify_facts(self, prepared):
+        from clinic_ui.runtime.visit_invoice_binding import post_visit_invoice_and_verify_facts
+
+        return post_visit_invoice_and_verify_facts(self, prepared)
+
+    def view_visit_invoice(self, appointment_id):
+        from clinic_ui.runtime.visit_invoice_lookup import lookup_visit_invoice
+
+        return lookup_visit_invoice(self, appointment_id)
+
+    def view_submitted_visit_invoice(self, appointment_id, expected_invoice_id):
+        from clinic_ui.runtime.visit_invoice_lookup import lookup_visit_invoice
+
+        if expected_invoice_id is None:
+            return None
+        return lookup_visit_invoice(self, appointment_id, expected_invoice_id)
+
+    def insert_visit_invoice(self, doc):
+        """Dispatch normal insert; caller owns permissions and transaction."""
+        doc.insert()
+
+    def submit_visit_invoice(self, doc):
+        """Dispatch normal submit; caller owns permissions and transaction."""
+        doc.submit()
+
+    def visit_invoice_native_create_submit_allowed(self):
+        from clinic_ui.runtime.visit_invoice_binding import native_create_submit_allowed
+
+        return native_create_submit_allowed(self)
+
+    def visit_invoice_discount_allowed(self):
+        from clinic_ui.runtime.visit_invoice_binding import discount_allowed
+
+        return discount_allowed(self)
+
+    def visit_invoice_token_key(self):
+        from clinic_ui.runtime.visit_invoice_binding import token_key
+
+        return token_key(self)
+
+    def visit_invoice_clock(self):
+        from clinic_ui.runtime.visit_invoice_binding import clock
+
+        return clock()
 
     @property
     def site(self):

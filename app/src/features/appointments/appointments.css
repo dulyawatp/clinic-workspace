@@ -379,6 +379,34 @@
   overflow-wrap: anywhere;
 }
 
+.visit-invoice {
+  display: grid;
+  gap: 12px;
+}
+
+.visit-invoice h2,
+.visit-invoice p,
+.visit-invoice .appointment-write-form {
+  margin: 0;
+}
+
+.visit-invoice-review {
+  padding: 16px;
+  border: 1px solid #d7dce2;
+  border-radius: 6px;
+}
+
+.visit-invoice-review .appointment-detail-list {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
+  margin: 0 0 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.visit-invoice-total dd {
+  font-weight: 700;
+  color: #175b5b;
+}
+
 .live-appointment-link {
   color: #175b5b;
   text-underline-offset: 3px;

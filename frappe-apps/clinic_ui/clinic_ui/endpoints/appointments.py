@@ -32,6 +32,8 @@ from clinic_ui.core import appointment_contract, appointment_write, dto, patient
 from clinic_ui.core.policy import APPOINTMENT_ROLE_CODES
 from clinic_ui.core.text import is_valid_text
 from clinic_ui.endpoints import aliases, common
+from clinic_ui.runtime.visit_invoice import resolve_visit_invoice
+from clinic_ui.runtime.visit_invoice_lookup import lookup_visit_invoice
 
 SOURCE_STATIC = "static"
 SOURCE_BOOKED = "booked"
@@ -648,10 +650,29 @@ def appointment_detail(gateway, workspace_appointment_id=None):
         gateway, settings, view.user, resolved, detail
     )
     try:
-        return dto.appointment_read(
+        result = dto.appointment_read(
             payload,
             can_reschedule=can_reschedule,
             can_checkin=can_checkin,
         )
     except ValueError:
         gateway.deny()
+
+    # Never turn an alias (including a static target addressed by its native
+    # name) into a disclosed native identifier. Both evidence paths perform
+    # their own current-user, active-practitioner and linkage checks.
+    if (role == "DOC" and resolved.source == SOURCE_NATIVE
+            and resolved.workspace_appointment_id == resolved.native_appointment_id
+            and all(native != resolved.native_appointment_id
+                    for _, native in settings.appointment_allowlist)):
+        native_id = resolved.native_appointment_id
+        try:
+            visit = resolve_visit_invoice(gateway, native_id)
+            linked = lookup_visit_invoice(gateway, native_id)
+            if ((visit is not None and visit.get("patient") == patient)
+                    or (type(linked) is dict and set(linked) == {"invoice_id"}
+                        and is_valid_text(linked["invoice_id"], 140))):
+                result["visit_invoice_appointment_id"] = native_id
+        except Exception:
+            pass
+    return result
