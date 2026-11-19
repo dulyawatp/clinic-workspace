@@ -150,6 +150,7 @@
   "nativeEncounter.title": "Unlinked encounter draft",
   "nativeEncounter.description": "Save a draft in Marley without linking an appointment.",
   "nativeEncounter.launch": "Create draft in Marley",
+  "nativeEncounter.shellLaunch": "New encounter draft",
   "nativeEncounter.practitionerLoading": "Checking your practitioner record…",
   "nativeEncounter.back": "Back to patient directory",
   "nativeEncounter.codedUnavailable": "Symptoms and diagnoses are not saved here.",

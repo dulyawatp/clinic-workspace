@@ -150,6 +150,7 @@
   "nativeEncounter.title": "ร่างการตรวจที่ไม่เชื่อมกับนัดหมาย",
   "nativeEncounter.description": "บันทึกร่างการตรวจใน Marley โดยไม่เชื่อมกับนัดหมาย",
   "nativeEncounter.launch": "สร้างร่างการตรวจใน Marley",
+  "nativeEncounter.shellLaunch": "ร่างการตรวจใหม่",
   "nativeEncounter.practitionerLoading": "กำลังตรวจสอบข้อมูลผู้ตรวจของคุณ…",
   "nativeEncounter.back": "กลับไปยังรายชื่อผู้ป่วย",
   "nativeEncounter.codedUnavailable": "หน้านี้ยังไม่บันทึกอาการและการวินิจฉัย",

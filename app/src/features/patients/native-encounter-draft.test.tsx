@@ -9,7 +9,7 @@ import type { RoleCode } from "../../domain/capability";
 import type { SessionDTO } from "../../domain/session";
 import { NativeEncounterDraftError } from "../../transport/native/encounter-draft";
 import { server } from "../../test/msw/server";
-import { renderWithDataRouter } from "../../test/render";
+import { renderWithDataRouter, setViewport } from "../../test/render";
 
 const native = vi.hoisted(() => ({
   session: vi.fn(),
@@ -37,6 +37,7 @@ vi.mock("../../transport/native/encounter-draft", async (importOriginal) => ({
 }));
 
 const launch = "สร้างร่างการตรวจใน Marley";
+const shellLaunch = "ร่างการตรวจใหม่";
 const save = "บันทึกร่าง";
 const caps: SessionDTO["capabilities"] = {
   "read.patient": "enabled",
@@ -126,22 +127,40 @@ it.each([
     }
     await screen.findByRole("heading", { level: 1 });
     expect(screen.queryByRole("link", { name: launch })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: shellLaunch })).not.toBeInTheDocument();
     expect(native.practitioner).not.toHaveBeenCalled();
   },
 );
 
-it("opens the dedicated production route for a native role outside PAT-01, without changing PAT-01", async () => {
-  const { router } = setup("PHA", "live", { ...caps, "read.patient": "denied" }, ROUTES.nativeEncounterNew);
-  const user = await selectDetails(false);
-  native.create.mockRejectedValueOnce(new NativeEncounterDraftError("denied"));
-  await user.click(screen.getByRole("button", { name: save }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("Marley ไม่อนุญาต");
-  expect(native.create).toHaveBeenCalledTimes(1);
-  await user.click(screen.getByRole("link", { name: "กลับไปยังรายชื่อผู้ป่วย" }));
-  expect(router.state.location.pathname).toBe(ROUTES.patients);
-  expect(await screen.findByTestId("role-guard-denied")).toHaveAttribute("data-surface", "PAT-01");
-  expect(screen.queryByRole("link", { name: launch })).not.toBeInTheDocument();
-});
+it.each([390, 1440] as const)(
+  "exposes one shell create link to a native role outside PAT-01 at %ipx",
+  async (width) => {
+    setViewport(width);
+    const { router } = setup("PHA", "live", { ...caps, "read.patient": "denied" }, ROUTES.system);
+    expect(await screen.findByRole("heading", { name: "พิมพ์และส่งออก", level: 1 })).toBeVisible();
+    const entry = await screen.findByRole("link", { name: shellLaunch });
+    expect(entry.closest(".shell-topbar")).not.toBeNull();
+    expect(entry).toBeVisible();
+    expect(entry).toHaveAttribute("href", ROUTES.nativeEncounterNew);
+    expect(screen.getAllByRole("link", { name: shellLaunch })).toHaveLength(1);
+    expect(screen.queryByTestId("role-guard-denied")).not.toBeInTheDocument();
+    expect(native.practitioner).not.toHaveBeenCalled();
+
+    entry.focus();
+    await userEvent.setup().keyboard("{Enter}");
+    expect(router.state.location.pathname).toBe(ROUTES.nativeEncounterNew);
+    const user = await selectDetails(false);
+    native.create.mockRejectedValueOnce(new NativeEncounterDraftError("denied"));
+    await user.click(screen.getByRole("button", { name: save }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Marley ไม่อนุญาต");
+    expect(native.create).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("link", { name: "กลับไปยังรายชื่อผู้ป่วย" }));
+    expect(router.state.location.pathname).toBe(ROUTES.patients);
+    expect(await screen.findByTestId("role-guard-denied")).toHaveAttribute("data-surface", "PAT-01");
+    expect(screen.queryByRole("link", { name: launch })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: shellLaunch })).toBeVisible();
+  },
+);
 
 it.each([
   ["denied", "ไม่มีสิทธิ์เข้าถึงหน้านี้"],
@@ -165,6 +184,7 @@ it("redirects anonymous native access to sign-in without running lookups", async
   expect(native.practitioner).not.toHaveBeenCalled();
   expect(native.types).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: save })).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: shellLaunch })).not.toBeInTheDocument();
 });
 
 it.each([["1", "fixture"], [undefined, "live"]] as const)(

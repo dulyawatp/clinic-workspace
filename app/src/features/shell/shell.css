@@ -137,6 +137,21 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.shell-context--with-draft {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+.shell-context--with-draft > div { min-width: 0; }
+.shell-create-draft {
+  flex: 0 0 auto;
+  max-width: 55%;
+  padding-inline: 12px;
+  color: var(--primary);
+  font-size: .875rem;
+  text-decoration: none;
+}
 .shell-role {
   font-size: 12px;
 }

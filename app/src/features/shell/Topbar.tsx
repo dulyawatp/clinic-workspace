@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { ROUTES } from "../../app/routes";
 import { useSession } from "../../app/SessionProvider";
+import { nativeTransportEnabled } from "../../transport/native/flag";
 import { useReadQuery } from "../../transport/read/query";
 import { LanguageToggle } from "./LanguageToggle";
 import { NotificationsPanel } from "./NotificationsPanel";
@@ -85,6 +86,7 @@ export function Topbar({
   }, [notificationsOpen]);
 
   if (status !== "authenticated" || !session) return null;
+  const showCreateDraft = nativeTransportEnabled() && session.mode === "live";
   const roles = session.user.roles
     .map((role) => t(`role.${role.toLowerCase()}.short`))
     .join(" · ");
@@ -104,12 +106,22 @@ export function Topbar({
           <NavIcon name="menu" />
         </button>
       )}
-      <div className="shell-context">
-        <span className="shell-role">
-          {t("shell.roleContext")}{" "}
-          <strong>{roles || t("common.unavailable")}</strong>
-        </span>
-        <Company />
+      <div className={showCreateDraft ? "shell-context shell-context--with-draft" : "shell-context"}>
+        <div>
+          <span className="shell-role">
+            {t("shell.roleContext")}{" "}
+            <strong>{roles || t("common.unavailable")}</strong>
+          </span>
+          <Company />
+        </div>
+        {showCreateDraft && (
+          <Link
+            to={ROUTES.nativeEncounterNew}
+            className="ui-button ui-button--secondary shell-create-draft"
+          >
+            {t("nativeEncounter.shellLaunch")}
+          </Link>
+        )}
       </div>
       <div className="shell-topbar-actions">
         <Link
