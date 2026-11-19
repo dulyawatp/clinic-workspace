@@ -296,6 +296,7 @@ function DirectoryContent() {
   const navigate = useNavigate();
   const live = session?.mode === "live";
   const native = nativeTransportEnabled();
+  const nativeLive = native && live;
   const [text, setText] = useState("");
   const [settledText, setSettledText] = useState<string | null>("");
   const [page, setPage] = useState(1);
@@ -322,41 +323,46 @@ function DirectoryContent() {
     setPage(1);
   }
 
+  const directoryHeader = (
+    <PageHeader
+      title={t("surface.PAT-01")}
+      actions={nativeLive && (
+        <Link className="ui-button ui-button--primary" to={ROUTES.nativeEncounterNew}>
+          {t("nativeEncounter.launch")}
+        </Link>
+      )}
+    />
+  );
+
   const capability = getCapability(caps, "read.patient");
-  if (
+  const listingDenied =
     (live &&
       !session.user.roles.some(
         (role) => role === "DOC" || role === "REC" || role === "NUR",
       )) ||
     capability === "denied" ||
-    capability === "blocked_unverified"
-  )
+    capability === "blocked_unverified";
+  if (listingDenied || capability === "error_upstream")
     return (
-      <div className="shell-page-body">
-        <StatePanel
-          kind="permission-denied"
-          title={t("state.denied.title")}
-          detail={t("state.denied.body", { resource: t("surface.PAT-01") })}
-        />
-      </div>
-    );
-  if (capability === "error_upstream")
-    return (
-      <div className="shell-page-body">
-        <StatePanel kind="error" title={t("errors.UPSTREAM_UNAVAILABLE")} />
-      </div>
+      <>
+        {nativeLive && directoryHeader}
+        <div className="shell-page-body">
+          {listingDenied ? (
+            <StatePanel
+              kind="permission-denied"
+              title={t("state.denied.title")}
+              detail={t("state.denied.body", { resource: t("surface.PAT-01") })}
+            />
+          ) : (
+            <StatePanel kind="error" title={t("errors.UPSTREAM_UNAVAILABLE")} />
+          )}
+        </div>
+      </>
     );
 
   return (
     <>
-      <PageHeader
-        title={t("surface.PAT-01")}
-        actions={native && live && (
-          <Link className="ui-button ui-button--primary" to={ROUTES.nativeEncounterNew}>
-            {t("nativeEncounter.launch")}
-          </Link>
-        )}
-      />
+      {directoryHeader}
       <div className="shell-page-body">
         <section
           className="patients-card"

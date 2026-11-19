@@ -143,6 +143,21 @@ it("opens the dedicated production route for a native role outside PAT-01, witho
   expect(screen.queryByRole("link", { name: launch })).not.toBeInTheDocument();
 });
 
+it.each([
+  ["denied", "ไม่มีสิทธิ์เข้าถึงหน้านี้"],
+  ["error_upstream", "ระบบปลายทางไม่พร้อมใช้งาน กรุณาลองใหม่"],
+] as const)("keeps create reachable while the directory listing is %s", async (state, title) => {
+  const { router } = setup("DOC", "live", { ...caps, "read.patient": state });
+  expect(await screen.findByRole("heading", { name: title })).toBeVisible();
+  expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  expect(screen.queryByRole("searchbox", { name: "ค้นหาผู้ป่วย" })).not.toBeInTheDocument();
+  expect(native.practitioner).not.toHaveBeenCalled();
+
+  await enterDraft();
+  expect(router.state.location.pathname).toBe(ROUTES.nativeEncounterNew);
+  expect(await screen.findByRole("button", { name: save })).toBeDisabled();
+});
+
 it("redirects anonymous native access to sign-in without running lookups", async () => {
   native.session.mockResolvedValue(null);
   const { router } = renderWithDataRouter(appRoutes, { initialEntries: [ROUTES.nativeEncounterNew] });
