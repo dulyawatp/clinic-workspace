@@ -335,6 +335,58 @@ INSTALLED_CANDIDATES = {
     },
 }
 
+# Converted invoice lane only. ``taxes`` is a Table field and is collected from
+# real DocField metadata, not ``get_valid_columns()``.
+INVOICE_INSTALLED_CANDIDATES = {
+    INVOICE_DOCTYPE: {
+        "customer": ("customer",),
+        "company": ("company",),
+        "currency": ("currency",),
+        "conversion_rate": ("conversion_rate",),
+        "posting_date": ("posting_date",),
+        "due_date": ("due_date",),
+        "selling_price_list": ("selling_price_list",),
+        "update_stock": ("update_stock",),
+        "debit_to": ("debit_to",),
+        "cost_center": ("cost_center",),
+        "taxes": ("taxes",),
+        "items": ("items",),
+        "docstatus": ("docstatus",),
+        "status": ("status",),
+        "grand_total": ("grand_total",),
+        "net_total": ("net_total",),
+        "outstanding_amount": ("outstanding_amount",),
+    },
+    INVOICE_ITEM_DOCTYPE: {
+        "item_code": ("item_code",),
+        "qty": ("qty",),
+        "rate": ("rate",),
+        "amount": ("amount",),
+        "uom": ("uom",),
+        "stock_uom": ("stock_uom",),
+        "income_account": ("income_account",),
+        "cost_center": ("cost_center",),
+        "price_list_rate": ("price_list_rate",),
+    },
+    COMPANY_DOCTYPE: {
+        "default_currency": ("default_currency",),
+        "default_receivable_account": ("default_receivable_account",),
+        "default_income_account": ("default_income_account",),
+        "cost_center": ("cost_center",),
+    },
+    ITEM_DOCTYPE: {
+        "is_sales_item": ("is_sales_item",),
+        "stock_uom": ("stock_uom",),
+    },
+    GL_ENTRY_DOCTYPE: {
+        "voucher_type": ("voucher_type",),
+        "voucher_no": ("voucher_no",),
+        "account": ("account",),
+        "debit": ("debit",),
+        "credit": ("credit",),
+    },
+}
+
 # The discount child is optional for the family: a missing child cuts only the
 # discount sub-capability (recorded fallback), never the invoice write.
 OPTIONAL_DOCTYPES = (DEDUCTION_DOCTYPE,)
@@ -464,22 +516,39 @@ def budget(kind):
     return write_budgets.budget_for(require_kind(kind))
 
 
-def install_problem(meta_fields):
-    """Return the first missing installed field, or ``None`` when complete."""
-
+def _installed_problem(meta_fields, candidates):
     if not isinstance(meta_fields, dict):
         return "installed metadata unreadable"
-    for doctype, fields in INSTALLED_CANDIDATES.items():
+    for doctype, fields in candidates.items():
         if doctype in OPTIONAL_DOCTYPES:
             continue
         installed = meta_fields.get(doctype)
         if not isinstance(installed, (set, frozenset, tuple, list)):
             return f"missing DocType {doctype}"
         installed = set(installed)
-        for logical, candidates in fields.items():
-            if not any(candidate in installed for candidate in candidates):
+        for logical, names in fields.items():
+            if not any(candidate in installed for candidate in names):
                 return f"missing field {doctype}.{logical}"
     return None
+
+
+def install_problem(meta_fields):
+    """Return the first missing installed field, or ``None`` when complete."""
+
+    return _installed_problem(meta_fields, INSTALLED_CANDIDATES)
+
+
+def invoice_install_problem(meta_fields):
+    """Preflight only the fields the converted invoice lane needs.
+
+    Table fields (``Sales Invoice.taxes``) and Frappe default columns are
+    included by the collector. Payment Entry, Payment Entry Reference, Mode of
+    Payment, Item Default, Price List and Item Price are deliberately absent:
+    native pricing resolves prices and the payment lane keeps its own strict
+    preflight.
+    """
+
+    return _installed_problem(meta_fields, INVOICE_INSTALLED_CANDIDATES)
 
 
 def discount_problem(meta_fields, *, enabled):

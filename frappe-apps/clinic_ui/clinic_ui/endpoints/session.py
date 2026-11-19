@@ -299,12 +299,11 @@ def _finance_write_flags(gateway, settings, role):
     try:
         if gateway.native_finance_boundary_problem() is not None:
             return disabled
-        if gateway.native_finance_install_problem() is not None:
-            return disabled
         if not settings.finance_write_enabled:
             return disabled
         invoice_ok = (
-            gateway.native_finance_can_write("Sales Invoice") is True
+            gateway.native_finance_invoice_install_problem() is None
+            and gateway.native_finance_can_write("Sales Invoice") is True
             and gateway.native_finance_can_submit("Sales Invoice") is True
             and all(
                 gateway.native_doctype_can_read(doctype) is True
@@ -319,7 +318,8 @@ def _finance_write_flags(gateway, settings, role):
             )
         )
         payment_ok = (
-            gateway.write_deployment_approved() is True
+            gateway.native_finance_install_problem() is None
+            and gateway.write_deployment_approved() is True
             and gateway.write_fence_ready() is True
             and gateway.native_finance_can_write("Payment Entry") is True
         )

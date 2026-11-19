@@ -202,7 +202,7 @@ def _invoice_gate(gateway, csrf_token):
         gateway.deny()
     if gateway.native_finance_boundary_problem() is not None:
         gateway.deny()
-    if gateway.native_finance_install_problem() is not None:
+    if gateway.native_finance_invoice_install_problem() is not None:
         gateway.deny()
     return settings, view, role
 

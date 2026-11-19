@@ -53,6 +53,8 @@ class FakeMeta:
     def __init__(self, blocked=(), masked=()):
         self.blocked = set(blocked)
         self.masked = set(masked)
+        self.fields = []
+        self.default_fields = ()
 
     def get_permlevel_access(self, permission_type="read", parenttype=None, *, user=None):
         return [0]
@@ -255,6 +257,27 @@ class AuthorityTests(unittest.TestCase):
 
         self.assertTrue(gateway.native_finance_can_write("Sales Invoice"))
         self.assertIn(("Sales Invoice", "create", None), frappe.calls)
+
+
+class MetaCollectorTests(unittest.TestCase):
+    def test_collector_includes_true_meta_table_fields_and_defaults(self):
+        stub = make_gateway()
+        gateway = frappe_gateway.Gateway(stub.frappe)
+        meta = FakeMeta()
+        meta.fields = [
+            FakeField(0, "taxes"),
+            FakeField(0, "items"),
+            FakeField(0, "customer"),
+        ]
+        meta.default_fields = ("name", "docstatus")
+        stub.frappe.metas["Sales Invoice"] = meta
+
+        fields = gateway._finance_meta_fields()
+
+        self.assertIn("taxes", fields["Sales Invoice"])
+        self.assertIn("items", fields["Sales Invoice"])
+        self.assertIn("name", fields["Sales Invoice"])
+        self.assertIn("docstatus", fields["Sales Invoice"])
 
 
 class PricingContextTests(unittest.TestCase):

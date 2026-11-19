@@ -942,6 +942,87 @@ class PreparedBodyTests(unittest.TestCase):
                 )
 
 
+class InvoiceInstalledPreflightTests(unittest.TestCase):
+    def installed_fields(self):
+        fields = {
+            doctype: {
+                name
+                for names in candidates.values()
+                for name in names
+            }
+            for doctype, candidates in finance_contract.INVOICE_INSTALLED_CANDIDATES.items()
+        }
+        # Real DocField names include Table fields; collector supplies these.
+        fields[finance_contract.INVOICE_DOCTYPE].add("taxes")
+        fields[finance_contract.INVOICE_DOCTYPE].add("items")
+        return fields
+
+    def test_invoice_lane_passes_without_payment_specific_fields(self):
+        fields = self.installed_fields()
+        # Healthy install shape: no Payment Entry.currency, no Item Default.cost_center.
+        fields[finance_contract.PAYMENT_DOCTYPE] = {
+            "payment_type",
+            "party_type",
+            "party",
+            "company",
+            "paid_from",
+            "paid_to",
+            "paid_amount",
+            "received_amount",
+            "source_exchange_rate",
+            "target_exchange_rate",
+            "posting_date",
+            "mode_of_payment",
+            "reference_no",
+            "reference_date",
+            "references",
+            "docstatus",
+            "status",
+        }
+        fields[finance_contract.ITEM_DEFAULT_DOCTYPE] = {
+            "parent",
+            "company",
+            "income_account",
+        }
+
+        self.assertIsNone(
+            finance_contract.invoice_install_problem(fields)
+        )
+        self.assertIsNotNone(finance_contract.install_problem(fields))
+
+    def test_invoice_lane_fails_when_a_needed_table_field_is_missing(self):
+        fields = self.installed_fields()
+        fields[finance_contract.INVOICE_DOCTYPE].discard("taxes")
+
+        self.assertEqual(
+            finance_contract.invoice_install_problem(fields),
+            "missing field Sales Invoice.taxes",
+        )
+
+    def test_payment_gate_stays_closed_on_the_same_install_shape(self):
+        fields = self.installed_fields()
+        fields[finance_contract.PAYMENT_DOCTYPE] = {
+            "payment_type",
+            "party_type",
+            "party",
+            "company",
+            "paid_from",
+            "paid_to",
+            "paid_amount",
+            "received_amount",
+            "source_exchange_rate",
+            "target_exchange_rate",
+            "posting_date",
+            "mode_of_payment",
+            "reference_no",
+            "reference_date",
+            "references",
+            "docstatus",
+            "status",
+        }
+        self.assertIsNotNone(finance_contract.install_problem(fields))
+
+
 class InvoiceTotalsRoundingTests(unittest.TestCase):
     @staticmethod
     def frappe_legacy_round(value, precision=2):

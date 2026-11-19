@@ -6846,14 +6846,13 @@ class Gateway:
     # -- finance (invoice submit + payment receive) ------------------------
 
     def _finance_meta_fields(self):
-        """Resolve the installed field names through the metadata cache.
+        """Resolve installed fields from real DocField metadata plus defaults.
 
-        The discount child is optional: a site without it still lands invoices
-        (only the discount sub-capability is cut), so an absent DocType is
-        recorded as an empty column set instead of failing the preflight. The
-        parent ``deductions`` link is resolved separately: the child only rides
-        when the Sales Invoice carries a table field with that fieldname
-        pointing at the installed child doctype.
+        ``get_valid_columns()`` excludes Table fields (for example
+        ``Sales Invoice.taxes``) in frappe 16.54.0, so the collector reads
+        ``meta.fields`` and unions Frappe's ordinary default columns. The
+        discount child remains optional; the parent ``deductions`` link is
+        resolved separately.
         """
 
         cached = getattr(self, "_finance_fields_cache", None)
@@ -6864,14 +6863,31 @@ class Gateway:
         if not callable(get_meta):
             get_meta = frappe.get_meta
         fields = {}
-        for doctype in finance_contract.INSTALLED_CANDIDATES:
+        for doctype in dict.fromkeys(
+            (
+                *finance_contract.INSTALLED_CANDIDATES,
+                *finance_contract.INVOICE_INSTALLED_CANDIDATES,
+            )
+        ):
             try:
-                fields[doctype] = set(get_meta(doctype).get_valid_columns())
+                meta = get_meta(doctype)
             except Exception:
                 if doctype in finance_contract.OPTIONAL_DOCTYPES:
                     fields[doctype] = set()
                     continue
                 raise
+            fieldnames = set()
+            for field in getattr(meta, "fields", ()) or ():
+                name = getattr(field, "fieldname", None)
+                if name is None and hasattr(field, "get"):
+                    name = field.get("fieldname")
+                if isinstance(name, str) and name:
+                    fieldnames.add(name)
+            default_fields = getattr(meta, "default_fields", None) or ()
+            fieldnames.update(
+                name for name in default_fields if isinstance(name, str)
+            )
+            fields[doctype] = fieldnames
         fields[finance_contract.DEDUCTION_LINK_KEY] = (
             self._finance_deduction_link_ok(get_meta)
         )
@@ -6901,6 +6917,16 @@ class Gateway:
 
         try:
             return finance_contract.install_problem(self._finance_meta_fields())
+        except Exception:
+            return "installed metadata unreadable"
+
+    def native_finance_invoice_install_problem(self):
+        """Preflight only the converted invoice lane's required fields."""
+
+        try:
+            return finance_contract.invoice_install_problem(
+                self._finance_meta_fields()
+            )
         except Exception:
             return "installed metadata unreadable"
 

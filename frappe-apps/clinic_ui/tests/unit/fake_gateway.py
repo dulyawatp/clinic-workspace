@@ -513,6 +513,7 @@ class FakeGateway:
         # -- finance (invoice submit + payment receive) surface ------------
         self.finance_boundary_problem = None
         self.finance_install_problem = None
+        self.finance_invoice_install_problem = None
         self.finance_create_authority = {}
         self.finance_submit_authority = {}
         self.finance_invoice_detail = None
@@ -1965,6 +1966,9 @@ class FakeGateway:
 
     def native_finance_install_problem(self):
         return self.finance_install_problem
+
+    def native_finance_invoice_install_problem(self):
+        return self.finance_invoice_install_problem
 
     def native_finance_can_write(self, doctype):
         return self.finance_create_authority.get(doctype, True)

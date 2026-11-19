@@ -1007,10 +1007,27 @@ class GateTests(unittest.TestCase):
         self.assertEqual(fake.finance_fence_calls, [])
 
         other = gateway()
-        other.finance_install_problem = "missing field Sales Invoice.debit_to"
+        other.finance_invoice_install_problem = (
+            "missing field Sales Invoice.debit_to"
+        )
         with self.assertRaises(Denied):
             finance_write.submit_invoice(other, invoice_body(), CSRF)
         self.assertEqual(other.finance_fence_calls, [])
+
+    def test_payment_only_install_drift_does_not_close_the_invoice_lane(self):
+        fake = gateway()
+        fake.finance_install_problem = (
+            "missing field Payment Entry.currency"
+        )
+
+        invoice = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+        self.assertEqual(invoice["status"], "submitted")
+        with self.assertRaises(Denied):
+            finance_write.receive_payment(fake, payment_body(), CSRF)
+
+        capabilities = session.bootstrap(fake)["capabilities"]
+        self.assertEqual(capabilities["write.invoice.submit"], "enabled")
+        self.assertEqual(capabilities["write.payment.receive"], "read_only")
 
     def test_the_native_authority_is_required_per_document(self):
         fake = gateway()
