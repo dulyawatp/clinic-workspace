@@ -103,18 +103,20 @@ def _gates(**opened):
     return gates
 
 
-def _capabilities(gates, role="DOC", adjust_authority=None):
+def _capabilities(gates, role="DOC", adjust_authority=None, purchase_authority=None):
     """Model the site bootstrap: expected writes minus the never-ready set.
 
     The fence-gated writes are modelled as disabled, which is the state an
-    unresolved ledger produces. ``write.stock.adjust`` follows the backend rule
-    rather than the strict role map: a stock role, the stock flag and the
-    caller's own probed reconciliation authority.
+    unresolved ledger produces. ``write.stock.adjust`` and
+    ``write.purchase_order.draft`` follow the backend rule rather than the
+    strict role map: an admitted role, the family flag and the caller's own
+    probed native document authority.
     """
 
     capabilities = {name: "read_only" for name in strict.WRITE_CAPABILITY_GATES}
     expected = strict.expected_enabled_writes(gates, role) - {
-        development.ADJUST_CAPABILITY
+        development.ADJUST_CAPABILITY,
+        development.PURCHASE_DRAFT_CAPABILITY,
     }
     if (
         role in development.ADJUST_ROLE_SET
@@ -122,6 +124,12 @@ def _capabilities(gates, role="DOC", adjust_authority=None):
         and adjust_authority is True
     ):
         expected.add(development.ADJUST_CAPABILITY)
+    if (
+        role in development.PURCHASE_DRAFT_ROLE_SET
+        and gates.get("purchase") in (1, True, "1")
+        and purchase_authority is True
+    ):
+        expected.add(development.PURCHASE_DRAFT_CAPABILITY)
     expected = expected - development.NEVER_ENABLED - development.FENCED_WRITES
     for name in expected:
         capabilities[name] = "enabled"
@@ -352,32 +360,118 @@ class PurchaseLaneTests(unittest.TestCase):
 
     def test_mgr_draft_enabled_when_the_purchase_gate_is_on(self):
         gates = _gates(patient=1, appointment=1, procedure=1, purchase=1)
-        capabilities = _capabilities(gates, role="MGR")
+        capabilities = _capabilities(gates, role="MGR", purchase_authority=True)
 
         self.assertEqual(capabilities["write.purchase_order.draft"], "enabled")
         self.assertEqual(capabilities["write.purchase_order.submit"], "read_only")
         self.assertEqual(capabilities["write.stock.receive"], "read_only")
         self.assertEqual(capabilities["write.stock.consume"], "read_only")
         self.assertEqual(
-            development.lane_problems(capabilities, gates, role="MGR"), []
+            development.lane_problems(
+                capabilities, gates, role="MGR", purchase_authority=True
+            ),
+            [],
+        )
+
+    def test_mgr_draft_must_stay_disabled_without_native_create_authority(self):
+        # MGR is in the purchasing role set and the gate is open, but the draft
+        # is decided by its own native Purchase Order create right.
+        gates = _gates(patient=1, appointment=1, procedure=1, purchase=1)
+        capabilities = _capabilities(gates, role="MGR", purchase_authority=False)
+
+        self.assertEqual(capabilities["write.purchase_order.draft"], "read_only")
+        self.assertEqual(
+            development.purchase_draft_problems(capabilities, gates, "MGR", False),
+            [],
+        )
+        self.assertEqual(
+            development.lane_problems(
+                capabilities, gates, role="MGR", purchase_authority=False
+            ),
+            [],
+        )
+
+    def test_pha_draft_read_only_without_native_create_authority(self):
+        # The live false failure: PHA had the purchase flag and the role but no
+        # native Purchase Order create right, so the draft must stay read_only.
+        gates = _gates(purchase=1)
+        capabilities = _capabilities(gates, role="PHA", purchase_authority=False)
+
+        self.assertEqual(capabilities["write.purchase_order.draft"], "read_only")
+        self.assertEqual(
+            development.purchase_draft_problems(capabilities, gates, "PHA", False),
+            [],
+        )
+        self.assertEqual(
+            development.lane_problems(
+                capabilities, gates, role="PHA", purchase_authority=False
+            ),
+            [],
+        )
+
+    def test_pha_draft_enabled_without_authority_is_reported(self):
+        gates = _gates(purchase=1)
+        capabilities = dict(
+            _capabilities(gates, role="PHA", purchase_authority=False),
+            **{"write.purchase_order.draft": "enabled"},
+        )
+
+        problems = development.purchase_draft_problems(capabilities, gates, "PHA", False)
+        self.assertTrue(any("write.purchase_order.draft" in p for p in problems))
+        self.assertTrue(
+            any(
+                "enabled while closed" in p and "write.purchase_order.draft" in p
+                for p in development.lane_problems(
+                    capabilities, gates, role="PHA", purchase_authority=False
+                )
+            )
+        )
+
+    def test_pha_draft_enabled_with_authority_and_gate_is_accepted(self):
+        gates = _gates(purchase=1)
+        capabilities = _capabilities(gates, role="PHA", purchase_authority=True)
+
+        self.assertEqual(capabilities["write.purchase_order.draft"], "enabled")
+        self.assertEqual(
+            development.purchase_draft_problems(capabilities, gates, "PHA", True), []
+        )
+        self.assertEqual(
+            development.lane_problems(
+                capabilities, gates, role="PHA", purchase_authority=True
+            ),
+            [],
+        )
+
+    def test_unreadable_purchase_authority_is_a_problem_not_a_pass(self):
+        gates = _gates(purchase=1)
+        capabilities = _capabilities(gates, role="PHA")
+
+        self.assertEqual(
+            development.purchase_draft_problems(capabilities, gates, "PHA", None),
+            ["native Purchase Order create authority unreadable"],
         )
 
     def test_mgr_draft_must_stay_disabled_when_the_purchase_gate_is_off(self):
         gates = _gates(patient=1, appointment=1, procedure=1)
-        capabilities = _capabilities(gates, role="MGR")
+        capabilities = _capabilities(gates, role="MGR", purchase_authority=True)
 
         self.assertEqual(capabilities["write.purchase_order.draft"], "read_only")
         self.assertEqual(
-            development.lane_problems(capabilities, gates, role="MGR"), []
+            development.lane_problems(
+                capabilities, gates, role="MGR", purchase_authority=True
+            ),
+            [],
         )
 
     def test_mgr_draft_enabled_while_the_purchase_gate_is_off_is_reported(self):
         gates = _gates(patient=1, appointment=1, procedure=1)
         capabilities = dict(
-            _capabilities(gates, role="MGR"),
+            _capabilities(gates, role="MGR", purchase_authority=True),
             **{"write.purchase_order.draft": "enabled"},
         )
-        problems = development.lane_problems(capabilities, gates, role="MGR")
+        problems = development.lane_problems(
+            capabilities, gates, role="MGR", purchase_authority=True
+        )
 
         self.assertTrue(
             any(
@@ -396,6 +490,55 @@ class PurchaseLaneTests(unittest.TestCase):
 
         self.assertFalse(
             any("do not open converted lanes" in p for p in problems), problems
+        )
+
+    def test_expected_purchase_draft_requires_the_native_create_authority(self):
+        gates = _gates(purchase=1)
+
+        self.assertIn(
+            "write.purchase_order.draft",
+            development.expected_converted(
+                gates, "MGR", purchase_authority=True
+            ),
+        )
+        self.assertNotIn(
+            "write.purchase_order.draft",
+            development.expected_converted(
+                gates, "MGR", purchase_authority=False
+            ),
+        )
+        self.assertNotIn(
+            "write.purchase_order.draft",
+            development.expected_converted(gates, "MGR", purchase_authority=None),
+        )
+
+    def test_expected_purchase_draft_requires_the_open_purchase_gate(self):
+        gates = _gates(patient=1, appointment=1)
+
+        self.assertNotIn(
+            "write.purchase_order.draft",
+            development.expected_converted(
+                gates, "MGR", purchase_authority=True
+            ),
+        )
+
+    def test_expected_purchase_draft_requires_an_admitted_role(self):
+        gates = _gates(purchase=1)
+
+        self.assertNotIn(
+            "write.purchase_order.draft",
+            development.expected_converted(
+                gates, "DOC", purchase_authority=True
+            ),
+        )
+        self.assertIn(
+            "write.purchase_order.draft",
+            development.expected_converted(
+                gates, "PHA", purchase_authority=True
+            ),
+        )
+        self.assertEqual(
+            tuple(development.PURCHASE_DRAFT_ROLE_SET), ("PHA", "MGR")
         )
 
     def test_doc_bootstrap_does_not_expect_the_purchase_draft(self):
@@ -422,7 +565,12 @@ class PurchaseLaneTests(unittest.TestCase):
 
     def test_mgr_lane_report_covers_the_purchase_family(self):
         gates = _gates(patient=1, appointment=1, procedure=1, purchase=1)
-        report = development.lane_report(_capabilities(gates, role="MGR"), gates, role="MGR")
+        report = development.lane_report(
+            _capabilities(gates, role="MGR", purchase_authority=True),
+            gates,
+            role="MGR",
+            purchase_authority=True,
+        )
 
         self.assertIn("purchase", report)
         self.assertEqual(
@@ -917,25 +1065,35 @@ class StockLaneTests(unittest.TestCase):
             )
 
 
-class StockAuthorityProbeTests(unittest.TestCase):
-    def test_probe_script_reads_create_and_submit_for_each_identity(self):
-        script = development.stock_adjust_probe_script(
-            ["pha@example.invalid", "adm@example.invalid"]
+class NativeAuthorityProbeTests(unittest.TestCase):
+    def test_probe_script_reads_each_document_right_for_each_identity(self):
+        script = development.native_authority_probe_script(
+            ["pha@example.invalid", "mgr@example.invalid", "adm@example.invalid"]
         )
 
         self.assertIn("'Stock Reconciliation'", script)
-        self.assertIn("ptype='create'", script)
-        self.assertIn("ptype='submit'", script)
+        self.assertIn("'Purchase Order'", script)
+        self.assertIn("('create', 'submit')", script)
+        self.assertIn("('create',)", script)
         self.assertIn("'pha@example.invalid'", script)
+        self.assertIn("'mgr@example.invalid'", script)
         self.assertIn("'adm@example.invalid'", script)
         self.assertNotIn("password", script)
 
-    def test_authority_requires_both_rights(self):
+    def test_stock_authority_requires_both_rights(self):
         observed = {
-            "both@example.invalid": {"create": True, "submit": True},
-            "create@example.invalid": {"create": True, "submit": False},
-            "submit@example.invalid": {"create": False, "submit": True},
-            "none@example.invalid": {"create": False, "submit": False},
+            "both@example.invalid": {
+                "stock_reconciliation": {"create": True, "submit": True}
+            },
+            "create@example.invalid": {
+                "stock_reconciliation": {"create": True, "submit": False}
+            },
+            "submit@example.invalid": {
+                "stock_reconciliation": {"create": False, "submit": True}
+            },
+            "none@example.invalid": {
+                "stock_reconciliation": {"create": False, "submit": False}
+            },
         }
 
         self.assertIs(
@@ -955,13 +1113,35 @@ class StockAuthorityProbeTests(unittest.TestCase):
             False,
         )
 
+    def test_purchase_draft_authority_reads_the_create_right_only(self):
+        observed = {
+            "create@example.invalid": {"purchase_order": {"create": True}},
+            "none@example.invalid": {"purchase_order": {"create": False}},
+        }
+
+        self.assertIs(
+            development.purchase_draft_authority(observed, "create@example.invalid"),
+            True,
+        )
+        self.assertIs(
+            development.purchase_draft_authority(observed, "none@example.invalid"),
+            False,
+        )
+
     def test_unreadable_probe_is_unknown(self):
         for observed in (
             None,
             {},
             {"missing@example.invalid": None},
-            {"bad@example.invalid": {"create": True}},
-            {"bad@example.invalid": {"create": 1, "submit": 1}},
+            {"bad@example.invalid": {"stock_reconciliation": {"create": True}}},
+            {
+                "bad@example.invalid": {
+                    "stock_reconciliation": {"create": 1, "submit": 1}
+                }
+            },
+            {"bad@example.invalid": {"purchase_order": {}}},
+            {"bad@example.invalid": {"purchase_order": {"create": "yes"}}},
+            {"bad@example.invalid": {"purchase_order": None}},
         ):
             with self.subTest(observed=observed):
                 self.assertIsNone(
@@ -969,9 +1149,16 @@ class StockAuthorityProbeTests(unittest.TestCase):
                         observed, "bad@example.invalid"
                     )
                 )
+                self.assertIsNone(
+                    development.purchase_draft_authority(
+                        observed, "bad@example.invalid"
+                    )
+                )
 
     def test_empty_probe_targets_no_identity(self):
-        self.assertIn("emails = []", development.stock_adjust_probe_script([]))
+        self.assertIn(
+            "emails = []", development.native_authority_probe_script([])
+        )
 
 
 class FencedWriteTests(unittest.TestCase):

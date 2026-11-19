@@ -196,36 +196,38 @@ def _procedure_write_flags(gateway, settings, role):
 def _stock_write_flags(gateway, settings, role):
     """Return ``(receive, transfer, adjust)`` when each stock surface is open.
 
-    Independent of every other write flag: exact approved site, boundary and
-    installed-field preflight, the stock flag and the caller's own native
-    authority on the document it would submit. Receive and transfer stay on the
-    historical fence, so they still need the deployment marker and a ready
-    fence store. The converted adjustment lane needs native create and submit
-    authority for either existing stock role code and no longer reads the
-    marker or the fence store; it advertises only the authority Frappe already
-    grants. Masters, quantities, purpose and every other native document field
-    are decided per request; these flags only advertise that the surface
-    exists.
+    Independent of every other write flag: exact approved site and boundary for
+    all three, the stock flag, and the caller's own native authority on the
+    document it would submit. Receive and transfer stay on the historical fence,
+    so they still need the shared installed-field preflight, the deployment
+    marker and a ready fence store. The converted adjustment lane uses the same
+    boundary check as its endpoint but not that legacy preflight (its endpoint
+    deliberately relies on the controller instead), so only native create and
+    submit authority decide whether it is advertised. Masters, quantities,
+    purpose and every other native document field are decided per request;
+    these flags only advertise that the surface exists.
     """
 
     disabled = (False, False, False)
     try:
         if gateway.native_stock_boundary_problem() is not None:
             return disabled
-        if gateway.native_stock_install_problem() is not None:
-            return disabled
         if not settings.stock_write_enabled:
             return disabled
-        receive_ok = (
-            role in STOCK_ROLE_CODES
+        legacy_preflight_ok = gateway.native_stock_install_problem() is None
+        legacy_ready = (
+            legacy_preflight_ok
             and gateway.write_deployment_approved() is True
             and gateway.write_fence_ready() is True
+        )
+        receive_ok = (
+            legacy_ready
+            and role in STOCK_ROLE_CODES
             and gateway.native_stock_can_create("Purchase Receipt") is True
         )
         transfer_ok = (
-            role in STOCK_ROLE_CODES
-            and gateway.write_deployment_approved() is True
-            and gateway.write_fence_ready() is True
+            legacy_ready
+            and role in STOCK_ROLE_CODES
             and gateway.native_stock_can_create("Stock Entry") is True
         )
         adjust_ok = (

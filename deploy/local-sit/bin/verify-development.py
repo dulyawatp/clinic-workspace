@@ -8,8 +8,10 @@ The procedure lane is non-consuming - it creates and completes without touching
 stock, so ``write.stock.consume`` stays read_only whatever its gate flag says -
 and it converted with its site gate still off, so it is checked as disabled
 until that flag is opened. The purchase lane converted only its draft:
-``write.purchase_order.draft`` follows the purchase gate for the purchasing
-roles, while submit and the PO-referenced receipt stay fenced and disabled while
+``write.purchase_order.draft`` follows the purchase gate and the caller's own
+native ``Purchase Order`` create authority - never the role map alone, so PHA
+holds no draft on this site while MGR does - while submit and the PO-referenced
+receipt stay fenced and disabled while
 the ledger has unresolved keys. The admin lane converted only ``write.admin.user``
 for ADM, following the admin gate; ``write.admin.master`` stays fenced like
 submit and is asserted disabled while the ledger has unresolved keys. The
@@ -34,7 +36,7 @@ identity carries, so a missing ``adm_bootstrap`` fails this run rather than
 passing the lane unverified. The contract ADM identity is read separately and
 must never advertise the admin writes. The PHA bootstrap is required the same
 way: without it the converted stock lane cannot be verified. This reads the DOC,
-CAS, MGR, PHA and ADM bootstraps, the probed native stock authority, the
+CAS, MGR, PHA and ADM bootstraps, the probed native document authority, the
 synthetic directory and the historical ledger, and compares the exact counts the
 caller supplies. It writes, retries and repairs nothing, and it
 claims nothing about the deployment as a whole: the strict gate is verify.py.
@@ -100,6 +102,13 @@ FENCED_WRITES = frozenset(
 # reconciliation permission and must stay ``read_only``.
 ADJUST_CAPABILITY = "write.stock.adjust"
 ADJUST_ROLE_SET = ("PHA", "ADM")
+
+# The purchase lane converted only its draft, and the bootstrap decides it from
+# the caller's own native Purchase Order create authority plus the purchase
+# flag - never from the role map alone. PHA holds no such authority on this
+# site, so its draft must read ``read_only`` there.
+PURCHASE_DRAFT_CAPABILITY = "write.purchase_order.draft"
+PURCHASE_DRAFT_ROLE_SET = ("PHA", "MGR")
 
 
 CONVERTED = tuple(
@@ -215,17 +224,22 @@ def pha_credential_problem(credentials):
     return None
 
 
-def expected_converted(gates, role, adjust_authority=None):
+def expected_converted(gates, role, adjust_authority=None, purchase_authority=None):
     """Return the converted writes that must be enabled for ``role``.
 
-    ``adjust_authority`` is the probed native ``Stock Reconciliation`` create and
-    submit authority of that identity: ``write.stock.adjust`` is expected only
-    for a role the lane admits, with the stock flag open and that authority
-    actually present. The strict role tuple alone never enables it here.
+    ``adjust_authority`` and ``purchase_authority`` are the probed native rights
+    of that identity: ``write.stock.adjust`` needs ``Stock Reconciliation``
+    create and submit, ``write.purchase_order.draft`` needs ``Purchase Order``
+    create. Each is expected only for a role the lane admits, with its family
+    flag open and that authority actually present. The strict role tuples alone
+    never enable either here.
     """
 
     strict_expected = strict.expected_enabled_writes(gates, role)
-    strict_expected = strict_expected - {ADJUST_CAPABILITY}
+    strict_expected = strict_expected - {
+        ADJUST_CAPABILITY,
+        PURCHASE_DRAFT_CAPABILITY,
+    }
     expected = set(CONVERTED) & strict_expected
     if (
         role in ADJUST_ROLE_SET
@@ -233,10 +247,16 @@ def expected_converted(gates, role, adjust_authority=None):
         and adjust_authority is True
     ):
         expected.add(ADJUST_CAPABILITY)
+    if (
+        role in PURCHASE_DRAFT_ROLE_SET
+        and gate_open(gates.get("purchase"))
+        and purchase_authority is True
+    ):
+        expected.add(PURCHASE_DRAFT_CAPABILITY)
     return expected - NEVER_ENABLED - FENCED_WRITES
 
 
-def lane_problems(capabilities, gates, role="DOC", adjust_authority=None):
+def lane_problems(capabilities, gates, role="DOC", adjust_authority=None, purchase_authority=None):
     """Return problems when the converted lanes or the deferral disagree.
 
     The patient and appointment lanes are open here and must stay enabled for
@@ -248,8 +268,10 @@ def lane_problems(capabilities, gates, role="DOC", adjust_authority=None):
     with the flag on - the strict verifier's legacy family classification does
     not open it here. The purchase lane converted only
     ``write.purchase_order.draft`` for the purchasing roles: with the purchase
-    gate on it must be enabled for them and with the gate off it must stay
-    ``read_only``. The admin lane converted only ``write.admin.user`` for ADM:
+    gate on and the caller's own native ``Purchase Order`` create authority it
+    must be enabled, and it must stay ``read_only`` without either - PHA holds no
+    such permission on this site. The admin lane converted only
+    ``write.admin.user`` for ADM:
     with the admin gate on it must be enabled and with the gate off it must stay
     ``read_only``. The finance lane converted only ``write.invoice.submit`` for
     CAS: with the finance gate on it must be enabled and with the gate off it
@@ -270,8 +292,9 @@ def lane_problems(capabilities, gates, role="DOC", adjust_authority=None):
     absent = sorted(set(CONVERTED) - set(capabilities))
     if absent:
         problems.append(f"converted capabilities missing: {absent}")
-    expected = expected_converted(gates, role, adjust_authority)
+    expected = expected_converted(gates, role, adjust_authority, purchase_authority)
     admitted = {
+
         name
         for name in _converted(ALWAYS_OPEN_FAMILIES)
         if role in strict.WRITE_CAPABILITY_GATES[name][1]
@@ -352,10 +375,10 @@ def contract_admin_problems(capabilities, unresolved):
     return problems
 
 
-def lane_report(capabilities, gates, role="DOC", adjust_authority=None):
+def lane_report(capabilities, gates, role="DOC", adjust_authority=None, purchase_authority=None):
     """Return each converted lane's expected and observed capability states."""
 
-    expected = expected_converted(gates, role, adjust_authority)
+    expected = expected_converted(gates, role, adjust_authority, purchase_authority)
     return {
         family: {
             name: {"expected": name in expected, "observed": capabilities.get(name)}
@@ -366,13 +389,13 @@ def lane_report(capabilities, gates, role="DOC", adjust_authority=None):
     }
 
 
-def stock_adjust_probe_script(emails):
-    """Backend probe: native ``Stock Reconciliation`` rights per identity.
+def native_authority_probe_script(emails):
+    """Backend probe: native document rights per identity.
 
-    Mirrors the gateway's own ``native_stock_can_create`` and
-    ``native_stock_can_submit`` reads for the named users, so the converted lane
-    is compared with authority rather than with the role map. Identities are
-    synthetic; no password or token is passed.
+    Mirrors the gateway's own ``native_stock_can_create``/``_can_submit`` and
+    ``native_purchase_can_create`` reads for the named users, so the converted
+    lanes are compared with authority rather than with the role map. Identities
+    are synthetic; no password or token is passed.
     """
 
     return (
@@ -382,36 +405,96 @@ def stock_adjust_probe_script(emails):
         f"frappe.init(site={strict.SITE!r}, sites_path='.')\n"
         "frappe.connect()\n"
         f"emails = {sorted(set(emails))!r}\n"
+        "wanted = {\n"
+        "    'stock_reconciliation': ('Stock Reconciliation', ('create', 'submit')),\n"
+        "    'purchase_order': ('Purchase Order', ('create',)),\n"
+        "}\n"
         "out = {}\n"
         "for email in emails:\n"
-        "    try:\n"
-        "        create = bool(frappe.has_permission(\n"
-        "            'Stock Reconciliation', ptype='create', user=email))\n"
-        "        submit = bool(frappe.has_permission(\n"
-        "            'Stock Reconciliation', ptype='submit', user=email))\n"
-        "    except Exception:\n"
-        "        create = submit = None\n"
-        "    out[email] = {'create': create, 'submit': submit}\n"
+        "    rights = {}\n"
+        "    for key, (doctype, ptypes) in wanted.items():\n"
+        "        rights[key] = {}\n"
+        "        for ptype in ptypes:\n"
+        "            try:\n"
+        "                rights[key][ptype] = bool(frappe.has_permission(\n"
+        "                    doctype, ptype=ptype, user=email))\n"
+        "            except Exception:\n"
+        "                rights[key][ptype] = None\n"
+        "    out[email] = rights\n"
         "print(json.dumps(out))\n"
         "PY"
     )
 
 
-def stock_adjust_authority(observed, email):
-    """Return one identity's probed create+submit authority, or ``None``.
-
-    ``None`` means the probe did not report both rights, which is never a pass.
-    """
+def native_right(observed, email, document, ptype):
+    """Return one identity's probed right, or ``None`` when unreadable."""
 
     if not isinstance(observed, dict):
         return None
     entry = observed.get(email)
     if not isinstance(entry, dict):
         return None
-    create, submit = entry.get("create"), entry.get("submit")
-    if not isinstance(create, bool) or not isinstance(submit, bool):
+    rights = entry.get(document)
+    if not isinstance(rights, dict):
+        return None
+    value = rights.get(ptype)
+    if not isinstance(value, bool):
+        return None
+    return value
+
+
+def stock_adjust_authority(observed, email):
+    """Return one identity's probed reconciliation create+submit, or ``None``.
+
+    ``None`` means the probe did not report both rights, which is never a pass.
+    """
+
+    create = native_right(observed, email, "stock_reconciliation", "create")
+    submit = native_right(observed, email, "stock_reconciliation", "submit")
+    if create is None or submit is None:
         return None
     return create and submit
+
+
+def purchase_draft_authority(observed, email):
+    """Return one identity's probed ``Purchase Order`` create right, or ``None``.
+
+    ``None`` means the probe did not report the right, which is never a pass.
+    """
+
+    return native_right(observed, email, "purchase_order", "create")
+
+
+def purchase_draft_problems(capabilities, gates, role, authority):
+    """Return problems for the converted purchase draft of one identity.
+
+    ``authority`` is that identity's probed native ``Purchase Order`` create
+    right. The lane is expected enabled only for a role it admits, with the
+    purchase flag open and that right present; every other combination must read
+    ``read_only``. An unreadable probe is a problem, never a pass, and a draft
+    enabled from the role and flag alone is the exact false green this check
+    exists to catch.
+    """
+
+    if not isinstance(capabilities, dict):
+        return ["capabilities are not a map"]
+    if authority is None:
+        return ["native Purchase Order create authority unreadable"]
+    expected = (
+        "enabled"
+        if role in PURCHASE_DRAFT_ROLE_SET
+        and gate_open(gates.get("purchase"))
+        and authority is True
+        else "read_only"
+    )
+    observed = capabilities.get(PURCHASE_DRAFT_CAPABILITY)
+    if observed != expected:
+        return [
+            f"{PURCHASE_DRAFT_CAPABILITY} is {observed!r} for {role}, expected "
+            f"{expected!r} (native create authority {authority!r}, purchase gate "
+            f"{gates.get('purchase')!r})"
+        ]
+    return []
 
 
 def adjust_lane_problems(capabilities, gates, role, authority):
@@ -540,26 +623,29 @@ def main(argv=None):
     }
     record("site write gates readable", gate_probe.returncode == 0, gates)
 
-    # The converted stock adjustment is decided by the caller's own native
-    # ``Stock Reconciliation`` create and submit authority, so the identities
-    # are probed before any lane is judged: neither the role map nor the flag
-    # alone may stand in for that authority.
+    # The converted stock adjustment and purchase draft are decided by the
+    # caller's own native document rights, so the identities are probed before
+    # any lane is judged: neither the role map nor the flag alone may stand in
+    # for that authority.
     pha = credential_for(credentials, "PHA")
+    mgr = credential_for(credentials, "MGR")
     adm_bootstrap = adm_bootstrap_credential(credentials)
     contract_adm_user = credential_for(credentials, "ADM")
     probe_emails = [
         user["email"]
-        for user in (pha, adm_bootstrap, contract_adm_user)
+        for user in (pha, mgr, adm_bootstrap, contract_adm_user)
         if isinstance(user, dict) and user.get("email")
     ]
-    adjust_probe = strict.in_backend(stock_adjust_probe_script(probe_emails))
-    adjust_rights = (
-        json.loads(adjust_probe.stdout) if adjust_probe.returncode == 0 else {}
+    authority_probe = strict.in_backend(native_authority_probe_script(probe_emails))
+    native_rights = (
+        json.loads(authority_probe.stdout)
+        if authority_probe.returncode == 0
+        else {}
     )
     record(
-        "native Stock Reconciliation authority readable",
-        adjust_probe.returncode == 0,
-        adjust_rights,
+        "native document authority readable",
+        authority_probe.returncode == 0,
+        native_rights,
     )
 
     doc = next(u for u in credentials["users"] if u["clinic_code"] == "DOC")
@@ -657,7 +743,6 @@ def main(argv=None):
     # private state already carries a complete MGR credential; otherwise the
     # run states that it could not verify the role.
     mgr_capabilities = None
-    mgr = credential_for(credentials, "MGR")
     if mgr is None:
         print(
             "UNVERIFIED MGR purchase lane: no complete MGR synthetic credential "
@@ -882,14 +967,32 @@ def main(argv=None):
         )
 
     if mgr_capabilities is not None:
-        problems = lane_problems(mgr_capabilities, gates, role="MGR")
+        mgr_purchase_authority = purchase_draft_authority(native_rights, mgr["email"])
+        problems = lane_problems(
+            mgr_capabilities,
+            gates,
+            role="MGR",
+            purchase_authority=mgr_purchase_authority,
+        )
+        problems += purchase_draft_problems(
+            mgr_capabilities, gates, "MGR", mgr_purchase_authority
+        )
         problems += fenced_write_problems(mgr_capabilities, ledger.get("unresolved"))
         record(
             "MGR purchase draft lane and fenced writes",
             not problems,
             {
                 "role": "MGR",
-                "lanes": lane_report(mgr_capabilities, gates, role="MGR"),
+                "draft_observed": mgr_capabilities.get(PURCHASE_DRAFT_CAPABILITY),
+                "native_create_authority": mgr_purchase_authority,
+                "native_rights": native_rights.get(mgr["email"]),
+                "purchase_gate": gates.get("purchase"),
+                "lanes": lane_report(
+                    mgr_capabilities,
+                    gates,
+                    role="MGR",
+                    purchase_authority=mgr_purchase_authority,
+                ),
                 "fenced": {
                     name: mgr_capabilities.get(name)
                     for name in sorted(FENCED_WRITES)
@@ -899,7 +1002,7 @@ def main(argv=None):
         )
 
     if adm_capabilities is not None:
-        adm_authority = stock_adjust_authority(adjust_rights, adm["email"])
+        adm_authority = stock_adjust_authority(native_rights, adm["email"])
         problems = lane_problems(
             adm_capabilities, gates, role="ADM", adjust_authority=adm_authority
         )
@@ -934,30 +1037,49 @@ def main(argv=None):
                 else "read_only",
                 "observed": adm_capabilities.get(ADJUST_CAPABILITY),
                 "native_authority": adm_authority,
-                "native_rights": adjust_rights.get(adm["email"]),
+                "native_rights": native_rights.get(adm["email"]),
                 "stock_gate": gates.get("stock"),
                 "problems": adjust_problems,
             },
         )
 
     if pha_capabilities is not None:
-        pha_authority = stock_adjust_authority(adjust_rights, pha["email"])
+        pha_authority = stock_adjust_authority(native_rights, pha["email"])
+        pha_purchase_authority = purchase_draft_authority(
+            native_rights, pha["email"]
+        )
         problems = lane_problems(
-            pha_capabilities, gates, role="PHA", adjust_authority=pha_authority
+            pha_capabilities,
+            gates,
+            role="PHA",
+            adjust_authority=pha_authority,
+            purchase_authority=pha_purchase_authority,
         )
         problems += adjust_lane_problems(pha_capabilities, gates, "PHA", pha_authority)
+        problems += purchase_draft_problems(
+            pha_capabilities, gates, "PHA", pha_purchase_authority
+        )
         problems += fenced_write_problems(pha_capabilities, ledger.get("unresolved"))
         record(
-            "PHA stock adjust lane and fenced stock writes",
+            "PHA stock adjust and purchase draft lanes and fenced writes",
             not problems,
             {
                 "role": "PHA",
-                "observed": pha_capabilities.get(ADJUST_CAPABILITY),
-                "native_authority": pha_authority,
-                "native_rights": adjust_rights.get(pha["email"]),
-                "stock_gate": gates.get("stock"),
+                "stock_adjust": pha_capabilities.get(ADJUST_CAPABILITY),
+                "purchase_draft": pha_capabilities.get(PURCHASE_DRAFT_CAPABILITY),
+                "native_stock_authority": pha_authority,
+                "native_purchase_create_authority": pha_purchase_authority,
+                "native_rights": native_rights.get(pha["email"]),
+                "gates": {
+                    "stock": gates.get("stock"),
+                    "purchase": gates.get("purchase"),
+                },
                 "lanes": lane_report(
-                    pha_capabilities, gates, role="PHA", adjust_authority=pha_authority
+                    pha_capabilities,
+                    gates,
+                    role="PHA",
+                    adjust_authority=pha_authority,
+                    purchase_authority=pha_purchase_authority,
                 ),
                 "fenced": {
                     name: pha_capabilities.get(name)
@@ -969,7 +1091,10 @@ def main(argv=None):
 
     if contract_adm_capabilities is not None:
         contract_adm_authority = stock_adjust_authority(
-            adjust_rights, contract_adm["email"]
+            native_rights, contract_adm["email"]
+        )
+        contract_adm_purchase_authority = purchase_draft_authority(
+            native_rights, contract_adm["email"]
         )
         problems = contract_admin_problems(
             contract_adm_capabilities, ledger.get("unresolved")
@@ -977,20 +1102,28 @@ def main(argv=None):
         adjust_problems = adjust_lane_problems(
             contract_adm_capabilities, gates, "ADM", contract_adm_authority
         )
+        draft_problems = purchase_draft_problems(
+            contract_adm_capabilities, gates, "ADM", contract_adm_purchase_authority
+        )
         record(
             "contract ADM identity does not advertise the admin writes and its "
-            "stock adjust tracks its authority",
+            "stock adjust and purchase draft track its authority",
             contract_adm_roles == ["ADM"]
             and not problems
-            and not adjust_problems,
+            and not adjust_problems
+            and not draft_problems,
             {
                 "role": contract_adm_roles,
                 "admin_user": contract_adm_capabilities.get("write.admin.user"),
                 "admin_master": contract_adm_capabilities.get("write.admin.master"),
                 "stock_adjust": contract_adm_capabilities.get(ADJUST_CAPABILITY),
+                "purchase_draft": contract_adm_capabilities.get(
+                    PURCHASE_DRAFT_CAPABILITY
+                ),
                 "native_authority": contract_adm_authority,
-                "native_rights": adjust_rights.get(contract_adm["email"]),
-                "problems": problems + adjust_problems,
+                "native_purchase_create_authority": contract_adm_purchase_authority,
+                "native_rights": native_rights.get(contract_adm["email"]),
+                "problems": problems + adjust_problems + draft_problems,
             },
         )
 

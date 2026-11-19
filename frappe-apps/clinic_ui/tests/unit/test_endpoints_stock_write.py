@@ -901,6 +901,24 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(capabilities["write.stock.receive"], "read_only")
         self.assertEqual(capabilities["write.stock.transfer"], "read_only")
 
+    def test_a_broken_shared_preflight_only_blocks_the_legacy_lanes(self):
+        for role in ("PHA", "ADM"):
+            with self.subTest(role=role):
+                fake = gateway(role=role)
+                fake.stock_install_problem = (
+                    "missing field Stock Reconciliation.purpose"
+                )
+                capabilities = session.bootstrap(fake)["capabilities"]
+                self.assertEqual(
+                    capabilities["write.stock.adjust"], "enabled"
+                )
+                self.assertEqual(
+                    capabilities["write.stock.receive"], "read_only"
+                )
+                self.assertEqual(
+                    capabilities["write.stock.transfer"], "read_only"
+                )
+
     def test_a_closed_gate_publishes_nothing(self):
         fake = gateway(
             settings=write_settings(clinic_ui_native_stock_write_enabled=0)
