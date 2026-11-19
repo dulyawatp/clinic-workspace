@@ -297,12 +297,8 @@ function DirectoryContent() {
   const navigate = useNavigate();
   const live = session?.mode === "live";
   const native = nativeTransportEnabled();
-  const canCreateNativeDraft =
-    native &&
-    import.meta.env.VITE_CLINIC_NATIVE_ENCOUNTER_DRAFT_ENABLED === "true" &&
-    live &&
-    Boolean(session.user.id.trim()) &&
-    session.user.roles.includes("DOC");
+  const canOpenNativeDraft = native && live && Boolean(session.user.id.trim());
+  const [draftViewGeneration, setDraftViewGeneration] = useState<number | null>(null);
   const [text, setText] = useState("");
   const [settledText, setSettledText] = useState<string | null>("");
   const [page, setPage] = useState(1);
@@ -329,6 +325,26 @@ function DirectoryContent() {
     setPage(1);
   }
 
+  if (canOpenNativeDraft && draftViewGeneration === authGeneration)
+    return (
+      <NativeEncounterDraft
+        key={authGeneration}
+        userId={session.user.id}
+        onBack={() => setDraftViewGeneration(null)}
+      />
+    );
+
+  const header = (
+    <PageHeader
+      title={t("surface.PAT-01")}
+      actions={canOpenNativeDraft && (
+        <Button onClick={() => setDraftViewGeneration(authGeneration)}>
+          {t("nativeEncounter.launch")}
+        </Button>
+      )}
+    />
+  );
+  // Directory permissions still govern the listing, not the native create workspace.
   const capability = getCapability(caps, "read.patient");
   if (
     (live &&
@@ -339,28 +355,31 @@ function DirectoryContent() {
     capability === "blocked_unverified"
   )
     return (
-      <div className="shell-page-body">
-        <StatePanel
-          kind="permission-denied"
-          title={t("state.denied.title")}
-          detail={t("state.denied.body", { resource: t("surface.PAT-01") })}
-        />
-      </div>
+      <>
+        {canOpenNativeDraft && header}
+        <div className="shell-page-body">
+          <StatePanel
+            kind="permission-denied"
+            title={t("state.denied.title")}
+            detail={t("state.denied.body", { resource: t("surface.PAT-01") })}
+          />
+        </div>
+      </>
     );
   if (capability === "error_upstream")
     return (
-      <div className="shell-page-body">
-        <StatePanel kind="error" title={t("errors.UPSTREAM_UNAVAILABLE")} />
-      </div>
+      <>
+        {canOpenNativeDraft && header}
+        <div className="shell-page-body">
+          <StatePanel kind="error" title={t("errors.UPSTREAM_UNAVAILABLE")} />
+        </div>
+      </>
     );
 
   return (
     <>
-      <PageHeader title={t("surface.PAT-01")} />
+      {header}
       <div className="shell-page-body">
-        {canCreateNativeDraft && (
-          <NativeEncounterDraft key={authGeneration} userId={session.user.id} />
-        )}
         <section
           className="patients-card"
           aria-labelledby="patients-directory-title"

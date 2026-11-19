@@ -1,5 +1,6 @@
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Badge } from "../../design/components";
 import {
   createNativeEncounterDraft,
   listNativeEncounterAppointmentTypes,
@@ -9,6 +10,8 @@ import {
   searchNativeEncounterPatients,
 } from "../../transport/native/encounter-draft";
 import { Button } from "../../ui/Button";
+import { PageHeader } from "../../ui/PageHeader";
+import { EncounterLayout } from "../clinical/ApprovedVisitWorkspace";
 
 type ReadState<T> =
   | { state: "loading" | "error" }
@@ -22,35 +25,7 @@ type SaveState =
 const optionLabel = ({ id, label }: NativeEncounterOption) =>
   id === label ? label : `${label} · ${id}`;
 
-export function NativeEncounterDraft({ userId }: { userId: string }) {
-  const { t } = useTranslation();
-  const titleId = useId();
-  const descriptionId = useId();
-  const [open, setOpen] = useState(false);
-
-  return (
-    <section
-      className="patients-card patients-native-draft"
-      aria-labelledby={titleId}
-      aria-describedby={descriptionId}
-    >
-      <div className="patients-native-draft-header">
-        <div>
-          <h2 id={titleId}>{t("nativeEncounter.title")}</h2>
-          <p id={descriptionId}>{t("nativeEncounter.description")}</p>
-        </div>
-        {!open && (
-          <Button variant="secondary" onClick={() => setOpen(true)}>
-            {t("nativeEncounter.launch")}
-          </Button>
-        )}
-      </div>
-      {open && <DraftFields userId={userId} />}
-    </section>
-  );
-}
-
-function DraftFields({ userId }: { userId: string }) {
+export function NativeEncounterDraft({ userId, onBack }: { userId: string; onBack: () => void }) {
   const { t } = useTranslation();
   const inputId = useId();
   const searchHintId = useId();
@@ -142,15 +117,8 @@ function DraftFields({ userId }: { userId: string }) {
     }
   }
 
-  return (
-    <div className="patients-native-draft-body">
-      <p className="patients-native-draft-practitioner" role="status">
-        {practitioner.state === "ready"
-          ? t("nativeEncounter.practitionerReady", { name: optionLabel(practitioner.value) })
-          : practitioner.state === "loading"
-            ? t("nativeEncounter.practitionerLoading")
-            : t("nativeEncounter.practitionerUnavailable")}
-      </p>
+  const details = (
+    <>
       <form className="patients-toolbar" onSubmit={(event) => void search(event)}>
         <div className="patients-field">
           <label htmlFor={inputId}>{t("nativeEncounter.search")}</label>
@@ -223,38 +191,80 @@ function DraftFields({ userId }: { userId: string }) {
           {types.state === "loading" ? t("common.loading") : t("nativeEncounter.typesUnavailable")}
         </p>
       )}
-      <div className="patients-native-draft-actions">
-        <Button onClick={() => void save()} disabled={!canSave}>
-          {t(pending ? "nativeEncounter.saving" : "nativeEncounter.save")}
-        </Button>
-        {result.state === "created" && (
-          <Button
-            variant="secondary"
-            onClick={() => {
-              setQuery("");
-              setMatches(null);
-              setPatientId("");
-              setTypeId("");
-              setResult({ state: "idle" });
-            }}
-          >
-            {t("nativeEncounter.startAnother")}
-          </Button>
-        )}
+      <p className="pc-note">{t("nativeEncounter.codedUnavailable")}</p>
+      <details className="visit-preview-details">
+        <summary>{t("workspace.moreDetails")}</summary>
+        <p className="pc-note">{t("nativeEncounter.commentUnavailable")}</p>
+      </details>
+    </>
+  );
+
+  return (
+    <>
+      <PageHeader
+        title={t("nativeEncounter.title")}
+        actions={<Button variant="secondary" onClick={onBack}>{t("nativeEncounter.back")}</Button>}
+      />
+      <div className="shell-page-body">
+        <div className="visit-workspace visit-preview">
+          <header className="visit-identity visit-preview-identity">
+            <div className="visit-identity-heading">
+              <span className="visit-avatar" aria-hidden="true">✚</span>
+              <div>
+                <p>{t("clinical.patient")}{patient && ` · ${patient.id}`}</p>
+                <h2>{patient?.label ?? t("nativeEncounter.choosePatient")}</h2>
+              </div>
+            </div>
+            <dl>
+              <div><dt>{t("clinical.practitioner")}</dt><dd role="status">
+                {practitioner.state === "ready"
+                  ? optionLabel(practitioner.value)
+                  : t(practitioner.state === "loading" ? "nativeEncounter.practitionerLoading" : "nativeEncounter.practitionerUnavailable")}
+              </dd></div>
+              <div><dt>{t("nativeEncounter.appointmentType")}</dt><dd>{type ? optionLabel(type) : "—"}</dd></div>
+              <div><dt>{t("clinical.encounterId")}</dt><dd>{result.state === "created" ? result.id : "—"}</dd></div>
+            </dl>
+          </header>
+          <p className="pc-note">{t("nativeEncounter.description")}</p>
+          <EncounterLayout
+            status={result.state === "created" ? <Badge tone="warning">{t("status.draft")}</Badge> : null}
+            details={details}
+            detailsLabel={t("workspace.details")}
+            medications={<p className="pc-note">{t("nativeEncounter.medicationsUnavailable")}</p>}
+          />
+          <div className="visit-save-footer visit-preview-footer">
+            <div className="pc-status-line">
+              {result.state === "failed" ? (
+                <p className="patients-native-draft-result" role="alert">{t(`nativeEncounter.${result.reason}`)}</p>
+              ) : (
+                <div role="status">
+                  {result.state === "created" ? t("nativeEncounter.created", { id: result.id })
+                    : t(pending ? "nativeEncounter.saving" : "workspace.draftUnsaved")}
+                </div>
+              )}
+            </div>
+            <div className="pc-row">
+              <Button onClick={() => void save()} disabled={!canSave}>
+                {t(pending ? "nativeEncounter.saving" : "nativeEncounter.save")}
+              </Button>
+              {result.state === "created" && (
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    setQuery("");
+                    setMatches(null);
+                    setPatientId("");
+                    setTypeId("");
+                    setResult({ state: "idle" });
+                  }}
+                >
+                  {t("nativeEncounter.startAnother")}
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
-      <div className="patients-native-draft-feedback" role="status">
-        {pending && <p>{t("nativeEncounter.saving")}</p>}
-        {result.state === "created" && (
-          <p className="patients-native-draft-result">
-            {t("nativeEncounter.created", { id: result.id })}
-          </p>
-        )}
-      </div>
-      {result.state === "failed" && (
-        <p className="patients-native-draft-result" role="alert">
-          {t(`nativeEncounter.${result.reason}`)}
-        </p>
-      )}
-    </div>
+    </>
   );
 }

@@ -25,10 +25,13 @@ it("creates once and verifies persisted draft without inventing status", async (
     .mockResolvedValueOnce(json({ data: { name: "E1", patient: "P1", practitioner: "H1", appointment_type: "T1", docstatus: 0, submit_orders_on_save: 0, drug_prescription: [], procedure_prescription: [], lab_test_prescription: [], therapies: [] } }));
   expect(await createNativeEncounterDraft(input)).toEqual({ id: "E1" });
   expect(fetch).toHaveBeenCalledTimes(2);
-  const [post] = fetch.mock.calls;
+  const [post, readback] = fetch.mock.calls;
   expect(post?.[0]).toBe("/api/method/clinic_ui.api.encounters.create_draft");
   expect(post?.[1]).toMatchObject({ method: "POST", credentials: "same-origin", cache: "no-store", redirect: "error", headers: { "Content-Type": "application/json", "X-Frappe-CSRF-Token": "csrf" } });
   expect(JSON.parse(String(post?.[1]?.body))).toEqual({ patient: "P1", practitioner: "H1", appointment_type: "T1" });
+  expect(readback?.[0]).toBe("/api/resource/Patient%20Encounter/E1");
+  expect(readback?.[1]).toMatchObject({ credentials: "same-origin", cache: "no-store", redirect: "error" });
+  expect(readback?.[1]?.method ?? "GET").toBe("GET");
 });
 
 it("does not retry or fall back after ambiguous post", async () => {

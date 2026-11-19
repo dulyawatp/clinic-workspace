@@ -66,9 +66,10 @@ function TermPicker({ kind, selected, onChange, locked }: {
   );
 }
 
-export function EncounterLayout({ status, details, note, medications, photos, lab }: {
+export function EncounterLayout({ status, details, detailsLabel, note, medications, photos, lab }: {
   status: ReactNode;
   details: ReactNode;
+  detailsLabel?: string;
   note?: ReactNode;
   medications?: ReactNode;
   photos?: ReactNode;
@@ -87,7 +88,7 @@ export function EncounterLayout({ status, details, note, medications, photos, la
           <h2 id="patient-encounter">{t("workspace.encounter")}</h2>{status}
         </div>
         <nav className="visit-preview-jump" aria-label={t("workspace.sections")}>
-          {sections.map(([id, key]) => <a key={id} href={`#${id}`}>{t(id === "encounter-details" ? "workspace.coded" : key)}</a>)}
+          {sections.map(([id, key]) => <a key={id} href={`#${id}`}>{id === "encounter-details" ? detailsLabel ?? t("workspace.coded") : t(key)}</a>)}
         </nav>
         {sections.map(([id, key, body], index) => (
           <section key={id} className={`visit-preview-section ${id === "clinical-note" ? "visit-preview-note" : ""}`} aria-labelledby={id}>
