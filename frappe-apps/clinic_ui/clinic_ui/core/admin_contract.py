@@ -54,6 +54,7 @@ USER_ROLES_DOCTYPE = "Has Role"
 USER_ROLES_PARENTTYPE = "User"
 USER_ROLES_PARENTFIELD = "roles"
 PRACTITIONER_DOCTYPE = "Healthcare Practitioner"
+USER_PERMISSION_DOCTYPE = "User Permission"
 WAREHOUSE_DOCTYPE = "Warehouse"
 SUPPLIER_DOCTYPE = "Supplier"
 UOM_DOCTYPE = "UOM"
@@ -383,7 +384,7 @@ USER_BODY_KEYS = frozenset(
     }
 )
 USER_REQUIRED_KEYS = frozenset(
-    {"operation_key", "full_name", "clinic_role_code", "password"}
+    {"email", "full_name", "clinic_role_code", "password"}
 )
 MASTER_BODY_KEYS = frozenset({"operation_key", "master_type", "payload"})
 
@@ -449,6 +450,8 @@ def _looks_like_email(value):
 
 
 def _looks_like_username(value):
+    """The pre-existing bounded username shape: 2..140, no leading symbol."""
+
     return OPERATION_KEY_RE.fullmatch(value) is not None or re.fullmatch(
         r"^[A-Za-z0-9][A-Za-z0-9._@-]{1,139}$", value
     ) is not None
@@ -465,12 +468,20 @@ def _password(value):
 
 
 def validate_create_user(body):
-    """Return the normalized create-user payload or raise ``AdminContractError``."""
+    """Return the normalized create-user payload or raise ``AdminContractError``.
+
+    The converted user lane is one native ``User`` mutation: its request may
+    still carry ``operation_key`` for client compatibility, but the key is
+    validated only when present and is never returned or used as a fence,
+    receipt or idempotency key.
+    """
 
     body = _require_body(body, USER_BODY_KEYS)
     for required in USER_REQUIRED_KEYS:
         if required not in body:
             raise AdminContractError(f"missing field {required}")
+    if "operation_key" in body:
+        require_operation_key(body["operation_key"])
 
     clinic_role_code = _require_text(
         body["clinic_role_code"], "clinic_role_code", MAX_NAME_LENGTH
@@ -478,18 +489,20 @@ def validate_create_user(body):
     if clinic_role_code not in SUPPORTED_ROLE_CODES:
         raise AdminContractError("clinic_role_code is not supported")
 
-    email = _optional_text(body.get("email"), "email", MAX_TEXT_LENGTH)
-    username = _optional_text(body.get("username"), "username", MAX_NAME_LENGTH)
-    if email is None and username is None:
-        raise AdminContractError("email or username is required")
-    if email is not None and not _looks_like_email(email):
+    email = _require_text(body["email"], "email", MAX_TEXT_LENGTH).lower()
+    if not _looks_like_email(email):
         raise AdminContractError("email is invalid")
-    if username is not None and not _looks_like_username(username):
-        raise AdminContractError("username is invalid")
+    username = _optional_text(body.get("username"), "username", MAX_NAME_LENGTH)
+    if username is not None:
+        # The identifier is case-normalised once here so the duplicate check and
+        # the created row agree with the installed case-insensitive store. The
+        # pre-existing bounded shape is applied after normalisation.
+        username = username.lower()
+        if not _looks_like_username(username):
+            raise AdminContractError("username is invalid")
 
     return {
         "kind": ADMIN_USER_KIND,
-        "operation_key": require_operation_key(body["operation_key"]),
         "email": email,
         "username": username,
         "full_name": _require_text(
@@ -656,9 +669,9 @@ def prerequisite_problem(master_type, prerequisites):
 
 
 def user_identifier(payload):
-    """The identity used for duplicate checks and the user receipt."""
+    """The installed ``User`` docname: the account email, already normalised."""
 
-    return payload["email"] or payload["username"]
+    return payload["email"]
 
 
 # -- post-write closed-world re-read ---------------------------------------

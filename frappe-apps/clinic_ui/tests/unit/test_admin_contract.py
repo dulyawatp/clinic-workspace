@@ -213,14 +213,41 @@ class CreateUserBodyTests(unittest.TestCase):
         self.assertIsNone(payload["username"])
         self.assertIsNone(payload["practitioner"])
 
-    def test_username_alone_is_accepted(self):
+    def test_a_body_without_the_email_key_is_refused(self):
+        body = user_body()
+        del body["email"]
+
+        with self.assertRaises(contract.AdminContractError):
+            contract.validate_create_user(body)
+
+    def test_the_username_format_stays_bounded(self):
+        for candidate in ("a", "bad user", "-lead", "name!", "x" * 141):
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(contract.AdminContractError):
+                    contract.validate_create_user(user_body(username=candidate))
+        payload = contract.validate_create_user(user_body(username="Sit.PHA-1"))
+        self.assertEqual(payload["username"], "sit.pha-1")
+
+    def test_a_real_email_is_required_and_username_alone_is_refused(self):
+        with self.assertRaises(contract.AdminContractError):
+            contract.validate_create_user(
+                user_body(email=None, username="sit.pha")
+            )
+
+    def test_the_email_and_username_are_case_normalised(self):
         payload = contract.validate_create_user(
-            user_body(email=None, username="sit.pha")
+            user_body(email="Sit.PHA@Example.INVALID", username="Sit.PHA")
         )
-        self.assertIsNone(payload["email"])
+        self.assertEqual(payload["email"], "sit.pha@example.invalid")
         self.assertEqual(payload["username"], "sit.pha")
 
-    def test_email_or_username_is_required(self):
+    def test_a_username_equal_to_the_email_is_kept_optional(self):
+        payload = contract.validate_create_user(
+            user_body(username="sit.pha@example.invalid")
+        )
+        self.assertEqual(payload["username"], "sit.pha@example.invalid")
+
+    def test_an_email_is_required(self):
         with self.assertRaises(contract.AdminContractError):
             contract.validate_create_user(user_body(email=None))
 

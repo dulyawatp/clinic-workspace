@@ -4557,6 +4557,122 @@ class Gateway:
         except Exception:
             return True
 
+    def native_admin_username_exists(self, username):
+        """Accurate duplicate check against the installed ``username`` field.
+
+        ``User`` is named by email, so the docname lookup above cannot answer
+        this. An unreadable check fails closed: a duplicate is refused rather
+        than left to fail after the insert.
+        """
+
+        if not username:
+            return False
+        try:
+            found = self.frappe.db.get_value(
+                admin_contract.USER_DOCTYPE, {"username": username}, "name"
+            )
+        except Exception:
+            return True
+        return bool(self._text_value(found))
+
+    def native_admin_email_problem(self, email):
+        """Return a deterministic installed email-policy problem, or ``None``.
+
+        Only an installed validator is used, so the refusal is provable before
+        the insert. When the install exposes no validator the outcome stays
+        unproven and the native controller decides; this method never invents
+        a policy of its own.
+        """
+
+        try:
+            validate = self.frappe.utils.validate_email_address
+        except Exception:
+            return None
+        try:
+            accepted = validate(email)
+        except Exception:
+            return "email is invalid"
+        # Installed Frappe: ``validate_email_address(email, throw=False)``
+        # returns the email when it is valid and an empty string when it is
+        # not. Treat any falsy return as the deterministic refusal.
+        return None if accepted else "email is invalid"
+
+    def native_admin_practitioner_is_linked(self, name):
+        """Whether a practitioner already points at any user.
+
+        The linked user is never returned or exposed: the caller only needs the
+        refusal, so an operator cannot read another user's link through it.
+        """
+
+        try:
+            linked = self.frappe.db.get_value(
+                admin_contract.PRACTITIONER_DOCTYPE, name, "user_id"
+            )
+        except Exception:
+            return True
+        return bool(self._text_value(linked))
+
+    def native_admin_can_write_practitioner(self, name):
+        """The acting user's native write authority for one practitioner.
+
+        The document is loaded and asked for its own ``write`` permission, so
+        the answer is the installed one even if ``has_permission`` with a
+        docname is not supported by this Frappe version.
+        """
+
+        try:
+            doc = self.frappe.get_doc(
+                admin_contract.PRACTITIONER_DOCTYPE, name
+            )
+            doc.check_permission("write")
+            return True
+        except Exception:
+            return False
+
+    def native_admin_can_create_user_permission(self):
+        """The acting user's native ``User Permission`` create authority.
+
+        Linking a practitioner runs the installed ``Healthcare Practitioner``
+        update hook, which creates a User Permission row for the linked user.
+        Without create authority that save fails after the User insert, so the
+        endpoint decides this before any mutation.
+        """
+
+        try:
+            return bool(
+                self.frappe.has_permission(
+                    admin_contract.USER_PERMISSION_DOCTYPE,
+                    ptype="create",
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
+    def link_native_admin_practitioner(self, practitioner, user):
+        """Link one practitioner through its native load/save lifecycle.
+
+        The acting user's write permission on the row is required, the row is
+        loaded and saved so the installed controller validates the link, and an
+        existing link is never overwritten. ``db.set_value`` is not used: it
+        would bypass both permission and controller hooks.
+        """
+
+        try:
+            doc = self.frappe.get_doc(
+                admin_contract.PRACTITIONER_DOCTYPE, practitioner
+            )
+            doc.check_permission("write")
+            if self._text_value(getattr(doc, "user_id", None)):
+                raise patient_write.WriteUncertain()
+            doc.user_id = user
+            doc.save()
+        except patient_write.WriteUncertain:
+            raise
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+        return practitioner
+
     def native_admin_practitioner_exists(self, name):
         try:
             return bool(
@@ -4764,7 +4880,7 @@ class Gateway:
         try:
             doc = {
                 "doctype": admin_contract.USER_DOCTYPE,
-                "email": payload["email"] or payload["username"],
+                "email": payload["email"],
                 "first_name": payload["full_name"],
                 "full_name": payload["full_name"],
                 "enabled": 1,
@@ -4780,15 +4896,13 @@ class Gateway:
             user = self.frappe.get_doc(doc)
             user.flags.no_welcome_mail = True
             user.insert()
+            name = self._text_value(user.name)
+            if not name:
+                raise patient_write.WriteUncertain()
             practitioner = payload.get("practitioner")
             if practitioner:
-                self.frappe.db.set_value(
-                    admin_contract.PRACTITIONER_DOCTYPE,
-                    practitioner,
-                    "user_id",
-                    user.name,
-                )
-            return self._text_value(user.name)
+                self.link_native_admin_practitioner(practitioner, name)
+            return name
         except patient_write.WriteUncertain:
             raise
         except Exception:

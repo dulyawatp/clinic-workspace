@@ -4501,6 +4501,282 @@ class AdminMasterCreateTests(GatewayTestCase):
         )
 
 
+class InstalledUserDoc:
+    """Controller-like ``User``: named by email, unique username, insert hooks."""
+
+    def __init__(self, values, stub):
+        self._stub = stub
+        self.name = None
+        self.doctype = values["doctype"]
+        self.flags = types.SimpleNamespace()
+        for field, value in values.items():
+            setattr(self, field, value)
+
+    def insert(self):
+        self._stub.controller_calls.append("user_insert")
+        email = getattr(self, "email", "")
+        if "@" not in email or " " in email:
+            raise ValueError("invalid email")
+        if email in self._stub.existing_emails:
+            raise ValueError("duplicate user")
+        username = getattr(self, "username", None)
+        if username and username in self._stub.existing_usernames:
+            raise ValueError("duplicate username")
+        self.name = email
+        self._stub.existing_emails.add(email)
+        if username:
+            self._stub.existing_usernames.add(username)
+
+
+class InstalledPractitionerDoc:
+    """Controller-like ``Healthcare Practitioner`` with a native save."""
+
+    def __init__(self, *, user_id="", can_write=True, events=None):
+        self.name = "HLC-PRAC-1"
+        self.user_id = user_id
+        self.can_write = can_write
+        self.events = events if events is not None else []
+        self.saved = False
+
+    def check_permission(self, ptype):
+        self.events.append(("check_permission", ptype))
+        if not self.can_write:
+            raise FakePermissionError("Not permitted")
+
+    def save(self):
+        self.events.append("practitioner_save")
+        self.saved = True
+
+
+class AdminUserControllerStub(types.SimpleNamespace):
+    """Fake Frappe for the real admin user-create adapter.
+
+    ``db.set_value`` raises, so any write that bypasses the document save
+    lifecycle fails the test rather than passing silently.
+    """
+
+    def __init__(self, *, practitioner_user="", can_write=True):
+        super().__init__()
+        self.session = types.SimpleNamespace(user="adm@example.test")
+        self.local = types.SimpleNamespace(
+            site="marley.test",
+            session={},
+            response={},
+            response_headers={},
+            flags=types.SimpleNamespace(),
+        )
+        self.PermissionError = FakePermissionError
+        self.controller_calls = []
+        self.dict_docs = []
+        self.created_docs = []
+        self.existing_emails = set()
+        self.existing_usernames = set()
+        self.permissions = set()
+        self.events = []
+        self.practitioner = InstalledPractitionerDoc(
+            user_id=practitioner_user,
+            can_write=can_write,
+            events=self.events,
+        )
+        self.db = self
+
+    def get_doc(self, doctype, name=None, **kwargs):
+        if isinstance(doctype, dict):
+            self.dict_docs.append(dict(doctype))
+            document = InstalledUserDoc(doctype, self)
+            self.created_docs.append(document)
+            return document
+        self.controller_calls.append(("get_doc", doctype, name))
+        return self.practitioner
+
+    def has_permission(self, doctype, ptype="read", doc=None, user=None):
+        self.controller_calls.append(("has_permission", doctype, ptype))
+        return (doctype, ptype) in self.permissions
+
+    def set_value(self, *args, **kwargs):
+        raise AssertionError("the practitioner link must use the document save")
+
+    def get_value(self, doctype, name, fieldname=None, **kwargs):
+        self.controller_calls.append(("get_value", doctype, name, fieldname))
+        if fieldname == "user_id":
+            return self.practitioner.user_id or None
+        return None
+
+
+class AdminUserCreateAdapterTests(GatewayTestCase):
+    def payload(self, **overrides):
+        values = {
+            "email": "sit.pha@example.invalid",
+            "username": None,
+            "full_name": "SIT Pharmacist",
+            "roles": ["Stock Manager"],
+            "practitioner": None,
+            "password": "caller-supplied-secret-value",
+        }
+        values.update(overrides)
+        return values
+
+    def test_the_user_is_inserted_with_the_installed_naming_and_fields(self):
+        stub = AdminUserControllerStub()
+
+        name = self.gateway(stub).create_native_admin_user(self.payload())
+
+        self.assertEqual(name, "sit.pha@example.invalid")
+        self.assertIn("user_insert", stub.controller_calls)
+        sent = stub.dict_docs[0]
+        self.assertEqual(sent["email"], "sit.pha@example.invalid")
+        self.assertEqual(sent["full_name"], "SIT Pharmacist")
+        self.assertEqual(sent["new_password"], "caller-supplied-secret-value")
+        self.assertEqual(sent["send_welcome_email"], 0)
+        self.assertEqual(sent["roles"], [{"role": "Stock Manager"}])
+        self.assertNotIn("username", sent)
+        self.assertNotIn("ignore_permissions", sent)
+
+    def test_a_distinct_username_is_an_installed_field_not_an_email(self):
+        stub = AdminUserControllerStub()
+
+        name = self.gateway(stub).create_native_admin_user(
+            self.payload(username="sit.pha")
+        )
+
+        self.assertEqual(name, "sit.pha@example.invalid")
+        self.assertEqual(stub.dict_docs[0]["username"], "sit.pha")
+        self.assertEqual(stub.dict_docs[0]["email"], "sit.pha@example.invalid")
+
+    def test_a_duplicate_username_fails_in_the_controller(self):
+        stub = AdminUserControllerStub()
+        stub.existing_usernames.add("sit.pha")
+
+        with self.assertRaises(patient_write.WriteUncertain):
+            self.gateway(stub).create_native_admin_user(
+                self.payload(username="sit.pha")
+            )
+
+    def test_the_practitioner_link_uses_native_permission_and_save(self):
+        stub = AdminUserControllerStub()
+
+        self.gateway(stub).create_native_admin_user(
+            self.payload(practitioner="HLC-PRAC-1")
+        )
+
+        self.assertEqual(
+            stub.events,
+            [("check_permission", "write"), "practitioner_save"],
+        )
+        self.assertEqual(stub.practitioner.user_id, "sit.pha@example.invalid")
+        self.assertTrue(stub.practitioner.saved)
+
+    def test_an_already_linked_practitioner_is_never_overwritten(self):
+        stub = AdminUserControllerStub(
+            practitioner_user="sit.doc@example.invalid"
+        )
+
+        with self.assertRaises(patient_write.WriteUncertain):
+            self.gateway(stub).link_native_admin_practitioner(
+                "HLC-PRAC-1", "sit.pha@example.invalid"
+            )
+
+        self.assertEqual(
+            stub.practitioner.user_id, "sit.doc@example.invalid"
+        )
+        self.assertNotIn("practitioner_save", stub.events)
+
+    def test_a_practitioner_write_denial_is_raised_before_the_save(self):
+        stub = AdminUserControllerStub(can_write=False)
+
+        with self.assertRaises(patient_write.WriteUncertain):
+            self.gateway(stub).link_native_admin_practitioner(
+                "HLC-PRAC-1", "sit.pha@example.invalid"
+            )
+
+        self.assertNotIn("practitioner_save", stub.events)
+        self.assertFalse(stub.practitioner.saved)
+
+    def test_the_practitioner_write_authority_is_read_before_the_mutation(self):
+        stub = AdminUserControllerStub(can_write=False)
+
+        self.assertFalse(
+            self.gateway(stub).native_admin_can_write_practitioner("HLC-PRAC-1")
+        )
+
+    def test_an_already_linked_practitioner_is_detected_without_the_user(self):
+        stub = AdminUserControllerStub(
+            practitioner_user="sit.doc@example.invalid"
+        )
+
+        self.assertTrue(
+            self.gateway(stub).native_admin_practitioner_is_linked("HLC-PRAC-1")
+        )
+        self.assertNotIn("sit.doc@example.invalid", str(stub.events))
+
+    def test_the_username_duplicate_check_reads_the_installed_field(self):
+        stub = AdminUserControllerStub()
+        stub.get_value = lambda doctype, filters, fieldname=None, **kw: (
+            "sit.pha" if filters == {"username": "sit.pha"} else None
+        )
+
+        self.assertTrue(self.gateway(stub).native_admin_username_exists("sit.pha"))
+        self.assertFalse(self.gateway(stub).native_admin_username_exists("sit.nur"))
+
+    def test_an_unreadable_username_check_fails_closed(self):
+        stub = AdminUserControllerStub()
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("db down")
+
+        stub.get_value = boom
+
+        self.assertTrue(self.gateway(stub).native_admin_username_exists("sit.pha"))
+
+    def test_the_installed_email_policy_returns_an_empty_string_for_invalid(self):
+        """Real Frappe shape: ``''`` invalid, the email string when valid."""
+
+        stub = AdminUserControllerStub()
+        stub.utils = types.SimpleNamespace(
+            validate_email_address=lambda email: email if "@" in email else ""
+        )
+
+        gateway = self.gateway(stub)
+        self.assertEqual(
+            gateway.native_admin_email_problem("not-an-email"),
+            "email is invalid",
+        )
+        self.assertIsNone(
+            gateway.native_admin_email_problem("sit.pha@example.invalid")
+        )
+
+    def test_an_installed_validator_that_raises_is_a_preflight_problem(self):
+        stub = AdminUserControllerStub()
+        stub.utils = types.SimpleNamespace(
+            validate_email_address=lambda email: (_ for _ in ()).throw(
+                ValueError("invalid")
+            )
+        )
+
+        self.assertEqual(
+            self.gateway(stub).native_admin_email_problem("bad@"),
+            "email is invalid",
+        )
+
+    def test_a_missing_installed_email_policy_is_not_provable(self):
+        stub = AdminUserControllerStub()
+
+        self.assertIsNone(
+            self.gateway(stub).native_admin_email_problem("sit.pha@example.invalid")
+        )
+
+    def test_the_user_permission_create_authority_is_read_natively(self):
+        stub = AdminUserControllerStub()
+        stub.permissions.add(("User Permission", "create"))
+
+        self.assertTrue(self.gateway(stub).native_admin_can_create_user_permission())
+
+        stub.permissions.discard(("User Permission", "create"))
+        self.assertFalse(
+            self.gateway(stub).native_admin_can_create_user_permission()
+        )
+
+
 class ProcedureCreateAdapterTests(GatewayTestCase):
     REQUEST = "HLC-SR-1"
 
@@ -4678,7 +4954,12 @@ class GatewayAdditiveSurfaceTests(unittest.TestCase):
             "native_admin_can_create",
             "native_admin_missing_roles",
             "native_admin_user_exists",
+            "native_admin_username_exists",
+            "native_admin_email_problem",
             "native_admin_practitioner_exists",
+            "native_admin_practitioner_is_linked",
+            "native_admin_can_write_practitioner",
+            "link_native_admin_practitioner",
             "native_admin_master_exists",
             "native_admin_item_price_exists",
             "native_admin_prerequisites",

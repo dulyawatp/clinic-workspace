@@ -382,9 +382,15 @@ class FakeGateway:
         self.admin_install_problem = None
         self.admin_can_write = True
         self.admin_can_create = {}
+        self.admin_can_create_user_permission = True
+        self.admin_user_permission_calls = []
         self.admin_missing_roles = []
         self.admin_users = set()
+        self.admin_usernames = set()
         self.admin_practitioners = set()
+        self.admin_practitioner_linked = set()
+        self.admin_practitioner_can_write = {}
+        self.admin_email_problem = None
         self.admin_masters = set()
         self.admin_item_prices = set()
         self.admin_user_exists_sequence = []
@@ -1462,6 +1468,26 @@ class FakeGateway:
             return self.admin_user_exists_sequence.pop(0)
         return identifier in self.admin_users
 
+    def native_admin_username_exists(self, username):
+        """Accurate duplicate check against the installed ``username`` field."""
+
+        return bool(username) and username.lower() in self.admin_usernames
+
+    def native_admin_practitioner_is_linked(self, name):
+        """Whether the practitioner already points at any user."""
+
+        return name in self.admin_practitioner_linked
+
+    def native_admin_can_write_practitioner(self, name):
+        return self.admin_practitioner_can_write.get(name, True)
+
+    def native_admin_can_create_user_permission(self):
+        self.admin_user_permission_calls.append(True)
+        return self.admin_can_create_user_permission
+
+    def native_admin_email_problem(self, email):
+        return self.admin_email_problem
+
     def native_admin_practitioner_exists(self, name):
         self.admin_practitioner_exists_calls.append(name)
         return name in self.admin_practitioners
@@ -1490,9 +1516,15 @@ class FakeGateway:
         self.admin_user_create_calls.append(dict(payload))
         if self.admin_user_create_error is not None:
             raise self.admin_user_create_error
-        if self.created_admin_user:
-            return self.created_admin_user
-        return payload.get("email") or payload.get("username")
+        name = self.created_admin_user or payload.get("email")
+        # Controller-like bookkeeping: the installed User is named by email and
+        # the username/link become taken once the mutation succeeds.
+        self.admin_users.add(name)
+        if payload.get("username"):
+            self.admin_usernames.add(payload["username"].lower())
+        if payload.get("practitioner"):
+            self.admin_practitioner_linked.add(payload["practitioner"])
+        return name
 
     def create_native_admin_master(self, master_type, payload):
         self.admin_master_create_calls.append((master_type, dict(payload)))

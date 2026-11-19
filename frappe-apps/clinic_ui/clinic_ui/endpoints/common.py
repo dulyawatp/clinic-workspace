@@ -245,6 +245,28 @@ def authorize_finance_write(gateway, allowed_codes, csrf_token=None):
     return settings, view, role
 
 
+def authorize_admin_user_write(gateway, allowed_codes, csrf_token=None):
+    """Read gate, explicit CSRF, and the converted admin user-create gate.
+
+    The converted user lane relies on Frappe/Marley permissions, validation,
+    controller lifecycle and transactions instead of the historical admin
+    operation fence, deployment marker, write budget and acknowledgement
+    barrier. It still requires the authenticated session, a valid same-session
+    CSRF token, the exact approved site configuration, the admin flag and the
+    clinic role code. Native ``User`` create authority is checked per request by
+    the endpoint. No fence state is read.
+    """
+
+    settings, view, role = authorize(gateway, allowed_codes)
+    if view.user == write_fence.LATCH_ACTOR:
+        gateway.deny()
+    if not gateway.csrf_token_valid(csrf_token):
+        gateway.deny()
+    if not settings.admin_write_enabled:
+        gateway.deny()
+    return settings, view, role
+
+
 def authorize_admin_write(gateway, allowed_codes, csrf_token=None):
     """Read gate, explicit CSRF, and the separate admin-write gate.
 

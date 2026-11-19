@@ -10,10 +10,15 @@ and it converted with its site gate still off, so it is checked as disabled
 until that flag is opened. The purchase lane converted only its draft:
 ``write.purchase_order.draft`` follows the purchase gate for the purchasing
 roles, while submit and the PO-referenced receipt stay fenced and disabled while
-the ledger has unresolved keys. The DOC bootstrap covers DOC only; the MGR
-purchase lane is checked from its own bootstrap when the private state already
-carries that credential, and the run reports the gap otherwise. This reads the
-DOC bootstrap, the synthetic directory and the historical ledger, and compares
+the ledger has unresolved keys. The admin lane converted only ``write.admin.user``
+for ADM, following the admin gate; ``write.admin.master`` stays fenced like
+submit and is asserted disabled while the ledger has unresolved keys. The DOC
+bootstrap covers DOC only; the MGR purchase lane is checked from its own
+bootstrap when the private state already carries that credential, and the run
+reports the gap otherwise. The ADM bootstrap cannot be optional: the DOC
+bootstrap cannot speak for the converted admin lane, so a missing ADM credential
+fails this run rather than passing it unverified. This reads the DOC, MGR and
+ADM bootstraps, the synthetic directory and the historical ledger, and compares
 the exact counts the caller supplies. It writes, retries and repairs nothing,
 and it claims nothing about the deployment as a whole: the strict gate is
 verify.py.
@@ -32,7 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verify as strict  # noqa: E402
 
-CONVERTED_FAMILIES = ("patient", "appointment", "procedure", "purchase")
+CONVERTED_FAMILIES = ("patient", "appointment", "procedure", "purchase", "admin")
 
 # Open on this site and expected to stay open.
 ALWAYS_OPEN_FAMILIES = ("patient", "appointment")
@@ -47,9 +52,15 @@ NEVER_ENABLED = frozenset({"write.stock.consume"})
 
 # Writes that stay on the historical fence: the purchase lane converted only
 # its draft, so an unresolved ledger keeps the submit and the PO-referenced
-# receipt disabled. They are never counted as converted here.
+# receipt disabled, and the admin lane converted only its user write, so
+# ``write.admin.master`` stays fenced the same way. None of them is ever counted
+# as converted here.
 FENCED_WRITES = frozenset(
-    {"write.purchase_order.submit", "write.stock.receive"}
+    {
+        "write.purchase_order.submit",
+        "write.stock.receive",
+        "write.admin.master",
+    }
 )
 
 CONVERTED = tuple(
@@ -87,6 +98,22 @@ def credential_for(credentials, code):
     return None
 
 
+def adm_credential_problem(credentials):
+    """Return why the ADM bootstrap cannot run, or ``None``.
+
+    The admin lane converted ``write.admin.user`` for ADM only, and the DOC
+    bootstrap cannot speak for another role, so a missing ADM credential makes
+    this run fail instead of leaving the lane unverified and green.
+    """
+
+    if credential_for(credentials, "ADM") is None:
+        return (
+            "no complete ADM synthetic credential in the private state; "
+            "the converted admin lane cannot be verified"
+        )
+    return None
+
+
 def expected_converted(gates, role):
     """Return the converted writes that must be enabled for ``role``."""
 
@@ -108,9 +135,11 @@ def lane_problems(capabilities, gates, role="DOC"):
     not open it here. The purchase lane converted only
     ``write.purchase_order.draft`` for the purchasing roles: with the purchase
     gate on it must be enabled for them and with the gate off it must stay
-    ``read_only``. Submit and the receipt are fence-gated and are not asserted
-    here; the stock, finance, admin and deferred clinical lanes are never
-    asserted ready.
+    ``read_only``. The admin lane converted only ``write.admin.user`` for ADM:
+    with the admin gate on it must be enabled and with the gate off it must stay
+    ``read_only``. Submit, the receipt and ``write.admin.master`` are fence-gated
+    and are not asserted here; the stock, finance and deferred clinical lanes are
+    never asserted ready.
     """
 
     if not isinstance(capabilities, dict):
@@ -150,8 +179,9 @@ def fenced_write_problems(capabilities, unresolved):
 
     ``unresolved`` is the observed unresolved key count. Only a positive count
     is asserted: the documented state is that an unresolved ledger keeps
-    submit and the receipt disabled. A resolved ledger makes no readiness claim
-    either way, and neither write is ever counted as converted.
+    submit, the receipt and ``write.admin.master`` disabled. A resolved ledger
+    makes no readiness claim either way, and none of these writes is ever
+    counted as converted.
     """
 
     if not isinstance(capabilities, dict):
@@ -367,6 +397,51 @@ def main(argv=None):
             },
         )
 
+    # The admin lane converted ``write.admin.user`` for ADM only. The DOC
+    # bootstrap cannot speak for that role and there is no fallback, so a
+    # missing or unusable ADM credential fails this run instead of leaving the
+    # converted lane unverified and green.
+    adm = credential_for(credentials, "ADM")
+    adm_gap = adm_credential_problem(credentials)
+    record(
+        "synthetic ADM credential present",
+        adm_gap is None,
+        adm_gap or {"email": adm["email"]},
+    )
+    adm_capabilities = None
+    if adm is not None:
+        adm_opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+        )
+        adm_login = {"usr": adm["email"], "pwd": adm["password"]}
+        status, _, body = strict.request(
+            adm_opener,
+            "/api/method/login",
+            method="POST",
+            data=urllib.parse.urlencode(adm_login).encode(),
+        )
+        record(
+            "synthetic ADM login",
+            status == 200 and b"Logged In" in body,
+            {"status": status, "email": adm["email"]},
+        )
+        status, _, body = strict.request(
+            adm_opener, "/api/method/clinic_ui.api.session.bootstrap"
+        )
+        adm_boot = json.loads(body).get("message", {}) if status == 200 else {}
+        adm_capabilities = adm_boot.get("capabilities") or {}
+        record(
+            "ADM bootstrap is live",
+            status == 200
+            and adm_boot.get("mode") == "live"
+            and adm_boot.get("user", {}).get("roles") == ["ADM"],
+            {
+                "status": status,
+                "mode": adm_boot.get("mode"),
+                "roles": adm_boot.get("user", {}).get("roles"),
+            },
+        )
+
     status, _, body = strict.request(
         opener, "/api/method/clinic_ui.api.directory.synthetic_patients"
     )
@@ -415,6 +490,23 @@ def main(argv=None):
                 "lanes": lane_report(mgr_capabilities, gates, role="MGR"),
                 "fenced": {
                     name: mgr_capabilities.get(name)
+                    for name in sorted(FENCED_WRITES)
+                },
+                "problems": problems,
+            },
+        )
+
+    if adm_capabilities is not None:
+        problems = lane_problems(adm_capabilities, gates, role="ADM")
+        problems += fenced_write_problems(adm_capabilities, ledger.get("unresolved"))
+        record(
+            "ADM admin user lane and fenced admin master",
+            not problems,
+            {
+                "role": "ADM",
+                "lanes": lane_report(adm_capabilities, gates, role="ADM"),
+                "fenced": {
+                    name: adm_capabilities.get(name)
                     for name in sorted(FENCED_WRITES)
                 },
                 "problems": problems,

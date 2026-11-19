@@ -121,7 +121,9 @@ def committed_master(fake, key=MASTER_KEY):
 
 
 class CreateUserTests(unittest.TestCase):
-    def test_creates_one_user_and_leaves_the_ack_to_its_endpoint(self):
+    """The converted user lane: native authority, no fence/budget/ack."""
+
+    def test_creates_one_native_user_without_a_fence_receipt_or_ack(self):
         fake = gateway()
 
         payload = admin_write.create_user(fake, user_body(), CSRF)
@@ -131,19 +133,26 @@ class CreateUserTests(unittest.TestCase):
             payload["user"]["user_id"], "sit.pha@example.invalid"
         )
         self.assertEqual(payload["user"]["roles"], ["Stock Manager"])
-        self.assertTrue(admin_contract.is_valid_ack_token(payload["ackToken"]))
+        self.assertNotIn("ackToken", payload)
         self.assertNotIn("caller-supplied-secret", repr(payload))
-        self.assertEqual(fake.admin_fence_calls[0][1], "admin_user")
+        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_fence_claim.committed, [])
+        self.assertEqual(fake.admin_fence_claim.unknowns, [])
+        self.assertEqual(fake.admin_ack_calls, [])
+        self.assertEqual(fake.admin_receipt_calls, [])
+        # No practitioner means no User Permission preflight.
+        self.assertEqual(fake.admin_user_permission_calls, [])
         self.assertEqual(len(fake.admin_user_create_calls), 1)
         created = fake.admin_user_create_calls[0]
         self.assertEqual(created["roles"], ["Stock Manager"])
         self.assertEqual(created["password"], "caller-supplied-secret-value")
+        self.assertNotIn("operation_key", created)
         self.assertEqual(fake.commit_calls, 1)
-        receipt = fake.admin_fence_claim.committed[0]
-        self.assertNotIn("caller-supplied-secret", receipt)
-        decoded = admin_contract.decode_receipt(receipt)
-        self.assertEqual(decoded.identifier, "sit.pha@example.invalid")
-        self.assertEqual(fake.admin_ack_calls, [])
+        self.assertEqual(fake.rollback_calls, 0)
+        # The closed-world re-read before the commit is retained.
+        self.assertEqual(
+            fake.admin_user_facts_calls, ["sit.pha@example.invalid"]
+        )
 
     def test_a_practitioner_link_is_part_of_the_same_mutation(self):
         fake = gateway()
@@ -157,8 +166,55 @@ class CreateUserTests(unittest.TestCase):
         self.assertEqual(
             fake.admin_user_create_calls[0]["practitioner"], "HLC-PRACT-1"
         )
+        self.assertEqual(len(fake.admin_user_permission_calls), 1)
+        self.assertEqual(fake.admin_fence_calls, [])
 
-    def test_a_forbidden_role_is_refused_before_the_fence(self):
+    def test_unresolved_historical_receipts_neither_block_nor_change(self):
+        fake = gateway()
+        for index in range(6):
+            committed_user(fake, f"admin-user-key-{index:04d}-01")
+        before = list(fake.admin_receipt_records)
+
+        payload = admin_write.create_user(fake, user_body(), CSRF)
+
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(fake.admin_fence_calls, [])
+        # The historical ledger is never read or written by this lane.
+        self.assertEqual(fake.admin_receipt_calls, [])
+        self.assertEqual(fake.admin_receipt_records, before)
+        self.assertEqual(fake.admin_fence_claim.committed, [])
+
+    def test_the_deployment_marker_and_fence_store_are_not_required(self):
+        fake = gateway()
+        fake.deployment_approved = False
+        fake.fence_ready = False
+
+        payload = admin_write.create_user(fake, user_body(), CSRF)
+
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(len(fake.admin_user_create_calls), 1)
+
+    def test_the_request_operation_key_is_optional_and_not_a_fence(self):
+        body = user_body()
+        body.pop("operation_key")
+
+        fake = gateway()
+        payload = admin_write.create_user(fake, body, CSRF)
+        self.assertEqual(payload["status"], "created")
+
+        # The same key for two different users is not de-duplicated by this
+        # lane: native duplicate checks decide, never a fabricated receipt.
+        fake = gateway()
+        first = admin_write.create_user(fake, user_body(), CSRF)
+        second = admin_write.create_user(
+            fake, user_body(email="sit.nur@example.invalid"), CSRF
+        )
+        self.assertEqual(first["status"], "created")
+        self.assertEqual(second["status"], "created")
+        self.assertEqual(len(fake.admin_user_create_calls), 2)
+        self.assertEqual(fake.admin_fence_calls, [])
+
+    def test_a_forbidden_role_is_refused_before_any_mutation(self):
         fake = gateway(
             settings=write_settings(
                 clinic_ui_role_map={
@@ -176,10 +232,10 @@ class CreateUserTests(unittest.TestCase):
 
         self.assertEqual(payload, {"code": "VALIDATION"})
         self.assertEqual(fake.write_responses[-1][0], 417)
-        self.assertEqual(fake.admin_fence_calls, [])
         self.assertEqual(fake.admin_user_create_calls, [])
+        self.assertEqual(fake.admin_fence_calls, [])
 
-    def test_healthcare_administrator_is_refused_before_the_fence(self):
+    def test_healthcare_administrator_is_refused_before_any_mutation(self):
         fake = gateway(
             settings=write_settings(
                 clinic_ui_role_map={
@@ -192,9 +248,9 @@ class CreateUserTests(unittest.TestCase):
         payload = admin_write.create_user(fake, user_body(), CSRF)
 
         self.assertEqual(payload, {"code": "VALIDATION"})
-        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_user_create_calls, [])
 
-    def test_an_unmapped_code_is_refused_before_the_fence(self):
+    def test_an_unmapped_code_is_refused_before_any_mutation(self):
         fake = gateway(
             settings=write_settings(
                 clinic_ui_role_map={
@@ -208,19 +264,18 @@ class CreateUserTests(unittest.TestCase):
         )
 
         self.assertEqual(payload, {"code": "VALIDATION"})
-        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_user_create_calls, [])
 
-    def test_a_duplicate_user_is_refused_before_the_fence(self):
+    def test_a_duplicate_user_is_refused_before_any_mutation(self):
         fake = gateway()
         fake.admin_users.add("sit.pha@example.invalid")
 
         payload = admin_write.create_user(fake, user_body(), CSRF)
 
         self.assertEqual(payload, {"code": "VALIDATION"})
-        self.assertEqual(fake.admin_fence_calls, [])
         self.assertEqual(fake.admin_user_create_calls, [])
 
-    def test_a_missing_practitioner_is_refused_before_the_fence(self):
+    def test_a_missing_practitioner_is_refused_before_any_mutation(self):
         fake = gateway()
 
         payload = admin_write.create_user(
@@ -228,18 +283,18 @@ class CreateUserTests(unittest.TestCase):
         )
 
         self.assertEqual(payload, {"code": "VALIDATION"})
-        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_user_create_calls, [])
 
-    def test_a_missing_installed_role_is_refused_before_the_fence(self):
+    def test_a_missing_installed_role_is_refused_before_any_mutation(self):
         fake = gateway()
         fake.admin_missing_roles = ["Stock Manager"]
 
         payload = admin_write.create_user(fake, user_body(), CSRF)
 
         self.assertEqual(payload, {"code": "VALIDATION"})
-        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_user_create_calls, [])
 
-    def test_missing_email_and_username_is_a_validation_refusal(self):
+    def test_a_missing_email_is_a_validation_refusal(self):
         fake = gateway()
 
         payload = admin_write.create_user(
@@ -248,18 +303,99 @@ class CreateUserTests(unittest.TestCase):
 
         self.assertEqual(payload, {"code": "VALIDATION"})
         self.assertEqual(fake.write_responses[-1][0], 422)
-        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_user_create_calls, [])
 
-    def test_a_username_only_create_is_accepted(self):
+    def test_a_username_only_create_is_refused_before_any_mutation(self):
         fake = gateway()
-        fake.created_admin_user = "sit.pha"
 
         payload = admin_write.create_user(
             fake, user_body(email=None, username="sit.pha"), CSRF
         )
 
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.write_responses[-1][0], 422)
+        self.assertEqual(fake.admin_user_create_calls, [])
+
+    def test_a_distinct_username_is_passed_to_the_native_controller(self):
+        fake = gateway()
+
+        payload = admin_write.create_user(
+            fake, user_body(username="sit.pha"), CSRF
+        )
+
         self.assertEqual(payload["status"], "created")
-        self.assertEqual(payload["user"]["user_id"], "sit.pha")
+        created = fake.admin_user_create_calls[0]
+        self.assertEqual(created["email"], "sit.pha@example.invalid")
+        self.assertEqual(created["username"], "sit.pha")
+
+    def test_duplicate_identifiers_are_compared_after_normalisation(self):
+        fake = gateway()
+        fake.admin_users.add("sit.pha@example.invalid")
+
+        payload = admin_write.create_user(
+            fake, user_body(email="SIT.PHA@example.invalid"), CSRF
+        )
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.admin_user_create_calls, [])
+
+    def test_a_duplicate_username_uses_the_installed_username_field(self):
+        fake = gateway()
+        fake.admin_usernames.add("sit.pha")
+
+        payload = admin_write.create_user(
+            fake, user_body(username="sit.pha"), CSRF
+        )
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.admin_user_create_calls, [])
+
+    def test_an_already_linked_practitioner_is_refused_without_disclosure(self):
+        fake = gateway()
+        fake.admin_practitioners.add("HLC-PRACT-1")
+        fake.admin_practitioner_linked.add("HLC-PRACT-1")
+
+        payload = admin_write.create_user(
+            fake, user_body(practitioner="HLC-PRACT-1"), CSRF
+        )
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.write_responses[-1][0], 417)
+        self.assertEqual(fake.admin_user_create_calls, [])
+        # The refusal names no user and no link target.
+        self.assertNotIn("sit.", repr(payload))
+
+    def test_practitioner_write_authority_is_required_before_the_mutation(self):
+        fake = gateway()
+        fake.admin_practitioners.add("HLC-PRACT-1")
+        fake.admin_practitioner_can_write["HLC-PRACT-1"] = False
+
+        with self.assertRaises(Denied):
+            admin_write.create_user(
+                fake, user_body(practitioner="HLC-PRACT-1"), CSRF
+            )
+        self.assertEqual(fake.admin_user_create_calls, [])
+
+    def test_user_permission_create_authority_is_required_for_a_link(self):
+        fake = gateway()
+        fake.admin_practitioners.add("HLC-PRACT-1")
+        fake.admin_can_create_user_permission = False
+
+        with self.assertRaises(Denied):
+            admin_write.create_user(
+                fake, user_body(practitioner="HLC-PRACT-1"), CSRF
+            )
+        self.assertEqual(fake.admin_user_create_calls, [])
+
+    def test_an_installed_email_policy_refusal_is_deterministic(self):
+        fake = gateway()
+        fake.admin_email_problem = "email is invalid"
+
+        payload = admin_write.create_user(fake, user_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.write_responses[-1][0], 422)
+        self.assertEqual(fake.admin_user_create_calls, [])
 
     def test_the_body_is_strict(self):
         for candidate in (
@@ -267,14 +403,15 @@ class CreateUserTests(unittest.TestCase):
             {**user_body(), "docstatus": 1},
             user_body(password=None),
             user_body(password="short"),
+            user_body(operation_key="short"),
         ):
             with self.subTest(candidate=candidate):
                 fake = gateway()
                 payload = admin_write.create_user(fake, candidate, CSRF)
                 self.assertEqual(payload, {"code": "VALIDATION"})
-                self.assertEqual(fake.admin_fence_calls, [])
+                self.assertEqual(fake.admin_user_create_calls, [])
 
-    def test_the_shared_gate_refuses_before_validation(self):
+    def test_the_gate_refuses_before_validation(self):
         fake = gateway(
             current_session=session_view(
                 user="sit.doc@example.invalid", roles=("Physician",)
@@ -282,12 +419,12 @@ class CreateUserTests(unittest.TestCase):
         )
         with self.assertRaises(Denied):
             admin_write.create_user(fake, user_body(), CSRF)
-        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_user_create_calls, [])
 
         fake = gateway()
         with self.assertRaises(Denied):
             admin_write.create_user(fake, user_body(), None)
-        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_user_create_calls, [])
 
     def test_the_gate_flag_and_install_preflight_are_required(self):
         fake = gateway(
@@ -295,13 +432,13 @@ class CreateUserTests(unittest.TestCase):
         )
         with self.assertRaises(Denied):
             admin_write.create_user(fake, user_body(), CSRF)
-        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_user_create_calls, [])
 
         other = gateway()
         other.admin_install_problem = "missing DocType User"
         with self.assertRaises(Denied):
             admin_write.create_user(other, user_body(), CSRF)
-        self.assertEqual(other.admin_fence_calls, [])
+        self.assertEqual(other.admin_user_create_calls, [])
 
     def test_native_authority_is_required(self):
         fake = gateway()
@@ -309,33 +446,37 @@ class CreateUserTests(unittest.TestCase):
 
         with self.assertRaises(Denied):
             admin_write.create_user(fake, user_body(), CSRF)
-        self.assertEqual(fake.admin_fence_calls, [])
-
-    def test_an_exhausted_budget_is_refused_before_the_fence(self):
-        fake = gateway()
-        for index in range(4):
-            committed_user(fake, f"admin-user-key-{index:04d}-01")
-
-        payload = admin_write.create_user(fake, user_body(), CSRF)
-
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(fake.admin_fence_calls, [])
         self.assertEqual(fake.admin_user_create_calls, [])
 
 
-class CreateUserFenceTests(unittest.TestCase):
-    def test_a_duplicate_inside_the_fence_rolls_back(self):
+class CreateUserUncertainTests(unittest.TestCase):
+    """A lost response is uncertain: roll back, report, never retry."""
+
+    def test_a_native_failure_is_uncertain_and_rolled_back(self):
         fake = gateway()
-        fake.admin_user_exists_sequence = [False, True]
+        fake.admin_user_create_error = patient_write.WriteUncertain()
 
         payload = admin_write.create_user(fake, user_body(), CSRF)
 
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(fake.admin_user_create_calls, [])
-        self.assertEqual(fake.admin_fence_claim.committed, [])
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.write_responses[-1][0], 409)
         self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.admin_fence_calls, [])
+        self.assertEqual(fake.admin_fence_claim.unknowns, [])
 
-    def test_a_facts_mismatch_rolls_back(self):
+    def test_an_unexpected_native_error_is_uncertain_and_rolled_back(self):
+        fake = gateway()
+        fake.admin_user_create_error = RuntimeError("native exploded")
+
+        payload = admin_write.create_user(fake, user_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.admin_fence_claim.unknowns, [])
+
+    def test_a_facts_mismatch_is_uncertain_and_never_commits(self):
         fake = gateway()
         fake.admin_user_facts = {
             "user": "sit.pha@example.invalid",
@@ -346,110 +487,12 @@ class CreateUserFenceTests(unittest.TestCase):
 
         payload = admin_write.create_user(fake, user_body(), CSRF)
 
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(fake.admin_fence_claim.committed, [])
-        self.assertEqual(fake.commit_calls, 0)
-        self.assertEqual(fake.rollback_calls, 1)
-
-    def test_a_native_failure_is_uncertain_without_committing(self):
-        fake = gateway()
-        fake.admin_user_create_error = patient_write.WriteUncertain()
-
-        payload = admin_write.create_user(fake, user_body(), CSRF)
-
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(fake.rollback_calls, 1)
-        self.assertEqual(fake.commit_calls, 0)
-
-    def test_an_unexpected_native_error_marks_unknown_and_rolls_back(self):
-        fake = gateway()
-        fake.admin_user_create_error = RuntimeError("native exploded")
-
-        payload = admin_write.create_user(fake, user_body(), CSRF)
-
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(len(fake.admin_fence_claim.unknowns), 1)
-        self.assertEqual(fake.rollback_calls, 1)
-        self.assertEqual(fake.commit_calls, 0)
-
-    def test_the_user_receipt_is_encoded_before_the_commit_and_the_claim(self):
-        """The receipt is validated while the native write is uncommitted."""
-
-        fake = gateway()
-        real_encode = admin_contract.encode_receipt
-        real_claim_commit = fake.admin_fence_claim.commit
-
-        def recording_encode(**kwargs):
-            fake.call_order.append("encode_receipt")
-            return real_encode(**kwargs)
-
-        def recording_claim_commit(receipt):
-            fake.call_order.append("claim_commit")
-            return real_claim_commit(receipt)
-
-        with mock.patch.object(
-            admin_contract, "encode_receipt", recording_encode
-        ), mock.patch.object(
-            fake.admin_fence_claim, "commit", recording_claim_commit
-        ):
-            payload = admin_write.create_user(fake, user_body(), CSRF)
-
-        self.assertEqual(payload["status"], "created")
-        order = fake.call_order
-        self.assertLess(order.index("encode_receipt"), order.index("commit"))
-        self.assertLess(order.index("commit"), order.index("claim_commit"))
-        self.assertEqual(len(fake.admin_fence_claim.committed), 1)
-
-    def test_a_user_receipt_encode_failure_never_reaches_the_commit(self):
-        fake = gateway()
-
-        with mock.patch.object(
-            admin_contract,
-            "encode_receipt",
-            side_effect=admin_contract.AdminContractError(
-                "invalid receipt identifier"
-            ),
-        ):
-            payload = admin_write.create_user(fake, user_body(), CSRF)
-
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(len(fake.admin_user_create_calls), 1)
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
         self.assertEqual(fake.commit_calls, 0)
         self.assertEqual(fake.rollback_calls, 1)
         self.assertEqual(fake.admin_fence_claim.committed, [])
-        self.assertEqual(len(fake.admin_fence_claim.unknowns), 1)
 
-    def test_the_committed_receipt_binds_the_ack_token_without_a_re_encode(self):
-        """The exact committed receipt is reused; nothing re-encodes it."""
-
-        fake = gateway()
-        real_encode = admin_contract.encode_receipt
-        encodes = []
-
-        def counting_encode(**kwargs):
-            encodes.append(dict(kwargs))
-            return real_encode(**kwargs)
-
-        with mock.patch.object(
-            admin_contract, "encode_receipt", counting_encode
-        ):
-            payload = admin_write.create_user(fake, user_body(), CSRF)
-
-        self.assertEqual(len(encodes), 1)
-        receipt = fake.admin_fence_claim.committed[0]
-        self.assertEqual(
-            payload["ackToken"],
-            admin_contract.ack_token(
-                SECRET.encode(),
-                SITE,
-                ACTOR,
-                admin_contract.ADMIN_USER_KIND,
-                USER_KEY,
-                receipt,
-            ),
-        )
-
-    def test_a_user_commit_failure_is_uncertain_and_locked(self):
+    def test_a_commit_failure_is_uncertain_and_rolled_back(self):
         fake = gateway()
 
         def boom():
@@ -458,19 +501,11 @@ class CreateUserFenceTests(unittest.TestCase):
         fake.commit = boom
         payload = admin_write.create_user(fake, user_body(), CSRF)
 
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(len(fake.admin_fence_claim.unknowns), 1)
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
         self.assertEqual(fake.rollback_calls, 1)
         self.assertEqual(fake.admin_fence_claim.committed, [])
 
-    def test_a_failed_user_rollback_escapes_to_frappe_cleanup(self):
-        """A rollback failure must never become a normal response.
-
-        Returning a 409 would let Frappe's request-end commit persist the
-        partial native write, so this propagates instead; the key is already
-        ``UNKNOWN`` and blocks every new operation site-wide.
-        """
-
+    def test_a_failed_rollback_escapes_to_frappe_cleanup(self):
         fake = gateway()
         fake.admin_user_create_error = RuntimeError("native failed")
 
@@ -482,7 +517,19 @@ class CreateUserFenceTests(unittest.TestCase):
             admin_write.create_user(fake, user_body(), CSRF)
 
         self.assertEqual(fake.write_responses, [])
-        self.assertEqual(len(fake.admin_fence_claim.unknowns), 1)
+
+    def test_a_success_response_that_cannot_be_built_is_uncertain(self):
+        fake = gateway()
+
+        def no_channels():
+            raise RuntimeError("channels unavailable")
+
+        fake.strip_message_channels = no_channels
+
+        payload = admin_write.create_user(fake, user_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.admin_fence_claim.committed, [])
 
 
 class EditMasterTests(unittest.TestCase):
@@ -1025,6 +1072,17 @@ class BootstrapTests(unittest.TestCase):
         capabilities = session.bootstrap(fake)["capabilities"]
         self.assertEqual(capabilities["write.admin.user"], "enabled")
         self.assertEqual(capabilities["write.admin.master"], "enabled")
+
+    def test_the_converted_user_flag_needs_no_deployment_marker_or_fence(self):
+        fake = gateway()
+        fake.deployment_approved = False
+        fake.fence_ready = False
+
+        capabilities = session.bootstrap(fake)["capabilities"]
+
+        # The user lane is native; the master lane and its ack stay closed.
+        self.assertEqual(capabilities["write.admin.user"], "enabled")
+        self.assertEqual(capabilities["write.admin.master"], "read_only")
 
     def test_the_flags_stay_read_only_when_the_gate_is_closed(self):
         fake = gateway(

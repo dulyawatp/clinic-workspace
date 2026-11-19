@@ -1,8 +1,7 @@
 import { FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
 import { nativeCsrfToken } from "./session";
 
-/** Distinct locks for the two admin contract surfaces. */
-const USER_LOCK = "clinic.admin-user-write.pending";
+/** Lock retained for the not-yet-converted master edit lane only. */
 const MASTER_LOCK = "clinic.admin-master-write.pending";
 
 const ACK_TOKEN = /^[0-9a-f]{64}$/;
@@ -52,7 +51,9 @@ export type MasterType = (typeof MASTER_TYPES)[number];
 
 export interface CreateUserInput {
   operation_key: string;
-  email?: string;
+  /** The installed User docname; a real email is required. */
+  email: string;
+  /** Optional installed ``username`` field, distinct from the docname. */
   username?: string;
   full_name: string;
   clinic_role_code: ClinicRoleCode;
@@ -109,10 +110,6 @@ function readLock(lock: string): boolean {
   }
 }
 
-export function adminUserWriteLocked(): boolean {
-  return readLock(USER_LOCK);
-}
-
 export function adminMasterWriteLocked(): boolean {
   return readLock(MASTER_LOCK);
 }
@@ -142,17 +139,36 @@ function clearLock(lock: string): void {
   notifyLock();
 }
 
-function errorCode(body: unknown): string | null {
+function messageCode(body: unknown): string | null {
   if (!isRecord(body) || !isRecord(body.message)) return null;
   return typeof body.message.code === "string" ? body.message.code : null;
 }
 
-function failure(status: number, body: unknown): NativeAdminWriteError {
+/** Frappe may wrap the error code in `message` or return it at top level. */
+function errorCode(body: unknown): string | null {
+  const wrapped = messageCode(body);
+  if (wrapped !== null) return wrapped;
+  if (isRecord(body) && typeof body.code === "string") return body.code;
+  return null;
+}
+
+/** Master lane keeps its original mapping, which is still fenced. */
+function masterFailure(status: number, body: unknown): NativeAdminWriteError {
   if (status === 409) {
-    const code = errorCode(body);
-    if (code === "OPERATION_CONFLICT")
+    if (messageCode(body) === "OPERATION_CONFLICT")
       return new NativeAdminWriteError("conflict");
     return new NativeAdminWriteError("locked");
+  }
+  return failure(status);
+}
+
+function failure(status: number, body?: unknown): NativeAdminWriteError {
+  if (status === 409) {
+    // Only an explicitly confirmed conflict is deterministic. WRITE_UNCERTAIN,
+    // an unclassified code or a malformed body may hide a committed write.
+    if (errorCode(body) === "OPERATION_CONFLICT")
+      return new NativeAdminWriteError("conflict");
+    return new NativeAdminWriteError("uncertain");
   }
   if (status === 401) return new NativeAdminWriteError("auth");
   if (status === 403) return new NativeAdminWriteError("forbidden");
@@ -163,7 +179,6 @@ function failure(status: number, body: unknown): NativeAdminWriteError {
 
 async function acknowledge(
   token: string,
-  kind: "admin_user" | "admin_master",
   operationKey: string,
   ackToken: string,
 ): Promise<void> {
@@ -175,7 +190,7 @@ async function acknowledge(
     },
     body: JSON.stringify({
       operation_key: operationKey,
-      kind,
+      kind: "admin_master",
       ack_token: ackToken,
     }),
   });
@@ -190,19 +205,20 @@ async function acknowledge(
     throw new NativeAdminWriteError("uncertain");
 }
 
-function parseUser(body: unknown): { result: CreatedUser; ackToken: string } {
+function parseUser(body: unknown): CreatedUser {
+  const message = isRecord(body) && isRecord(body.message) ? body.message : null;
   if (
-    !isRecord(body) ||
-    !isRecord(body.message) ||
-    !hasExactKeys(body.message, ["status", "user", "ackToken"]) ||
-    body.message.status !== "created" ||
-    typeof body.message.ackToken !== "string" ||
-    !ACK_TOKEN.test(body.message.ackToken) ||
-    !isRecord(body.message.user) ||
-    !hasExactKeys(body.message.user, ["user_id", "roles", "practitioner"])
+    !message ||
+    message.status !== "created" ||
+    // Exactly the converted result. A legacy `ackToken` means backend version
+    // skew may have left an old fence pending, so the outcome is uncertain and
+    // this client never acknowledges it.
+    !hasExactKeys(message, ["status", "user"]) ||
+    !isRecord(message.user) ||
+    !hasExactKeys(message.user, ["user_id", "roles", "practitioner"])
   )
     throw new NativeAdminWriteError("uncertain");
-  const user = body.message.user;
+  const user = message.user;
   if (
     !isText(user.user_id) ||
     !Array.isArray(user.roles) ||
@@ -211,12 +227,9 @@ function parseUser(body: unknown): { result: CreatedUser; ackToken: string } {
   )
     throw new NativeAdminWriteError("uncertain");
   return {
-    result: {
-      user_id: user.user_id,
-      roles: [...user.roles],
-      practitioner: user.practitioner,
-    },
-    ackToken: body.message.ackToken,
+    user_id: user.user_id,
+    roles: [...user.roles],
+    practitioner: user.practitioner,
   };
 }
 
@@ -251,9 +264,13 @@ function parseMaster(
 }
 
 /**
- * One guarded POST with one explicit acknowledgement and no retry anywhere.
- * The lock is persisted before dispatch and only cleared after a confirmed ack;
- * any uncertain outcome keeps it. The password is sent once and never stored.
+ * One native POST with no browser lock, no acknowledgement and no retry.
+ *
+ * The caller keeps the in-flight state. A deterministic refusal is reported as
+ * such; a lost or unreadable response is an uncertain outcome that the operator
+ * reconciles by inspecting current records before repeating the write. The
+ * password is sent once and never stored. A stale lock left by the previous
+ * fenced implementation is ignored rather than honoured.
  */
 export async function createNativeUser(
   input: CreateUserInput,
@@ -262,15 +279,12 @@ export async function createNativeUser(
     !isText(input.operation_key) ||
     !isText(input.full_name) ||
     !isText(input.password) ||
-    (!isText(input.email) && !isText(input.username))
+    !isText(input.email)
   )
     throw new NativeAdminWriteError("validation");
 
   const token = nativeCsrfToken();
-  if (!token || adminUserWriteLocked())
-    throw new NativeAdminWriteError("locked");
-
-  persistLock(USER_LOCK);
+  if (!token) throw new NativeAdminWriteError("auth");
 
   let response: Response;
   try {
@@ -282,47 +296,27 @@ export async function createNativeUser(
       },
       body: JSON.stringify({
         operation_key: input.operation_key,
+        email: input.email,
         full_name: input.full_name,
         clinic_role_code: input.clinic_role_code,
         password: input.password,
-        ...(input.email ? { email: input.email } : {}),
         ...(input.username ? { username: input.username } : {}),
         ...(input.practitioner ? { practitioner: input.practitioner } : {}),
       }),
     });
   } catch {
-    notifyLock();
+    // The request may have reached the server: the outcome is unknown.
     throw new NativeAdminWriteError("uncertain");
   }
 
   const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    notifyLock();
-    throw failure(response.status, body);
-  }
-
-  let parsed: { result: CreatedUser; ackToken: string };
-  try {
-    parsed = parseUser(body);
-  } catch {
-    notifyLock();
-    throw new NativeAdminWriteError("uncertain");
-  }
+  if (!response.ok) throw failure(response.status, body);
 
   try {
-    await acknowledge(
-      token,
-      "admin_user",
-      input.operation_key,
-      parsed.ackToken,
-    );
+    return parseUser(body);
   } catch {
-    notifyLock();
     throw new NativeAdminWriteError("uncertain");
   }
-
-  clearLock(USER_LOCK);
-  return parsed.result;
 }
 
 export async function editNativeMaster(
@@ -363,7 +357,7 @@ export async function editNativeMaster(
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
     notifyLock();
-    throw failure(response.status, body);
+    throw masterFailure(response.status, body);
   }
 
   let parsed: { result: CreatedMaster; ackToken: string };
@@ -375,12 +369,7 @@ export async function editNativeMaster(
   }
 
   try {
-    await acknowledge(
-      token,
-      "admin_master",
-      input.operation_key,
-      parsed.ackToken,
-    );
+    await acknowledge(token, input.operation_key, parsed.ackToken);
   } catch {
     notifyLock();
     throw new NativeAdminWriteError("uncertain");

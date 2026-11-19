@@ -132,6 +132,8 @@ export function AdminUserWriteForm() {
   const [practitioner, setPractitioner] = useState("");
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
+  /** A mounted form never resubmits an uncertain create; no persistent lock. */
+  const [outcomeUnknown, setOutcomeUnknown] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -139,7 +141,7 @@ export function AdminUserWriteForm() {
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (saving) return;
+    if (saving || outcomeUnknown) return;
     if (
       !email.trim() ||
       !fullName.trim() ||
@@ -165,7 +167,14 @@ export function AdminUserWriteForm() {
       setPassword("");
       setOpen(false);
     } catch (failure) {
+      const code = (failure as NativeAdminWriteError | null)?.code;
       setError(t(failureKey(failure)));
+      if (code === "uncertain" || code === "locked") {
+        // Honest unknown outcome: drop the credential and stop this mounted
+        // form from submitting again. Known refusals stay recoverable.
+        setPassword("");
+        setOutcomeUnknown(true);
+      }
     } finally {
       setSaving(false);
     }
@@ -256,7 +265,7 @@ export function AdminUserWriteForm() {
             </div>
           </div>
           <div className="admin-write-actions">
-            <Button type="submit" disabled={saving}>
+            <Button type="submit" disabled={saving || outcomeUnknown}>
               {saving ? t("adminWrite.saving") : t("adminWrite.createUser")}
             </Button>
             <Button

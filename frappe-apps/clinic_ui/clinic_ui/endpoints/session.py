@@ -312,13 +312,17 @@ def _finance_write_flags(gateway, settings, role):
 
 
 def _admin_write_flags(gateway, settings, role):
-    """Return ``(user, master)`` when the admin surface is open.
+    """Return ``(user, master)`` when each admin surface is open.
 
-    Independent of every clinical write flag: exact approved site, installed
-    preflight, the admin flag, the deployment marker, a ready fence store and
-    the caller's own native authority. The role allowlist and duplicate checks
-    are decided per request; these flags only advertise that the surface
-    exists.
+    The converted user lane is native: the exact approved site, the installed
+    preflight, the admin flag, the ADM role code and the caller's own native
+    ``User`` create authority. It does not need the historical deployment
+    marker or fence store.
+
+    The master lane (and its acknowledgement) remains on the fenced path and
+    additionally needs the private deployment marker and a ready fence store.
+    The role allowlist and duplicate checks are decided per request; these
+    flags only advertise that each surface exists.
     """
 
     disabled = (False, False)
@@ -329,15 +333,19 @@ def _admin_write_flags(gateway, settings, role):
             return disabled
         if not settings.admin_write_enabled:
             return disabled
-        if gateway.write_deployment_approved() is not True:
-            return disabled
-        if gateway.write_fence_ready() is not True:
-            return disabled
         if gateway.native_admin_can_write() is not True:
             return disabled
-        return True, True
     except Exception:
         return disabled
+
+    try:
+        if gateway.write_deployment_approved() is not True:
+            return True, False
+        if gateway.write_fence_ready() is not True:
+            return True, False
+    except Exception:
+        return True, False
+    return True, True
 
 
 def bootstrap(gateway):

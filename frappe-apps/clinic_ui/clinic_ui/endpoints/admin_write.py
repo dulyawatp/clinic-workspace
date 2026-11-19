@@ -1,6 +1,20 @@
 """Designed admin users + masters writes (default off).
 
-Order is fixed and test-asserted for both operations:
+``create_user`` is the converted native development lane. It requires the
+shared read gate (including the exact approved site), the explicit same-session
+CSRF token, the admin flag, the installed-field preflight, the caller's native
+``User`` create authority and the assignable-role boundary, then performs one
+native User mutation with its roles and optional practitioner link, one
+closed-world re-read and one explicit commit. The historical operation fence,
+deployment marker, write budget, receipt and acknowledgement are not read or
+written: unresolved historical entries neither block nor change this lane. A
+post-dispatch failure is uncertain, never retried, and returns
+``409 {"code": "WRITE_UNCERTAIN"}`` after a rollback (a rollback failure raises
+:class:`RollbackFailed` so Frappe cleanup handles it).
+
+``edit_master`` and ``acknowledge`` remain on the historical fenced path below,
+closed unless the private deployment marker and fence store are approved. For
+them the order is still fixed and test-asserted:
 
 1. shared read gate plus the explicit same-session CSRF and admin-write
    deployment gates,
@@ -8,32 +22,31 @@ Order is fixed and test-asserted for both operations:
 3. strict body validation,
 4. every pre-fence refusal with a named line: the assignable-role boundary
    (System Manager / Healthcare Administrator may never be assigned), missing
-   installed roles, duplicate user/practitioner/master identifiers, an
-   unknown master variant and an exhausted budget,
+   installed roles, duplicate practitioner/master identifiers, an unknown
+   master variant and an exhausted budget,
 5. the persistent site-wide fence, then the same decisions again against
    current rows,
-6. one native mutation (a User with its roles and optional practitioner link,
-   or one master row with its bundled price/account child) and one closed-world
-   re-read,
+6. one native mutation (one master row with its bundled price/account child)
+   and one closed-world re-read,
 7. the receipt encoded while the native transaction is still uncommitted, so a
    receipt refusal is deterministic and ends ``UNKNOWN`` with no commit, then
    one explicit commit and the terminal receipt that carries the created name
-   only — never a credential,
+   only,
 8. the one-shot acknowledgement token, bound to that exact committed receipt
    rather than to a second post-commit encode.
 
-Every designed refusal happens **before** the fence claim. A post-claim refusal
-is a bug: the partial transaction is rolled back and the operation is locked
-rather than silently dropped. A post-dispatch failure is uncertain and is never
-auto-reconciled: the key keeps its ``DISPATCHED`` record, or gains an
-``UNKNOWN`` terminal when the outcome cannot be established (including a commit
-that may have landed without its terminal append). Both are unresolved for the
-whole deployment: the fence's unresolved check refuses every actor and every new
-key site-wide until an operator reconciles it, and the response is
-``409 {"code": "WRITE_LOCKED"}`` with no retry. If rolling back the partial
-native transaction itself fails, the endpoint raises :class:`RollbackFailed` to
-Frappe cleanup instead of returning that 409 — a normal response could let the
-framework's request-end commit persist the partial write.
+For the fenced operations every designed refusal happens **before** the fence
+claim. A post-claim refusal is a bug: the partial transaction is rolled back and
+the operation is locked rather than silently dropped. A post-dispatch failure is
+uncertain and is never auto-reconciled: the key keeps its ``DISPATCHED`` record,
+or gains an ``UNKNOWN`` terminal when the outcome cannot be established. Both
+are unresolved for the whole deployment: the fence's unresolved check refuses
+every actor and every new key site-wide until an operator reconciles it, and the
+response is ``409 {"code": "WRITE_LOCKED"}`` with no retry. If rolling back the
+partial native transaction itself fails, the endpoint raises
+:class:`RollbackFailed` to Frappe cleanup instead of returning that 409 — a
+normal response could let the framework's request-end commit persist the partial
+write.
 """
 
 from clinic_ui.core import admin_contract, patient_write
@@ -48,6 +61,7 @@ HTTP_CONFLICT = 409
 VALIDATION_CODE = "VALIDATION"
 LOCKED_CODE = "WRITE_LOCKED"
 CONFLICT_CODE = "OPERATION_CONFLICT"
+UNCERTAIN_CODE = "WRITE_UNCERTAIN"
 
 CREATED_RESULT = "created"
 
@@ -79,7 +93,7 @@ def _locked_response(gateway):
 
 
 def _refusal(gateway, problem):
-    """Return one named pre-fence refusal as the fixed safe envelope."""
+    """Return one named pre-mutation refusal as the fixed safe envelope."""
 
     if not problem:
         return None
@@ -165,7 +179,7 @@ def _user_native_payload(payload, roles):
 
 
 def _user_problems(gateway, settings, payload):
-    """Every pre-fence user decision, in operator order."""
+    """Every pre-mutation user decision, in operator order."""
 
     problem = admin_contract.role_problem(
         settings.as_role_map(), payload["clinic_role_code"]
@@ -183,13 +197,15 @@ def _user_problems(gateway, settings, payload):
     if gateway.native_admin_user_exists(identifier):
         return "user already exists"
     username = payload["username"]
-    if username and username != identifier and gateway.native_admin_user_exists(
-        username
-    ):
+    if username and gateway.native_admin_username_exists(username):
         return "username already exists"
     practitioner = payload["practitioner"]
     if practitioner and not gateway.native_admin_practitioner_exists(practitioner):
         return "practitioner does not exist"
+    if practitioner and gateway.native_admin_practitioner_is_linked(practitioner):
+        # The linked user is never reported: the actor only learns that the
+        # practitioner is unavailable, not who holds the link.
+        return "practitioner is already linked"
     return None
 
 
@@ -230,14 +246,6 @@ def _master_problems(gateway, payload):
     return None
 
 
-def _user_digest_fields(payload):
-    return {
-        "identifier": admin_contract.user_identifier(payload),
-        "clinic_role_code": payload["clinic_role_code"],
-        "practitioner": payload["practitioner"] or "",
-    }
-
-
 def _master_digest_fields(payload):
     return {
         "identifier": admin_contract.identifier_for(
@@ -269,21 +277,19 @@ def _finish_fence(gateway, claim, *, kind, identifier, master_type=""):
     return receipt
 
 
-def _success_user(gateway, user, roles, practitioner, ack_token):
-    try:
-        payload = {
-            "status": CREATED_RESULT,
-            "user": {
-                "user_id": user,
-                "roles": list(roles),
-                "practitioner": practitioner,
-            },
-            "ackToken": ack_token,
-        }
-        gateway.strip_message_channels()
-        return gateway.respond_write(HTTP_OK, payload)
-    except Exception as exc:
-        raise SuccessUncertain() from exc
+def _success_user(gateway, user, roles, practitioner):
+    """Build the canonical user result; no credential and no ack token."""
+
+    payload = {
+        "status": CREATED_RESULT,
+        "user": {
+            "user_id": user,
+            "roles": list(roles),
+            "practitioner": practitioner,
+        },
+    }
+    gateway.strip_message_channels()
+    return gateway.respond_write(HTTP_OK, payload)
 
 
 def _success_master(gateway, master_type, name, ack_token):
@@ -303,136 +309,118 @@ def _success_master(gateway, master_type, name, ack_token):
 
 
 def create_user(gateway, body, csrf_token=None):
-    """Create one user with its roles and optional practitioner link."""
+    """Create one native user with its roles and optional practitioner link.
 
-    settings, view, _role = _shared_gate(gateway, csrf_token)
+    This is the converted development lane: it relies on Frappe/Marley
+    permissions, validation, controller lifecycle and one explicit native
+    commit instead of the historical operation fence, deployment marker, write
+    budget, receipt and acknowledgement barrier. Unresolved entries in that
+    historical ledger are never read, changed or used to block this lane.
+
+    Order is fixed and test-asserted:
+
+    1. shared read gate (no-store, session, exact site configuration, ADM role),
+    2. explicit same-session CSRF token check (ignores framework bypasses),
+    3. installed-field preflight and the caller's native ``User`` create
+       authority,
+    4. strict body validation, the installed email-policy preflight and every
+       designed refusal: the assignable-role boundary, missing installed roles,
+       duplicate user/username identifiers, an unknown practitioner and a
+       practitioner that is already linked (the linked user is never named),
+    5. the practitioner's native write authority and the native ``User
+       Permission`` create authority (the installed practitioner hook creates
+       that row) before any mutation,
+    6. one native mutation (a User with its roles and optional practitioner link
+       through the practitioner's own save lifecycle) and one closed-world
+       re-read,
+    7. one explicit commit, then the canonical ``{"status", "user"}`` result.
+       No credential and no acknowledgement token are ever returned.
+
+    A post-dispatch failure is uncertain: the endpoint rolls back the partial
+    transaction (a rollback failure raises :class:`RollbackFailed` so Frappe
+    cleanup handles it) and returns ``409 {"code": "WRITE_UNCERTAIN"}``. Nothing
+    is retried automatically and no success is claimed that was not read back.
+    """
+
+    settings, _view, _role = common.authorize_admin_user_write(
+        gateway, ADMIN_ROLE_CODES, csrf_token
+    )
+    if gateway.native_admin_install_problem() is not None:
+        gateway.deny()
+    if gateway.native_admin_can_write() is not True:
+        gateway.deny()
+
     try:
         payload = admin_contract.validate_create_user(body)
     except admin_contract.AdminContractError:
         return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
 
-    actor = view.user
+    if gateway.native_admin_email_problem(payload["email"]) is not None:
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    practitioner = payload["practitioner"]
     refused = _refusal(gateway, _user_problems(gateway, settings, payload))
     if refused is not None:
         return refused
 
-    kind = admin_contract.ADMIN_USER_KIND
-    try:
-        digest = admin_contract.operation_digest(
-            settings.epoch_secret,
-            kind=kind,
-            operation_key=payload["operation_key"],
-            fields=_user_digest_fields(payload),
-        )
-        budget_ok = _budget_remaining(gateway, kind)
-    except admin_contract.AdminContractError:
-        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
-    except (
-        patient_write.StoreUnavailable,
-        patient_write.WriteUncertain,
-        patient_write.WriteLocked,
+    if (
+        practitioner
+        and gateway.native_admin_can_write_practitioner(practitioner) is not True
     ):
-        return _locked_response(gateway)
-    if not budget_ok:
-        return _locked_response(gateway)
-
-    user = None
-    roles = ()
-    receipt = None
-    try:
-        with gateway.admin_write_fence(
-            actor, kind, payload["operation_key"], digest
-        ) as claim:
-            try:
-                _require_budget(gateway, kind)
-                gateway.reset_native_read_snapshot()
-                fence_settings, fence_view, fence_role = _shared_gate(
-                    gateway, csrf_token
-                )
-                if fence_view.user != actor:
-                    raise patient_write.WriteUncertain()
-                if fence_role not in ADMIN_ROLE_CODES:
-                    gateway.deny()
-                if _user_problems(gateway, fence_settings, payload) is not None:
-                    raise admin_contract.AdminTargetNotEligible()
-                roles = admin_contract.assignable_roles(
-                    fence_settings.as_role_map(),
-                    payload["clinic_role_code"],
-                )
-                if not roles:
-                    raise admin_contract.AdminTargetNotEligible()
-                user = gateway.create_native_admin_user(
-                    _user_native_payload(payload, roles)
-                )
-                facts = gateway.native_admin_user_facts(user)
-                expected = {
-                    "identifier": user,
-                    "roles": roles,
-                    "practitioner": payload["practitioner"],
-                }
-                if admin_contract.user_facts_problem(facts, expected) is not None:
-                    raise patient_write.WriteUncertain()
-                receipt = _finish_fence(
-                    gateway, claim, kind=kind, identifier=user
-                )
-            except (
-                admin_contract.AdminTargetNotEligible,
-                admin_contract.AdminBudgetExhausted,
-            ):
-                _rollback_or_raise(gateway)
-                raise
-            except (
-                patient_write.WriteLocked,
-                patient_write.WriteConflict,
-                patient_write.StoreUnavailable,
-                patient_write.WriteUncertain,
-                patient_write.UnsafeSideEffect,
-            ):
-                _rollback_or_raise(gateway)
-                raise
-            except Exception:
-                _mark_unknown(
-                    claim,
-                    "native admin user create outcome not established",
-                )
-                _rollback_or_raise(gateway)
-                raise patient_write.WriteUncertain() from None
-    except admin_contract.AdminTargetNotEligible:
-        return _locked_response(gateway)
-    except admin_contract.AdminBudgetExhausted:
-        return _locked_response(gateway)
-    except patient_write.WriteLocked:
-        return _locked_response(gateway)
-    except patient_write.WriteConflict:
-        return _respond_error(gateway, HTTP_CONFLICT, CONFLICT_CODE)
-    except patient_write.StoreUnavailable:
-        return _locked_response(gateway)
-    except patient_write.WriteUncertain:
-        return _locked_response(gateway)
-    except patient_write.UnsafeSideEffect:
+        gateway.deny()
+    if (
+        practitioner
+        and gateway.native_admin_can_create_user_permission() is not True
+    ):
+        # The practitioner update hook creates a User Permission; without that
+        # authority the save would fail after the User insert.
         gateway.deny()
 
+    roles = admin_contract.assignable_roles(
+        settings.as_role_map(), payload["clinic_role_code"]
+    )
+    if not roles:
+        return _respond_error(gateway, HTTP_REFUSED, VALIDATION_CODE)
+
     try:
-        ack_token = admin_contract.ack_token(
-            settings.epoch_secret,
-            gateway.site,
-            actor,
-            kind,
-            payload["operation_key"],
-            receipt,
+        user = gateway.create_native_admin_user(
+            _user_native_payload(payload, roles)
         )
-        return _success_user(
-            gateway, user, roles, payload["practitioner"], ack_token
+    except Exception:
+        # The insert may already have reached the controller and its hooks. A
+        # rollback discards the site transaction but cannot establish that no
+        # external side effect happened, so every failure here is uncertain.
+        _rollback_or_raise(gateway)
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
+
+    try:
+        facts = gateway.native_admin_user_facts(user)
+        expected = {
+            "identifier": user,
+            "roles": roles,
+            "practitioner": payload["practitioner"],
+        }
+        mismatch = (
+            admin_contract.user_facts_problem(facts, expected) is not None
         )
-    except (SuccessUncertain, admin_contract.AdminContractError):
-        _latch_or_raise(
-            gateway,
-            actor,
-            kind,
-            payload["operation_key"],
-            "post-commit admin user response construction failed",
-        )
-        return _locked_response(gateway)
+    except Exception:
+        mismatch = True
+    if mismatch:
+        _rollback_or_raise(gateway)
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
+
+    try:
+        gateway.commit()
+    except Exception:
+        # The native write was dispatched; the commit outcome is unknown.
+        _rollback_or_raise(gateway)
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
+
+    try:
+        return _success_user(gateway, user, roles, payload["practitioner"])
+    except Exception:
+        # The native write already committed; its result is not established.
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
 
 
 def edit_master(gateway, body, csrf_token=None):

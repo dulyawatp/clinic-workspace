@@ -38,6 +38,7 @@ CONVERTED = {
     "write.procedure.create",
     "write.stock.consume",
     "write.purchase_order.draft",
+    "write.admin.user",
 }
 
 PROCEDURE = {
@@ -49,7 +50,16 @@ PROCEDURE = {
 # The purchase lane converted only its draft. Submit and the PO-referenced
 # receipt stay on the historical fence: an unresolved ledger keeps them off.
 PURCHASE = {"write.purchase_order.draft"}
-FENCED = {"write.purchase_order.submit", "write.stock.receive"}
+FENCED = {
+    "write.purchase_order.submit",
+    "write.stock.receive",
+    "write.admin.master",
+}
+
+# The admin lane converted only its user write. The master write stays fenced
+# and is asserted disabled while the ledger carries unresolved keys.
+ADMIN = {"write.admin.user"}
+ADMIN_FENCED = {"write.admin.master"}
 
 # The procedure lane completes and creates without consuming stock. Stock
 # consumption keeps its own review and stays read_only even when the procedure
@@ -71,7 +81,6 @@ UNRELATED = {
     "write.purchase_order.submit",
     "write.invoice.submit",
     "write.payment.receive",
-    "write.admin.user",
     "write.admin.master",
 }
 
@@ -101,12 +110,12 @@ def _capabilities(gates, role="DOC"):
 
 
 class LaneTests(unittest.TestCase):
-    def test_converted_set_is_the_patient_appointment_procedure_and_purchase_lanes(self):
+    def test_converted_set_is_the_patient_appointment_procedure_purchase_and_admin_lanes(self):
         self.assertEqual(set(development.CONVERTED), CONVERTED)
         self.assertFalse(CONVERTED & strict.DEFERRED_WRITE_CAPABILITIES)
         self.assertEqual(
             development.CONVERTED_FAMILIES,
-            ("patient", "appointment", "procedure", "purchase"),
+            ("patient", "appointment", "procedure", "purchase", "admin"),
         )
         self.assertEqual(set(development.FENCED_WRITES), FENCED)
         self.assertFalse(CONVERTED & FENCED)
@@ -269,7 +278,8 @@ class LaneTests(unittest.TestCase):
         report = development.lane_report(capabilities, gates)
 
         self.assertEqual(
-            tuple(report), ("patient", "appointment", "procedure", "purchase")
+            tuple(report),
+            ("patient", "appointment", "procedure", "purchase", "admin"),
         )
         for name in PROCEDURE:
             self.assertEqual(
@@ -390,6 +400,128 @@ class PurchaseLaneTests(unittest.TestCase):
         )
 
 
+class AdminLaneTests(unittest.TestCase):
+    def test_user_is_the_only_converted_admin_write(self):
+        admin = {
+            name
+            for name, (family, _roles) in strict.WRITE_CAPABILITY_GATES.items()
+            if family == "admin"
+        }
+
+        self.assertEqual(admin & set(development.CONVERTED), ADMIN)
+        self.assertEqual(admin - set(development.CONVERTED), ADMIN_FENCED)
+        self.assertTrue(ADMIN_FENCED <= set(development.FENCED_WRITES))
+        self.assertEqual(
+            strict.WRITE_CAPABILITY_GATES["write.admin.user"], ("admin", ("ADM",))
+        )
+
+    def test_adm_user_enabled_when_the_admin_gate_is_on(self):
+        gates = _gates(admin=1)
+        capabilities = _capabilities(gates, role="ADM")
+
+        self.assertEqual(capabilities["write.admin.user"], "enabled")
+        self.assertEqual(capabilities["write.admin.master"], "read_only")
+        self.assertEqual(
+            development.lane_problems(capabilities, gates, role="ADM"), []
+        )
+
+    def test_adm_user_must_stay_disabled_when_the_admin_gate_is_off(self):
+        gates = _gates(patient=1, appointment=1)
+        capabilities = _capabilities(gates, role="ADM")
+
+        self.assertEqual(capabilities["write.admin.user"], "read_only")
+        self.assertEqual(
+            development.lane_problems(capabilities, gates, role="ADM"), []
+        )
+
+    def test_adm_user_enabled_while_the_admin_gate_is_off_is_reported(self):
+        gates = _gates(patient=1, appointment=1)
+        capabilities = dict(
+            _capabilities(gates, role="ADM"),
+            **{"write.admin.user": "enabled"},
+        )
+        problems = development.lane_problems(capabilities, gates, role="ADM")
+
+        self.assertTrue(
+            any(
+                "enabled while closed" in p and "write.admin.user" in p
+                for p in problems
+            ),
+            problems,
+        )
+
+    def test_adm_user_disabled_with_the_admin_gate_on_is_reported(self):
+        gates = _gates(admin=1)
+        capabilities = dict(
+            _capabilities(gates, role="ADM"),
+            **{"write.admin.user": "read_only"},
+        )
+        problems = development.lane_problems(capabilities, gates, role="ADM")
+
+        self.assertTrue(
+            any("not enabled" in p and "write.admin.user" in p for p in problems),
+            problems,
+        )
+
+    def test_admin_master_enabled_with_an_unresolved_ledger_is_reported(self):
+        gates = _gates(admin=1)
+        capabilities = dict(
+            _capabilities(gates, role="ADM"),
+            **{"write.admin.master": "enabled"},
+        )
+        problems = development.fenced_write_problems(capabilities, 2)
+
+        self.assertTrue(
+            any("write.admin.master" in p for p in problems), problems
+        )
+
+    def test_admin_master_stays_disabled_with_an_unresolved_ledger(self):
+        gates = _gates(admin=1)
+        capabilities = _capabilities(gates, role="ADM")
+
+        self.assertEqual(capabilities["write.admin.master"], "read_only")
+        self.assertEqual(development.fenced_write_problems(capabilities, 2), [])
+
+    def test_doc_bootstrap_does_not_expect_the_admin_lane(self):
+        gates = _gates(patient=1, appointment=1, procedure=1, admin=1)
+        capabilities = _capabilities(gates)
+
+        self.assertEqual(capabilities["write.admin.user"], "read_only")
+        self.assertEqual(capabilities["write.admin.master"], "read_only")
+        self.assertEqual(development.lane_problems(capabilities, gates), [])
+
+    def test_doc_admin_user_enabled_is_reported(self):
+        gates = _gates(patient=1, appointment=1, procedure=1, admin=1)
+        capabilities = dict(
+            _capabilities(gates), **{"write.admin.user": "enabled"}
+        )
+        problems = development.lane_problems(capabilities, gates)
+
+        self.assertTrue(
+            any(
+                "enabled while closed" in p and "write.admin.user" in p
+                for p in problems
+            ),
+            problems,
+        )
+
+    def test_adm_lane_report_covers_the_admin_family(self):
+        gates = _gates(admin=1)
+        report = development.lane_report(
+            _capabilities(gates, role="ADM"), gates, role="ADM"
+        )
+
+        self.assertIn("admin", report)
+        self.assertEqual(
+            report["admin"]["write.admin.user"],
+            {"expected": True, "observed": "enabled"},
+        )
+        self.assertEqual(
+            report["admin"]["write.admin.master"],
+            {"expected": False, "observed": "read_only"},
+        )
+
+
 class FencedWriteTests(unittest.TestCase):
     def test_unresolved_ledger_keeps_submit_and_receipt_disabled(self):
         gates = _gates(patient=1, appointment=1, procedure=1, purchase=1)
@@ -460,6 +592,33 @@ class CredentialTests(unittest.TestCase):
         credentials = {"users": [{"clinic_code": "DOC"}, mgr]}
 
         self.assertIs(development.credential_for(credentials, "MGR"), mgr)
+
+    def test_missing_adm_credential_fails_instead_of_passing_unverified(self):
+        credentials = {
+            "users": [
+                {"clinic_code": "DOC", "email": "doc@example.invalid", "password": "x"},
+                {"clinic_code": "ADM", "email": "adm@example.invalid"},
+            ]
+        }
+        problem = development.adm_credential_problem(credentials)
+
+        self.assertIsNotNone(problem)
+        self.assertIn("ADM", problem)
+        self.assertIn("cannot be verified", problem)
+
+    def test_complete_adm_credential_raises_no_problem(self):
+        credentials = {
+            "users": [
+                {"clinic_code": "DOC", "email": "doc@example.invalid", "password": "x"},
+                {
+                    "clinic_code": "ADM",
+                    "email": "adm@example.invalid",
+                    "password": "x",
+                },
+            ]
+        }
+
+        self.assertIsNone(development.adm_credential_problem(credentials))
 
 
 class FenceTests(unittest.TestCase):
