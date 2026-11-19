@@ -482,6 +482,45 @@ class AdminLaneTests(unittest.TestCase):
         self.assertEqual(capabilities["write.admin.master"], "read_only")
         self.assertEqual(development.fenced_write_problems(capabilities, 2), [])
 
+    def test_contract_adm_must_not_advertise_the_user_lane(self):
+        # The contract ADM user carries the clinic role only: it does not hold
+        # native User create, so an enabled lane there would be advertised from
+        # the site flag rather than from authority.
+        gates = _gates(admin=1)
+        capabilities = _capabilities(gates, role="ADM")
+        problems = development.contract_admin_problems(capabilities, 2)
+
+        self.assertTrue(
+            any(
+                "User create authority" in p and "write.admin.user" in p
+                for p in problems
+            ),
+            problems,
+        )
+
+    def test_contract_adm_read_only_admin_writes_pass(self):
+        gates = _gates(admin=1)
+        capabilities = {name: "read_only" for name in strict.WRITE_CAPABILITY_GATES}
+
+        self.assertEqual(development.contract_admin_problems(capabilities, 2), [])
+
+    def test_contract_adm_enabled_master_with_an_unresolved_ledger_is_reported(self):
+        capabilities = {
+            name: "read_only" for name in strict.WRITE_CAPABILITY_GATES
+        }
+        capabilities["write.admin.master"] = "enabled"
+        problems = development.contract_admin_problems(capabilities, 2)
+
+        self.assertTrue(
+            any("write.admin.master" in p for p in problems), problems
+        )
+
+    def test_contract_adm_unreadable_capabilities_are_reported(self):
+        self.assertEqual(
+            development.contract_admin_problems(None, 2),
+            ["capabilities are not a map"],
+        )
+
     def test_doc_bootstrap_does_not_expect_the_admin_lane(self):
         gates = _gates(patient=1, appointment=1, procedure=1, admin=1)
         capabilities = _capabilities(gates)
@@ -603,10 +642,10 @@ class CredentialTests(unittest.TestCase):
         problem = development.adm_credential_problem(credentials)
 
         self.assertIsNotNone(problem)
-        self.assertIn("ADM", problem)
+        self.assertIn("adm_bootstrap", problem)
         self.assertIn("cannot be verified", problem)
 
-    def test_complete_adm_credential_raises_no_problem(self):
+    def test_complete_adm_bootstrap_credential_raises_no_problem(self):
         credentials = {
             "users": [
                 {"clinic_code": "DOC", "email": "doc@example.invalid", "password": "x"},
@@ -615,10 +654,63 @@ class CredentialTests(unittest.TestCase):
                     "email": "adm@example.invalid",
                     "password": "x",
                 },
-            ]
+            ],
+            "adm_bootstrap": {
+                "email": "bootstrap@example.invalid",
+                "password": "x",
+                "roles": ["System Manager", "Item Manager"],
+            },
         }
 
         self.assertIsNone(development.adm_credential_problem(credentials))
+
+    def test_contract_adm_user_does_not_substitute_for_the_bootstrap(self):
+        # A complete contract ADM credential (clinic role only, no native User
+        # create) must not be accepted as the enabled-lane identity.
+        credentials = {
+            "users": [
+                {
+                    "clinic_code": "ADM",
+                    "email": "adm@example.invalid",
+                    "password": "x",
+                    "roles": ["Item Manager"],
+                }
+            ]
+        }
+
+        self.assertIsNone(development.adm_bootstrap_credential(credentials))
+        self.assertIsNotNone(development.adm_credential_problem(credentials))
+
+    def test_adm_bootstrap_credential_is_selected_over_the_contract_user(self):
+        bootstrap = {
+            "email": "bootstrap@example.invalid",
+            "password": "x",
+            "roles": ["System Manager", "Item Manager"],
+        }
+        credentials = {
+            "users": [
+                {"clinic_code": "ADM", "email": "adm@example.invalid", "password": "x"}
+            ],
+            "adm_bootstrap": bootstrap,
+        }
+
+        self.assertIs(development.adm_bootstrap_credential(credentials), bootstrap)
+        self.assertEqual(
+            development.credential_for(credentials, "ADM")["email"],
+            "adm@example.invalid",
+        )
+
+    def test_incomplete_adm_bootstrap_is_absent(self):
+        for entry in (
+            {"email": "bootstrap@example.invalid"},
+            {"password": "x"},
+            {"email": "", "password": "x"},
+            "not-a-map",
+        ):
+            with self.subTest(entry=entry):
+                self.assertIsNone(
+                    development.adm_bootstrap_credential({"adm_bootstrap": entry})
+                )
 
 
 class FenceTests(unittest.TestCase):

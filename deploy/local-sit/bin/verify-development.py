@@ -15,13 +15,15 @@ for ADM, following the admin gate; ``write.admin.master`` stays fenced like
 submit and is asserted disabled while the ledger has unresolved keys. The DOC
 bootstrap covers DOC only; the MGR purchase lane is checked from its own
 bootstrap when the private state already carries that credential, and the run
-reports the gap otherwise. The ADM bootstrap cannot be optional: the DOC
-bootstrap cannot speak for the converted admin lane, so a missing ADM credential
-fails this run rather than passing it unverified. This reads the DOC, MGR and
-ADM bootstraps, the synthetic directory and the historical ledger, and compares
-the exact counts the caller supplies. It writes, retries and repairs nothing,
-and it claims nothing about the deployment as a whole: the strict gate is
-verify.py.
+reports the gap otherwise. The ADM bootstrap cannot be optional and cannot be
+the contract-created ADM user: the enabled admin lane needs the caller's own
+native ``User`` create authority, which only the private ``adm_bootstrap``
+identity carries, so a missing ``adm_bootstrap`` fails this run rather than
+passing the lane unverified. The contract ADM identity is read separately and
+must never advertise the admin writes. This reads the DOC, MGR and ADM
+bootstraps, the synthetic directory and the historical ledger, and compares the
+exact counts the caller supplies. It writes, retries and repairs nothing, and it
+claims nothing about the deployment as a whole: the strict gate is verify.py.
 """
 
 from __future__ import annotations
@@ -98,17 +100,39 @@ def credential_for(credentials, code):
     return None
 
 
+def adm_bootstrap_credential(credentials):
+    """Return the complete private ``adm_bootstrap`` entry, or ``None``.
+
+    The converted admin lane advertises ``write.admin.user`` only for a caller
+    who already holds native ``User`` create authority. That is the bootstrap
+    identity (System Manager + Item Manager), never the contract-created ADM
+    user, which carries the clinic role alone: its bootstrap cannot demonstrate
+    an enabled lane even when the site gate is open.
+    """
+
+    entry = credentials.get("adm_bootstrap") if isinstance(credentials, dict) else None
+    if (
+        isinstance(entry, dict)
+        and entry.get("email")
+        and entry.get("password")
+    ):
+        return entry
+    return None
+
+
 def adm_credential_problem(credentials):
     """Return why the ADM bootstrap cannot run, or ``None``.
 
-    The admin lane converted ``write.admin.user`` for ADM only, and the DOC
-    bootstrap cannot speak for another role, so a missing ADM credential makes
-    this run fail instead of leaving the lane unverified and green.
+    The admin lane converted ``write.admin.user`` for ADM only, and the enabled
+    state is decided by the caller's own native authority, so this run needs the
+    private ``adm_bootstrap`` identity. A contract ADM user is not a substitute:
+    a missing bootstrap credential fails this run rather than leaving the lane
+    unverified and green.
     """
 
-    if credential_for(credentials, "ADM") is None:
+    if adm_bootstrap_credential(credentials) is None:
         return (
-            "no complete ADM synthetic credential in the private state; "
+            "no complete adm_bootstrap credential in the private state; "
             "the converted admin lane cannot be verified"
         )
     return None
@@ -198,6 +222,29 @@ def fenced_write_problems(capabilities, unresolved):
             f"{open_fenced}"
         ]
     return []
+
+
+def contract_admin_problems(capabilities, unresolved):
+    """Return problems when the contract ADM identity advertises admin writes.
+
+    The converted user lane needs the caller's own native ``User`` create
+    authority, which the contract-created ADM user does not hold. Its bootstrap
+    must therefore stay ``read_only`` for ``write.admin.user``, and the fenced
+    ``write.admin.master`` keeps the same unresolved-ledger expectation. An
+    enabled state there would mean the capability was advertised from the site
+    flag rather than from native authority.
+    """
+
+    if not isinstance(capabilities, dict):
+        return ["capabilities are not a map"]
+    problems = []
+    if capabilities.get("write.admin.user") == "enabled":
+        problems.append(
+            "contract ADM identity advertises write.admin.user without native "
+            "User create authority"
+        )
+    problems += fenced_write_problems(capabilities, unresolved)
+    return problems
 
 
 def lane_report(capabilities, gates, role="DOC"):
@@ -397,16 +444,17 @@ def main(argv=None):
             },
         )
 
-    # The admin lane converted ``write.admin.user`` for ADM only. The DOC
-    # bootstrap cannot speak for that role and there is no fallback, so a
-    # missing or unusable ADM credential fails this run instead of leaving the
-    # converted lane unverified and green.
-    adm = credential_for(credentials, "ADM")
+    # The admin lane converted ``write.admin.user`` for ADM only, and its
+    # enabled state needs the caller's own native ``User`` create authority.
+    # That is the private ``adm_bootstrap`` identity, never the contract ADM
+    # user, so the bootstrap credential is required: without it the run fails
+    # instead of leaving the converted lane unverified and green.
+    adm = adm_bootstrap_credential(credentials)
     adm_gap = adm_credential_problem(credentials)
     record(
-        "synthetic ADM credential present",
+        "synthetic ADM bootstrap credential present",
         adm_gap is None,
-        adm_gap or {"email": adm["email"]},
+        adm_gap or {"email": adm["email"], "roles": adm.get("roles")},
     )
     adm_capabilities = None
     if adm is not None:
@@ -421,7 +469,7 @@ def main(argv=None):
             data=urllib.parse.urlencode(adm_login).encode(),
         )
         record(
-            "synthetic ADM login",
+            "synthetic ADM bootstrap login",
             status == 200 and b"Logged In" in body,
             {"status": status, "email": adm["email"]},
         )
@@ -441,6 +489,47 @@ def main(argv=None):
                 "roles": adm_boot.get("user", {}).get("roles"),
             },
         )
+
+    # The contract-created ADM user is read separately and never stands in for
+    # the bootstrap: it must not advertise the admin writes it cannot execute.
+    contract_adm = credential_for(credentials, "ADM")
+    contract_adm_capabilities = None
+    contract_adm_roles = None
+    if contract_adm is None:
+        print(
+            "UNVERIFIED contract ADM identity: no complete ADM synthetic "
+            "credential in the private state"
+        )
+    elif adm is not None and contract_adm["email"] == adm["email"]:
+        print(
+            "UNVERIFIED contract ADM identity: the ADM synthetic credential is "
+            "the adm_bootstrap identity itself"
+        )
+    else:
+        contract_adm_opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+        )
+        contract_adm_login = {
+            "usr": contract_adm["email"],
+            "pwd": contract_adm["password"],
+        }
+        status, _, body = strict.request(
+            contract_adm_opener,
+            "/api/method/login",
+            method="POST",
+            data=urllib.parse.urlencode(contract_adm_login).encode(),
+        )
+        record(
+            "synthetic contract ADM login",
+            status == 200 and b"Logged In" in body,
+            {"status": status, "email": contract_adm["email"]},
+        )
+        status, _, body = strict.request(
+            contract_adm_opener, "/api/method/clinic_ui.api.session.bootstrap"
+        )
+        contract_adm_boot = json.loads(body).get("message", {}) if status == 200 else {}
+        contract_adm_capabilities = contract_adm_boot.get("capabilities") or {}
+        contract_adm_roles = contract_adm_boot.get("user", {}).get("roles")
 
     status, _, body = strict.request(
         opener, "/api/method/clinic_ui.api.directory.synthetic_patients"
@@ -504,11 +593,27 @@ def main(argv=None):
             not problems,
             {
                 "role": "ADM",
+                "identity": "adm_bootstrap",
                 "lanes": lane_report(adm_capabilities, gates, role="ADM"),
                 "fenced": {
                     name: adm_capabilities.get(name)
                     for name in sorted(FENCED_WRITES)
                 },
+                "problems": problems,
+            },
+        )
+
+    if contract_adm_capabilities is not None:
+        problems = contract_admin_problems(
+            contract_adm_capabilities, ledger.get("unresolved")
+        )
+        record(
+            "contract ADM identity does not advertise the admin writes",
+            contract_adm_roles == ["ADM"] and not problems,
+            {
+                "role": contract_adm_roles,
+                "admin_user": contract_adm_capabilities.get("write.admin.user"),
+                "admin_master": contract_adm_capabilities.get("write.admin.master"),
                 "problems": problems,
             },
         )
