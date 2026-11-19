@@ -1,5 +1,8 @@
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Link, Navigate } from "react-router-dom";
+import { ROUTES } from "../../app/routes";
+import { useSession } from "../../app/SessionProvider";
 import { Badge } from "../../design/components";
 import {
   createNativeEncounterDraft,
@@ -9,12 +12,13 @@ import {
   readNativeEncounterPractitioner,
   searchNativeEncounterPatients,
 } from "../../transport/native/encounter-draft";
+import { nativeTransportEnabled } from "../../transport/native/flag";
 import { Button } from "../../ui/Button";
 import { PageHeader } from "../../ui/PageHeader";
 import { EncounterLayout } from "../clinical/ApprovedVisitWorkspace";
 
 type ReadState<T> =
-  | { state: "loading" | "error" }
+  | { state: "loading" | "denied" | "error" }
   | { state: "ready"; value: T };
 
 type SaveState =
@@ -25,7 +29,18 @@ type SaveState =
 const optionLabel = ({ id, label }: NativeEncounterOption) =>
   id === label ? label : `${label} · ${id}`;
 
-export function NativeEncounterDraft({ userId, onBack }: { userId: string; onBack: () => void }) {
+const lookupFailure = (error: unknown) =>
+  error instanceof NativeEncounterDraftError && error.reason === "denied" ? "denied" : "error";
+
+export function NativeEncounterDraftPage() {
+  const { session, authGeneration } = useSession();
+  // The parent route owns authentication; this workflow only exists in native live mode.
+  if (!nativeTransportEnabled() || session?.mode !== "live")
+    return <Navigate to={ROUTES.home} replace />;
+  return <NativeEncounterDraft key={authGeneration} userId={session.user.id} />;
+}
+
+function NativeEncounterDraft({ userId }: { userId: string }) {
   const { t } = useTranslation();
   const inputId = useId();
   const searchHintId = useId();
@@ -56,16 +71,16 @@ export function NativeEncounterDraft({ userId, onBack }: { userId: string; onBac
       (value) => {
         if (!controller.signal.aborted) setPractitioner({ state: "ready", value });
       },
-      () => {
-        if (!controller.signal.aborted) setPractitioner({ state: "error" });
+      (error: unknown) => {
+        if (!controller.signal.aborted) setPractitioner({ state: lookupFailure(error) });
       },
     );
     void listNativeEncounterAppointmentTypes(controller.signal).then(
       (value) => {
         if (!controller.signal.aborted) setTypes({ state: "ready", value });
       },
-      () => {
-        if (!controller.signal.aborted) setTypes({ state: "error" });
+      (error: unknown) => {
+        if (!controller.signal.aborted) setTypes({ state: lookupFailure(error) });
       },
     );
     return () => {
@@ -90,10 +105,24 @@ export function NativeEncounterDraft({ userId, onBack }: { userId: string; onBac
     try {
       const options = await searchNativeEncounterPatients(value, controller.signal);
       if (!controller.signal.aborted) setMatches({ state: "ready", value: options });
-    } catch {
-      if (!controller.signal.aborted) setMatches({ state: "error" });
+    } catch (error) {
+      if (!controller.signal.aborted) setMatches({ state: lookupFailure(error) });
     }
   }
+
+  const patientHint = matches?.state === "loading" ? "common.loading"
+    : matches?.state === "denied" ? "nativeEncounter.searchDenied"
+    : matches?.state === "error" ? "nativeEncounter.searchError"
+    : matches?.state === "ready" && !matches.value.length ? "search.noResults"
+    : "nativeEncounter.searchHint";
+  const typeHint = types.state === "loading" ? "common.loading"
+    : types.state === "denied" ? "nativeEncounter.typesDenied"
+    : types.state === "error" ? "nativeEncounter.typesError"
+    : "nativeEncounter.typesUnavailable";
+  const practitionerLabel = practitioner.state === "ready" ? optionLabel(practitioner.value)
+    : t(practitioner.state === "loading" ? "nativeEncounter.practitionerLoading"
+      : practitioner.state === "denied" ? "nativeEncounter.practitionerDenied"
+      : "nativeEncounter.practitionerUnavailable");
 
   async function save() {
     if (saving.current || !canSave || !patient || !type || practitioner.state !== "ready") return;
@@ -148,13 +177,7 @@ export function NativeEncounterDraft({ userId, onBack }: { userId: string; onBac
         </Button>
       </form>
       <p className="patients-native-draft-hint" id={searchHintId} role="status">
-        {matches?.state === "loading"
-          ? t("common.loading")
-          : matches?.state === "error"
-            ? t("nativeEncounter.searchError")
-            : matches?.state === "ready" && !matches.value.length
-              ? t("search.noResults")
-              : t("nativeEncounter.searchHint")}
+        {t(patientHint)}
       </p>
       <div className="patients-write-fields">
         <div className="patients-field">
@@ -188,7 +211,7 @@ export function NativeEncounterDraft({ userId, onBack }: { userId: string; onBac
       </div>
       {(types.state !== "ready" || !types.value.length) && (
         <p className="patients-native-draft-hint" role="status">
-          {types.state === "loading" ? t("common.loading") : t("nativeEncounter.typesUnavailable")}
+          {t(typeHint)}
         </p>
       )}
       <p className="pc-note">{t("nativeEncounter.codedUnavailable")}</p>
@@ -203,7 +226,7 @@ export function NativeEncounterDraft({ userId, onBack }: { userId: string; onBac
     <>
       <PageHeader
         title={t("nativeEncounter.title")}
-        actions={<Button variant="secondary" onClick={onBack}>{t("nativeEncounter.back")}</Button>}
+        actions={<Link className="ui-button ui-button--secondary" to={ROUTES.patients}>{t("nativeEncounter.back")}</Link>}
       />
       <div className="shell-page-body">
         <div className="visit-workspace visit-preview">
@@ -216,11 +239,7 @@ export function NativeEncounterDraft({ userId, onBack }: { userId: string; onBac
               </div>
             </div>
             <dl>
-              <div><dt>{t("clinical.practitioner")}</dt><dd role="status">
-                {practitioner.state === "ready"
-                  ? optionLabel(practitioner.value)
-                  : t(practitioner.state === "loading" ? "nativeEncounter.practitionerLoading" : "nativeEncounter.practitionerUnavailable")}
-              </dd></div>
+              <div><dt>{t("clinical.practitioner")}</dt><dd role="status">{practitionerLabel}</dd></div>
               <div><dt>{t("nativeEncounter.appointmentType")}</dt><dd>{type ? optionLabel(type) : "—"}</dd></div>
               <div><dt>{t("clinical.encounterId")}</dt><dd>{result.state === "created" ? result.id : "—"}</dd></div>
             </dl>

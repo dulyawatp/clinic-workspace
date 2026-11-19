@@ -44,6 +44,7 @@ export const ROUTES = {
     `/clinic/appointments/${encodeURIComponent(id)}`,
 
   doctor: "/clinic/doctor",
+  nativeEncounterNew: "/clinic/encounters/new",
   visitPattern: "/clinic/visits/:id",
   visit: (id: string) => `/clinic/visits/${encodeURIComponent(id)}`,
   procedurePattern: "/clinic/procedures/:id",

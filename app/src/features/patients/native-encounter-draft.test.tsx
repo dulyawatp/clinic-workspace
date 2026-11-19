@@ -1,13 +1,15 @@
-import { act, screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { appRoutes } from "../../app/router";
+import { ROUTES } from "../../app/routes";
 import { useSession } from "../../app/SessionProvider";
+import type { RoleCode } from "../../domain/capability";
 import type { SessionDTO } from "../../domain/session";
 import { NativeEncounterDraftError } from "../../transport/native/encounter-draft";
 import { server } from "../../test/msw/server";
-import { renderWithFixtures } from "../../test/render";
-import { PatientDirectoryPage } from "./PatientDirectoryPage";
+import { renderWithDataRouter } from "../../test/render";
 
 const native = vi.hoisted(() => ({
   session: vi.fn(),
@@ -42,7 +44,7 @@ const caps: SessionDTO["capabilities"] = {
 };
 
 function setSession(
-  role: "DOC" | "REC" = "DOC",
+  role: RoleCode = "DOC",
   mode: "live" | "fixture" = "live",
   id = "doctor-a",
   capabilities = caps,
@@ -64,21 +66,22 @@ function RefreshSession() {
   );
 }
 
-function setup(role: "DOC" | "REC" = "DOC", mode: "live" | "fixture" = "live", capabilities = caps) {
+function setup(role: RoleCode = "DOC", mode: "live" | "fixture" = "live", capabilities = caps, path: string = ROUTES.patients) {
   setSession(role, mode, "doctor-a", capabilities);
-  return renderWithFixtures(
-    <>
-      <RefreshSession />
-      <PatientDirectoryPage />
-    </>,
-    { role, sessionMode: mode, caps: capabilities },
-  );
+  return renderWithDataRouter(appRoutes, { initialEntries: [path], role, sessionMode: mode, caps: capabilities });
 }
 
-async function selectDetails() {
+async function enterDraft() {
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: launch }));
-  expect(screen.getByRole("button", { name: save })).toBeDisabled();
+  const link = await screen.findByRole("link", { name: launch });
+  expect(link).toHaveAttribute("href", ROUTES.nativeEncounterNew);
+  await user.click(link);
+  return user;
+}
+
+async function selectDetails(fromDirectory = true) {
+  const user = fromDirectory ? await enterDraft() : userEvent.setup();
+  expect(await screen.findByRole("button", { name: save })).toBeDisabled();
   await user.type(screen.getByRole("searchbox", { name: "ค้นหาผู้ป่วยใน Marley" }), "Example");
   await user.click(screen.getByRole("button", { name: "ค้นหา" }));
   await screen.findByRole("option", { name: /Example.*PAT-002/ });
@@ -122,18 +125,73 @@ it.each([
       );
     }
     await screen.findByRole("heading", { level: 1 });
-    expect(screen.queryByRole("button", { name: launch })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: launch })).not.toBeInTheDocument();
     expect(native.practitioner).not.toHaveBeenCalled();
   },
 );
 
-it("lets the live native session open the workspace and leaves authorization to Frappe", async () => {
-  setup("REC", "live", { ...caps, "read.patient": "denied" });
-  const user = await selectDetails();
+it("opens the dedicated production route for a native role outside PAT-01, without changing PAT-01", async () => {
+  const { router } = setup("PHA", "live", { ...caps, "read.patient": "denied" }, ROUTES.nativeEncounterNew);
+  const user = await selectDetails(false);
   native.create.mockRejectedValueOnce(new NativeEncounterDraftError("denied"));
   await user.click(screen.getByRole("button", { name: save }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Marley ไม่อนุญาต");
   expect(native.create).toHaveBeenCalledTimes(1);
+  await user.click(screen.getByRole("link", { name: "กลับไปยังรายชื่อผู้ป่วย" }));
+  expect(router.state.location.pathname).toBe(ROUTES.patients);
+  expect(await screen.findByTestId("role-guard-denied")).toHaveAttribute("data-surface", "PAT-01");
+  expect(screen.queryByRole("link", { name: launch })).not.toBeInTheDocument();
+});
+
+it("redirects anonymous native access to sign-in without running lookups", async () => {
+  native.session.mockResolvedValue(null);
+  const { router } = renderWithDataRouter(appRoutes, { initialEntries: [ROUTES.nativeEncounterNew] });
+  await waitFor(() => expect(router.state.location.pathname).toBe(ROUTES.login));
+  expect(native.practitioner).not.toHaveBeenCalled();
+  expect(native.types).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: save })).not.toBeInTheDocument();
+});
+
+it.each([["1", "fixture"], [undefined, "live"]] as const)(
+  "redirects direct access outside native live mode (native: %s, mode: %s)",
+  async (nativeBuild, mode) => {
+    vi.stubEnv("VITE_CLINIC_NATIVE", nativeBuild);
+    const { router } = setup("DOC", mode, caps, ROUTES.nativeEncounterNew);
+    await waitFor(() => expect(router.state.location.pathname).toBe(ROUTES.home));
+    expect(native.practitioner).not.toHaveBeenCalled();
+    expect(native.types).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: save })).not.toBeInTheDocument();
+  },
+);
+
+it.each([
+  [401, "Marley ไม่อนุญาตให้ค้นหาผู้ป่วย", "Marley ไม่อนุญาตให้ดูข้อมูลผู้ตรวจ", "Marley ไม่อนุญาตให้ดูประเภทนัดหมาย"],
+  [403, "Marley ไม่อนุญาตให้ค้นหาผู้ป่วย", "Marley ไม่อนุญาตให้ดูข้อมูลผู้ตรวจ", "Marley ไม่อนุญาตให้ดูประเภทนัดหมาย"],
+  [200, "ไม่พบผู้ป่วยที่ตรงกับคำค้น", "ตรวจสอบข้อมูลผู้ตรวจไม่ได้ว่าพร้อมใช้งานหรือไม่", "ไม่มีประเภทนัดหมายให้เลือก"],
+  [500, "ค้นหาผู้ป่วยไม่ได้ กรุณาตรวจสอบชื่อแล้วลองใหม่", "ตรวจสอบข้อมูลผู้ตรวจไม่ได้ว่าพร้อมใช้งานหรือไม่", "โหลดประเภทนัดหมายไม่ได้"],
+] as const)("shows the native lookup outcome accurately for HTTP %s", async (status, patient, practitioner, type) => {
+  const actual = await vi.importActual<typeof import("../../transport/native/encounter-draft")>(
+    "../../transport/native/encounter-draft",
+  );
+  native.search.mockImplementation(actual.searchNativeEncounterPatients);
+  native.practitioner.mockImplementation(actual.readNativeEncounterPractitioner);
+  native.types.mockImplementation(actual.listNativeEncounterAppointmentTypes);
+  const response = () => HttpResponse.json({ data: [] }, { status });
+  server.use(
+    http.get("/api/resource/Patient", response),
+    http.get("/api/resource/Healthcare%20Practitioner", response),
+    http.get("/api/resource/Appointment%20Type", response),
+  );
+  setup("DOC", "live", caps, ROUTES.nativeEncounterNew);
+
+  const user = userEvent.setup();
+  await user.type(await screen.findByRole("searchbox", { name: "ค้นหาผู้ป่วยใน Marley" }), "Example");
+  await user.click(screen.getByRole("button", { name: "ค้นหา" }));
+  expect(await screen.findByText(patient)).toBeVisible();
+  expect(await screen.findByText(practitioner)).toBeVisible();
+  expect(await screen.findByText(type)).toBeVisible();
+  expect(screen.getByRole("button", { name: save })).toBeDisabled();
+  expect(native.create).not.toHaveBeenCalled();
 });
 
 it("replaces the directory with the approved workspace and clearly marks unsupported sections", async () => {
@@ -162,7 +220,7 @@ it("replaces the directory with the approved workspace and clearly marks unsuppo
   expect(screen.queryByRole("img")).not.toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: /สัญญาณชีพ/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /บันทึกบันทึกทางคลินิก|เพิ่มยา|จบการตรวจ/ })).not.toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "กลับไปยังรายชื่อผู้ป่วย" }));
+  await user.click(screen.getByRole("link", { name: "กลับไปยังรายชื่อผู้ป่วย" }));
   expect(await screen.findByRole("table")).toBeVisible();
   expect(screen.queryByRole("article", { name: "การตรวจผู้ป่วย" })).not.toBeInTheDocument();
 });
@@ -280,7 +338,7 @@ it("shows a permission rejection without retrying or blocking a later explicit s
 });
 
 it("does not dispatch until the doctor's own practitioner is ready", async () => {
-  native.practitioner.mockRejectedValue(new NativeEncounterDraftError("denied"));
+  native.practitioner.mockRejectedValue(new NativeEncounterDraftError("unavailable"));
   setup();
   await selectDetails();
   expect(screen.getByText(/ตรวจสอบข้อมูลผู้ตรวจไม่ได้/)).toBeVisible();
@@ -303,13 +361,16 @@ it("clears the patient selection when the search changes", async () => {
 it("discards selections and a late write result after the session identity changes", async () => {
   let finish!: (result: { id: string }) => void;
   native.create.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
-  setup();
+  setSession();
+  const root = appRoutes[0]!;
+  renderWithDataRouter([{ ...root, element: <>{root.element}<RefreshSession /></> }], {
+    initialEntries: [ROUTES.patients], role: "DOC", sessionMode: "live", caps,
+  });
   const user = await selectDetails();
   await user.click(screen.getByRole("button", { name: save }));
   setSession("DOC", "live", "doctor-b");
   native.practitioner.mockResolvedValue({ id: "PRAC-2", label: "Doctor B" });
   await user.click(screen.getByRole("button", { name: "Refresh session" }));
-  await user.click(await screen.findByRole("button", { name: launch }));
   await act(async () => finish({ id: "ENC-OLD" }));
   expect(await screen.findByText(/Doctor B.*PRAC-2/)).toBeVisible();
   expect(screen.queryByText(/ENC-OLD|Doctor A/)).not.toBeInTheDocument();
