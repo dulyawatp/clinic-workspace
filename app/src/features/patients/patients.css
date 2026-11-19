@@ -59,6 +59,49 @@
 .patients-write-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: 16px; }
 .patients-write-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }
 
+.patients-native-draft {
+  margin-block-end: 20px;
+  border-inline-start: 4px solid var(--primary);
+}
+
+.patients-native-draft-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 24px;
+}
+
+.patients-native-draft-header h2 { margin-block-end: 4px; }
+.patients-native-draft-header p,
+.patients-native-draft-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.patients-native-draft-body {
+  display: grid;
+  gap: 12px;
+  max-width: 44rem;
+  margin-block-start: 16px;
+}
+
+.patients-native-draft-practitioner,
+.patients-native-draft-result {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 5px;
+  background: var(--canvas);
+  overflow-wrap: anywhere;
+}
+
+.patients-native-draft-result[role="alert"] { border-inline-start: 3px solid var(--danger); }
+.patients-native-draft-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.patients-native-draft-feedback:empty { position: absolute; }
+.patients-native-draft-feedback > p { margin: 0; }
+
 .patients-hint {
   margin: 12px 0 24px;
   font-size: 0.875rem;

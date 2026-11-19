@@ -21,6 +21,7 @@ import hmac
 import json
 import os
 import re
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date as _date
@@ -36,8 +37,14 @@ from clinic_ui.core import (
 )
 from clinic_ui.runtime.traceback import UNSAFE_V1_KEYS, WRITE_ERROR_CODES
 
+
 PATIENT_DOCTYPE = "Patient"
 APPOINTMENT_DOCTYPE = "Patient Appointment"
+ENCOUNTER_DOCTYPE = "Patient Encounter"
+_ENCOUNTER_CHILD_FIELDS = (
+    "symptoms", "diagnosis", "codification_table", "drug_prescription",
+    "lab_test_prescription", "procedure_prescription", "therapies",
+)
 DISPLAY_NAME_FIELD = "patient_name"
 # The only Patient Appointment DocFields a synthetic appointment row may read.
 # Each carries a permlevel and can be masked; nothing is fetched before both
@@ -1872,6 +1879,26 @@ class Gateway:
             raise patient_write.StoreUnavailable() from exc
         except write_fence.FenceError as exc:
             raise patient_write.WriteUncertain() from exc
+
+    def create_native_encounter_draft(self, body):
+        """Insert one unlinked draft under Frappe's current user permissions."""
+        fields = ("patient", "practitioner", "appointment_type")
+        if (
+            not isinstance(body, Mapping)
+            or set(body) != set(fields)
+            or any(not isinstance(body[field], str) or not body[field].strip() for field in fields)
+        ):
+            self.frappe.throw("Invalid encounter draft", self.frappe.ValidationError)
+        doc = self.frappe.new_doc(ENCOUNTER_DOCTYPE)
+        for field in fields:
+            setattr(doc, field, body[field])
+        doc.docstatus = 0
+        doc.appointment = ""
+        doc.submit_orders_on_save = 0
+        for field in _ENCOUNTER_CHILD_FIELDS:
+            setattr(doc, field, [])
+        doc.insert()
+        return {"id": doc.name, "docstatus": doc.docstatus}
 
     def latch_manual_investigation(self, reason):
         """Durably block the whole deployment pending manual investigation."""

@@ -13,6 +13,7 @@ import { WriteGate } from "../../ui/WriteGate";
 import { useCapabilities } from "../shell/CapabilityProvider";
 import { useEncounterDraft } from "./EncounterDraft";
 import { useLivePatients } from "./live-directory";
+import { NativeEncounterDraft } from "./NativeEncounterDraft";
 import { PatientRow } from "./PatientRow";
 import { PatientWriteForm } from "./PatientWriteForm";
 import { nativeTransportEnabled } from "../../transport/native/flag";
@@ -292,9 +293,16 @@ function LiveDirectoryRows({
 function DirectoryContent() {
   const { t } = useTranslation();
   const { caps } = useCapabilities();
-  const { session } = useSession();
+  const { session, authGeneration } = useSession();
   const navigate = useNavigate();
   const live = session?.mode === "live";
+  const native = nativeTransportEnabled();
+  const canCreateNativeDraft =
+    native &&
+    import.meta.env.VITE_CLINIC_NATIVE_ENCOUNTER_DRAFT_ENABLED === "true" &&
+    live &&
+    Boolean(session.user.id.trim()) &&
+    session.user.roles.includes("DOC");
   const [text, setText] = useState("");
   const [settledText, setSettledText] = useState<string | null>("");
   const [page, setPage] = useState(1);
@@ -303,6 +311,7 @@ function DirectoryContent() {
   const inputId = useId();
   const hintId = useId();
   const canDraft =
+    !native &&
     live &&
     session.user.roles.includes("DOC") &&
     getCapability(caps, "write.encounter.draft") === "enabled";
@@ -349,6 +358,9 @@ function DirectoryContent() {
     <>
       <PageHeader title={t("surface.PAT-01")} />
       <div className="shell-page-body">
+        {canCreateNativeDraft && (
+          <NativeEncounterDraft key={authGeneration} userId={session.user.id} />
+        )}
         <section
           className="patients-card"
           aria-labelledby="patients-directory-title"
