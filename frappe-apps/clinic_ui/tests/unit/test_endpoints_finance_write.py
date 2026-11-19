@@ -192,7 +192,7 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(fake.finance_invoice_calls, [])
         self.assertEqual(fake.commit_calls, 0)
 
-    def test_the_preview_names_the_discount_path_state(self):
+    def test_the_preview_never_advertises_an_unverified_discount(self):
         fake = gateway()
         payload = finance_write.save_invoice_draft(fake, invoice_body(), CSRF)
         self.assertFalse(payload["discount_available"])
@@ -203,9 +203,8 @@ class PreviewTests(unittest.TestCase):
         payload = finance_write.save_invoice_draft(
             fake, invoice_body(discount=2), CSRF
         )
-        self.assertTrue(payload["discount_available"])
-        self.assertEqual(payload["discount"], 2.0)
-        self.assertEqual(payload["total"], 18.0)
+        self.assertEqual(payload["code"], "VALIDATION")
+        self.assertEqual(payload["problem"], "discount")
 
     def test_the_preview_refuses_an_unknown_customer(self):
         fake = gateway()
@@ -241,9 +240,45 @@ class PreviewTests(unittest.TestCase):
         with self.assertRaises(Denied):
             finance_write.save_invoice_draft(fake, invoice_body(), CSRF)
 
+    def test_the_preview_does_not_require_the_deployment_marker(self):
+        fake = gateway(deployment_approved=False, fence_ready=False)
+
+        payload = finance_write.save_invoice_draft(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload["status"], "preview")
+
+    def test_the_preview_refuses_unreadable_masters_as_permission(self):
+        for detail in (
+            invoice_detail(customer_exists=False, customer_denied=True),
+            invoice_detail(
+                items={
+                    "ITEM-1": {
+                        "exists": False,
+                        "denied": True,
+                        "is_sales_item": False,
+                        "stock_uom": "",
+                    }
+                }
+            ),
+            invoice_detail(
+                price_list={
+                    "exists": False,
+                    "denied": True,
+                    "selling": False,
+                    "enabled": False,
+                }
+            ),
+            invoice_detail(price_denied=True),
+        ):
+            with self.subTest(detail=detail):
+                fake = gateway()
+                fake.finance_invoice_detail = detail
+                with self.assertRaises(Denied):
+                    finance_write.save_invoice_draft(fake, invoice_body(), CSRF)
+
 
 class InvoiceSubmitTests(unittest.TestCase):
-    def test_one_invoice_is_created_and_submitted_with_server_state(self):
+    def test_one_invoice_is_created_and_submitted_without_a_fence(self):
         fake = gateway()
 
         payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
@@ -251,10 +286,14 @@ class InvoiceSubmitTests(unittest.TestCase):
         self.assertEqual(payload["status"], "submitted")
         self.assertEqual(payload["invoice"], "SINV-1")
         self.assertEqual(payload["total"], 20.0)
-        self.assertRegex(payload["ackToken"], r"^[0-9a-f]{64}$")
-        self.assertEqual(fake.finance_fence_calls[0][1], "invoice_submit")
+        self.assertNotIn("ackToken", payload)
+        self.assertEqual(fake.finance_fence_calls, [])
+        self.assertEqual(fake.finance_receipt_list_calls, [])
+        self.assertEqual(fake.finance_ack_calls, [])
         self.assertEqual(len(fake.finance_invoice_calls), 1)
         self.assertEqual(fake.commit_calls, 1)
+        self.assertEqual(fake.finance_posted_facts_calls[0][0], "SINV-1")
+        self.assertEqual(fake.finance_invoice_view_calls, [])
 
     def test_the_prepared_invoice_pins_the_server_state(self):
         fake = gateway()
@@ -287,16 +326,13 @@ class InvoiceSubmitTests(unittest.TestCase):
             fake, invoice_body(items=[{"item_code": "ITEM-1", "qty": 3}]), CSRF
         )
 
-        expected = fake.finance_facts_calls[0][1]
-        self.assertEqual(expected["grand_total"], 30.0)
-        self.assertEqual(expected["debit_total"], 30.0)
-        self.assertEqual(expected["credit_total"], 30.0)
         prepared = fake.finance_invoice_calls[0]
         self.assertNotIn("grand_total", prepared)
         self.assertNotIn("net_total", prepared)
         self.assertEqual(prepared["items"][0]["amount"], 30.0)
+        self.assertEqual(fake.write_responses[-1][1]["total"], 30.0)
 
-    def test_an_unknown_customer_never_reaches_the_fence(self):
+    def test_an_unknown_customer_never_reaches_the_mutation(self):
         fake = gateway()
         fake.finance_invoice_detail = invoice_detail(customer_exists=False)
 
@@ -317,6 +353,7 @@ class InvoiceSubmitTests(unittest.TestCase):
         self.assertEqual(payload, {"code": "VALIDATION"})
         self.assertEqual(fake.write_responses[-1][0], 422)
         self.assertEqual(fake.finance_fence_calls, [])
+        self.assertEqual(fake.finance_invoice_calls, [])
 
     def test_update_stock_can_never_be_flipped_from_the_body(self):
         fake = gateway()
@@ -327,8 +364,9 @@ class InvoiceSubmitTests(unittest.TestCase):
 
         self.assertEqual(payload, {"code": "VALIDATION"})
         self.assertEqual(fake.finance_fence_calls, [])
+        self.assertEqual(fake.finance_invoice_calls, [])
 
-    def test_a_discount_without_the_permission_flag_is_refused_pre_fence(self):
+    def test_a_discount_without_the_permission_flag_is_refused_pre_mutation(self):
         fake = gateway()
 
         payload = finance_write.submit_invoice(
@@ -340,7 +378,7 @@ class InvoiceSubmitTests(unittest.TestCase):
         self.assertEqual(fake.finance_fence_calls, [])
         self.assertEqual(fake.finance_invoice_calls, [])
 
-    def test_a_discount_rides_the_deductions_child_when_available(self):
+    def test_a_discount_is_refused_even_when_the_site_flag_is_on(self):
         fake = gateway(
             settings=write_settings(clinic_ui_invoice_discount_enabled=1)
         )
@@ -349,15 +387,11 @@ class InvoiceSubmitTests(unittest.TestCase):
             fake, invoice_body(discount=2), CSRF
         )
 
-        self.assertEqual(payload["status"], "submitted")
-        self.assertEqual(payload["total"], 18.0)
-        prepared = fake.finance_invoice_calls[0]
-        self.assertEqual(prepared["discount"], 2.0)
-        self.assertEqual(len(prepared["deductions"]), 1)
-        self.assertEqual(prepared["deductions"][0]["amount"], 2.0)
-        self.assertNotIn("discount_amount", prepared)
+        self.assertEqual(payload["code"], "VALIDATION")
+        self.assertEqual(payload["problem"], "discount")
+        self.assertEqual(fake.finance_invoice_calls, [])
 
-    def test_a_duplicate_charge_is_refused_pre_fence(self):
+    def test_a_duplicate_charge_is_refused_pre_mutation(self):
         fake = gateway()
 
         payload = finance_write.submit_invoice(
@@ -373,16 +407,340 @@ class InvoiceSubmitTests(unittest.TestCase):
 
         self.assertEqual(payload["code"], "VALIDATION")
         self.assertEqual(fake.finance_fence_calls, [])
+        self.assertEqual(fake.finance_invoice_calls, [])
 
-    def test_the_baseline_is_read_before_the_fence(self):
+    def test_the_invoice_lane_reads_no_budget_baseline_or_receipts(self):
         fake = gateway()
 
         finance_write.submit_invoice(fake, invoice_body(), CSRF)
 
-        self.assertEqual(fake.finance_baseline_calls, [("invoice_submit", None)])
-        self.assertEqual(
-            fake.finance_facts_calls[0][2], fake.finance_baseline_value
+        self.assertEqual(fake.finance_baseline_calls, [])
+        self.assertEqual(fake.finance_facts_calls, [])
+        self.assertEqual(fake.finance_receipt_list_calls, [])
+
+    def test_an_unresolved_historical_receipt_never_blocks_the_invoice_lane(self):
+        fake = gateway()
+        fake.finance_receipt_list_error = patient_write.StoreUnavailable()
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload["status"], "submitted")
+        self.assertEqual(fake.finance_receipt_list_calls, [])
+
+    def test_the_deployment_marker_and_fence_store_are_not_required(self):
+        fake = gateway(deployment_approved=False, fence_ready=False)
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload["status"], "submitted")
+
+    def test_the_lane_needs_create_and_submit_authority(self):
+        fake = gateway()
+        fake.finance_create_authority = {"Sales Invoice": False}
+        with self.assertRaises(Denied):
+            finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        submit_fake = gateway()
+        submit_fake.finance_submit_authority = {"Sales Invoice": False}
+        with self.assertRaises(Denied):
+            finance_write.submit_invoice(submit_fake, invoice_body(), CSRF)
+        self.assertEqual(submit_fake.finance_invoice_calls, [])
+
+    def test_an_unreadable_customer_or_item_is_a_permission_refusal(self):
+        for detail in (
+            invoice_detail(customer_exists=False, customer_denied=True),
+            invoice_detail(
+                items={
+                    "ITEM-1": {
+                        "exists": False,
+                        "denied": True,
+                        "is_sales_item": False,
+                        "stock_uom": "",
+                    }
+                }
+            ),
+            invoice_detail(
+                price_list={
+                    "exists": False,
+                    "denied": True,
+                    "selling": False,
+                    "enabled": False,
+                }
+            ),
+            invoice_detail(price_denied=True),
+        ):
+            with self.subTest(detail=detail):
+                fake = gateway()
+                fake.finance_invoice_detail = detail
+                with self.assertRaises(Denied):
+                    finance_write.submit_invoice(fake, invoice_body(), CSRF)
+                self.assertEqual(fake.finance_invoice_calls, [])
+
+    def test_an_unverified_native_price_is_refused_before_mutation(self):
+        fake = gateway()
+        fake.finance_invoice_detail = invoice_detail(
+            price_unverified=("ITEM-1",)
         )
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload["code"], "VALIDATION")
+        self.assertEqual(payload["problem"], "items[1].rate")
+        self.assertEqual(fake.finance_invoice_calls, [])
+
+    def test_an_unset_company_default_is_refused_not_guessed(self):
+        fake = gateway()
+        fake.finance_invoice_detail = invoice_detail(company="", currency="")
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload["code"], "VALIDATION")
+        self.assertEqual(payload["problem"], "company")
+        self.assertEqual(fake.write_responses[-1][0], 417)
+        self.assertEqual(fake.finance_invoice_calls, [])
+
+    def test_a_native_failure_is_uncertain_and_rolled_back(self):
+        fake = gateway()
+        fake.finance_mutation_error = RuntimeError("submit rejected")
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.write_responses[-1][0], 409)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.finance_invoice_view_calls, [])
+
+    def test_a_missing_posted_facts_read_is_uncertain_before_commit(self):
+        fake = gateway()
+        fake.finance_posted_facts = {}
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.write_responses[-1][0], 409)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_posted_document_that_is_not_submitted_is_uncertain(self):
+        fake = gateway()
+        fake.finance_posted_facts = {
+            "doctype": "Sales Invoice",
+            "docstatus": 0,
+            "status": "Draft",
+            "currency": "USD",
+            "grand_total": 20.0,
+            "net_total": 20.0,
+            "outstanding_amount": 20.0,
+            "gl_rows": 2,
+            "debit_total": 20.0,
+            "credit_total": 20.0,
+            "unexpected_gl_rows": 0,
+            "sle_rows": None,
+            "sle_verified": False,
+            "update_stock": 0,
+            "ple_rows": 1,
+        }
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_posted_total_mismatch_rolls_back_before_commit(self):
+        fake = gateway()
+        fake.finance_posted_facts = {
+            "doctype": "Sales Invoice",
+            "docstatus": 1,
+            "status": "Unpaid",
+            "currency": "USD",
+            "grand_total": 19.99,
+            "net_total": 20.0,
+            "outstanding_amount": 19.99,
+            "gl_rows": 2,
+            "debit_total": 19.99,
+            "credit_total": 20.0,
+            "unexpected_gl_rows": 0,
+            "sle_rows": None,
+            "sle_verified": False,
+            "update_stock": 0,
+            "ple_rows": 1,
+        }
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_posted_currency_or_gl_mismatch_is_uncertain_before_commit(self):
+        base = {
+            "doctype": "Sales Invoice",
+            "docstatus": 1,
+            "status": "Unpaid",
+            "currency": "USD",
+            "grand_total": 20.0,
+            "net_total": 20.0,
+            "outstanding_amount": 20.0,
+            "gl_rows": 2,
+            "debit_total": 20.0,
+            "credit_total": 20.0,
+            "unexpected_gl_rows": 0,
+            "sle_rows": None,
+            "sle_verified": False,
+            "update_stock": 0,
+            "ple_rows": 1,
+        }
+        for overrides in (
+            {"currency": "THB"},
+            {"debit_total": 19.0},
+            {"credit_total": 19.0},
+            {"gl_rows": 99},
+            {"ple_rows": 2},
+            {"update_stock": 1},
+            {"unexpected_gl_rows": 1},
+        ):
+            with self.subTest(overrides=overrides):
+                fake = gateway()
+                fake.finance_posted_facts = {**base, **overrides}
+
+                payload = finance_write.submit_invoice(
+                    fake, invoice_body(), CSRF
+                )
+
+                self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+                self.assertEqual(fake.commit_calls, 0)
+                self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_posted_facts_read_failure_is_uncertain_before_commit(self):
+        fake = gateway()
+        fake.finance_posted_facts_error = patient_write.WriteUncertain()
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_the_response_total_is_the_verified_posted_total(self):
+        fake = gateway()
+        fake.finance_invoice_detail = invoice_detail(prices={"ITEM-1": 9.5})
+
+        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+
+        self.assertEqual(payload["status"], "submitted")
+        self.assertEqual(payload["total"], 19.0)
+        self.assertEqual(fake.commit_calls, 1)
+        self.assertEqual(fake.finance_posted_facts_calls[0][0], "SINV-1")
+
+
+class InvoiceReadTests(unittest.TestCase):
+    def test_view_returns_only_the_native_id_status_and_docstatus(self):
+        fake = gateway()
+
+        payload = finance_write.view(fake, "SINV-1")
+
+        self.assertEqual(
+            payload,
+            {
+                "invoice": {
+                    "invoice_id": "SINV-1",
+                    "status": "Unpaid",
+                    "docstatus": 1,
+                }
+            },
+        )
+        self.assertEqual(fake.finance_invoice_view_calls, ["SINV-1"])
+
+    def test_view_refuses_an_unknown_or_unreadable_document(self):
+        fake = gateway()
+        fake.finance_invoice_view_missing = True
+
+        with self.assertRaises(Denied):
+            finance_write.view(fake, "SINV-404")
+
+    def test_view_refuses_a_malformed_id(self):
+        for candidate in ("", "bad\x00id", " SINV-1", None):
+            with self.subTest(candidate=candidate):
+                fake = gateway()
+                with self.assertRaises(Denied):
+                    finance_write.view(fake, candidate)
+                self.assertEqual(fake.finance_invoice_view_calls, [])
+
+    def test_view_is_independent_of_the_write_flag(self):
+        fake = gateway(
+            settings=write_settings(clinic_ui_native_finance_write_enabled=0)
+        )
+
+        payload = finance_write.view(fake, "SINV-1")
+
+        self.assertEqual(payload["invoice"]["docstatus"], 1)
+
+    def test_the_read_surface_is_limited_to_finance_roles(self):
+        fake = gateway(role="PHA")
+
+        with self.assertRaises(Denied):
+            finance_write.view(fake, "SINV-1")
+
+    def test_the_read_surface_requires_the_approved_site(self):
+        fake = gateway(site="marley.local")
+
+        with self.assertRaises(Denied):
+            finance_write.view(fake, "SINV-1")
+
+    def test_invoices_requires_the_callers_own_customer_read(self):
+        fake = gateway()
+        fake.doctype_reads = {"Customer": False}
+
+        with self.assertRaises(Denied):
+            finance_write.invoices(fake, "CUST-1")
+        self.assertEqual(fake.finance_invoice_list_calls, [])
+
+    def test_invoices_returns_bounded_readable_items(self):
+        fake = gateway()
+        fake.finance_invoice_names = ["SINV-1", "SINV-2"]
+
+        payload = finance_write.invoices(fake, "CUST-1")
+
+        self.assertEqual(
+            payload,
+            {
+                "items": [
+                    {
+                        "invoice_id": "SINV-1",
+                        "status": "Unpaid",
+                        "docstatus": 1,
+                    },
+                    {
+                        "invoice_id": "SINV-2",
+                        "status": "Unpaid",
+                        "docstatus": 1,
+                    },
+                ]
+            },
+        )
+        self.assertEqual(fake.finance_invoice_list_calls, [("CUST-1", 50)])
+        self.assertEqual(fake.finance_invoice_view_calls, ["SINV-1", "SINV-2"])
+
+    def test_an_over_full_or_duplicated_page_is_refused(self):
+        fake = gateway()
+        fake.finance_invoice_names = None
+        with self.assertRaises(Denied):
+            finance_write.invoices(fake, "CUST-1")
+
+        duplicated = gateway()
+        duplicated.finance_invoice_names = ["SINV-1", "SINV-1"]
+        with self.assertRaises(Denied):
+            finance_write.invoices(duplicated, "CUST-1")
+
+    def test_an_unreadable_row_refuses_the_whole_page(self):
+        fake = gateway()
+        fake.finance_invoice_names = ["SINV-1"]
+        fake.finance_invoice_view_missing = True
+
+        with self.assertRaises(Denied):
+            finance_write.invoices(fake, "CUST-1")
 
 
 class PaymentReceiveTests(unittest.TestCase):
@@ -664,28 +1022,24 @@ class GateTests(unittest.TestCase):
         with self.assertRaises(Denied):
             finance_write.receive_payment(fake, payment_body(), CSRF)
 
-    def test_an_exhausted_budget_is_refused_before_the_fence(self):
+    def test_an_exhausted_budget_never_blocks_the_invoice_lane(self):
         fake = gateway()
         committed(fake, "invoice_submit", "finance-write-key-0000")
 
         payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
 
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(payload["status"], "submitted")
         self.assertEqual(fake.finance_fence_calls, [])
-        self.assertEqual(fake.finance_invoice_calls, [])
+        self.assertEqual(fake.finance_receipt_list_calls, [])
 
-    def test_each_kind_has_its_own_budget(self):
+    def test_the_payment_lane_keeps_its_own_budget(self):
         fake = gateway()
-        committed(fake, "invoice_submit", "finance-write-key-0000")
+        committed(fake, "payment_receive", "finance-write-key-0000")
 
-        self.assertEqual(
-            finance_write.submit_invoice(fake, invoice_body(), CSRF),
-            {"code": "WRITE_LOCKED"},
-        )
-        self.assertEqual(
-            finance_write.receive_payment(fake, payment_body(), CSRF)["status"],
-            "received",
-        )
+        payload = finance_write.receive_payment(fake, payment_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
+        self.assertEqual(fake.finance_payment_calls, [])
 
 
 class FenceAndUncertaintyTests(unittest.TestCase):
@@ -704,16 +1058,15 @@ class FenceAndUncertaintyTests(unittest.TestCase):
         self.assertEqual(fake.commit_calls, 0)
         self.assertEqual(fake.rollback_calls, 1)
 
-    def test_a_side_effect_mismatch_rolls_back(self):
+    def test_a_side_effect_mismatch_rolls_back_the_payment(self):
         fake = gateway()
         fake.finance_facts = {
-            "doctype": "Sales Invoice",
+            "doctype": "Payment Entry",
             "docstatus": 1,
-            "status": "Unpaid",
             "gl_rows": 0,
         }
 
-        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+        payload = finance_write.receive_payment(fake, payment_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.finance_fence_claim.committed, [])
@@ -748,7 +1101,8 @@ class FenceAndUncertaintyTests(unittest.TestCase):
         finance_write.submit_invoice(fake, invoice_body(), CSRF)
 
         self.assertEqual(fake.finance_ack_calls, [])
-        self.assertEqual(len(fake.finance_fence_claim.committed), 1)
+        self.assertEqual(fake.finance_fence_calls, [])
+        self.assertEqual(fake.finance_fence_claim.committed, [])
 
 
 class ReceiptEncodeBeforeCommitTests(unittest.TestCase):
@@ -766,7 +1120,7 @@ class ReceiptEncodeBeforeCommitTests(unittest.TestCase):
 
         def recording_encode(**kwargs):
             fake.call_order.append("encode_receipt")
-            self.assertEqual(len(fake.finance_invoice_calls), 1)
+            self.assertEqual(len(fake.finance_payment_calls), 1)
             return real_encode(**kwargs)
 
         claim = fake.finance_fence_claim
@@ -781,16 +1135,16 @@ class ReceiptEncodeBeforeCommitTests(unittest.TestCase):
         with mock.patch.object(
             finance_contract, "encode_receipt", recording_encode
         ):
-            payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+            payload = finance_write.receive_payment(fake, payment_body(), CSRF)
 
         order = fake.call_order
         self.assertLess(order.index("encode_receipt"), order.index("commit"))
         self.assertLess(order.index("commit"), order.index("claim_commit"))
         self.assertEqual(len(claim.committed), 1)
         # The wire body is what the ordering change must not move.
-        self.assertEqual(payload["status"], "submitted")
+        self.assertEqual(payload["status"], "received")
+        self.assertEqual(payload["payment"], "PE-1")
         self.assertEqual(payload["invoice"], "SINV-1")
-        self.assertEqual(payload["total"], 20.0)
         self.assertRegex(payload["ackToken"], r"^[0-9a-f]{64}$")
 
     def test_a_receipt_encode_failure_never_reaches_the_native_commit(self):
@@ -816,7 +1170,7 @@ class ReceiptEncodeBeforeCommitTests(unittest.TestCase):
     def test_the_ack_token_is_bound_to_the_receipt_that_was_stored(self):
         fake = gateway()
 
-        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+        payload = finance_write.receive_payment(fake, payment_body(), CSRF)
 
         (stored,) = fake.finance_fence_claim.committed
         self.assertEqual(
@@ -825,7 +1179,7 @@ class ReceiptEncodeBeforeCommitTests(unittest.TestCase):
                 SECRET.encode(),
                 SITE,
                 fake.current_session.user,
-                "invoice_submit",
+                "payment_receive",
                 KEY,
                 stored,
             ),
@@ -840,7 +1194,7 @@ class ReceiptEncodeBeforeCommitTests(unittest.TestCase):
 
         fake.commit = failing_commit
 
-        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+        payload = finance_write.receive_payment(fake, payment_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.call_order.count("commit"), 1)
@@ -860,7 +1214,7 @@ class ReceiptEncodeBeforeCommitTests(unittest.TestCase):
 
         fake.finance_fence_claim.commit = failing_claim_commit
 
-        payload = finance_write.submit_invoice(fake, invoice_body(), CSRF)
+        payload = finance_write.receive_payment(fake, payment_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
         self.assertEqual(fake.commit_calls, 1)
@@ -889,7 +1243,7 @@ class RollbackFailureTests(unittest.TestCase):
         fake.rollback = failing_rollback
 
         with self.assertRaises(finance_write.RollbackFailed):
-            finance_write.submit_invoice(fake, invoice_body(), CSRF)
+            finance_write.receive_payment(fake, payment_body(), CSRF)
 
         self.assertEqual(fake.write_responses, [])
         self.assertEqual(fake.finance_fence_claim.committed, [])
@@ -928,7 +1282,7 @@ class RollbackFailureTests(unittest.TestCase):
             side_effect=RuntimeError("receipt encoder failed"),
         ):
             with self.assertRaises(finance_write.RollbackFailed) as caught:
-                finance_write.submit_invoice(fake, invoice_body(), CSRF)
+                finance_write.receive_payment(fake, payment_body(), CSRF)
 
         self.assertEqual(order, ["marker", "rollback"])
         self.assertEqual(len(claim.unknowns), 1)
@@ -1020,6 +1374,39 @@ class BootstrapTests(unittest.TestCase):
         capabilities = session.bootstrap(gateway())["capabilities"]
         self.assertEqual(capabilities["write.invoice.submit"], "enabled")
         self.assertEqual(capabilities["write.payment.receive"], "enabled")
+
+    def test_invoice_capability_does_not_need_the_marker_or_fence(self):
+        fake = gateway(deployment_approved=False, fence_ready=False)
+        capabilities = session.bootstrap(fake)["capabilities"]
+        self.assertEqual(capabilities["write.invoice.submit"], "enabled")
+        self.assertEqual(capabilities["write.payment.receive"], "read_only")
+
+    def test_invoice_capability_needs_create_and_submit_authority(self):
+        fake = gateway(fence_ready=False)
+        fake.finance_submit_authority = {"Sales Invoice": False}
+        capabilities = session.bootstrap(fake)["capabilities"]
+        self.assertEqual(capabilities["write.invoice.submit"], "read_only")
+
+    def test_invoice_capability_needs_customer_item_and_company_read(self):
+        for doctype in (
+            "Customer",
+            "Item",
+            "Company",
+            "Sales Invoice",
+            "GL Entry",
+            "Payment Ledger Entry",
+        ):
+            with self.subTest(doctype=doctype):
+                fake = gateway()
+                fake.doctype_reads = {doctype: False}
+                capabilities = session.bootstrap(fake)["capabilities"]
+                self.assertEqual(capabilities["write.invoice.submit"], "read_only")
+
+    def test_invoice_capability_does_not_require_item_price_read(self):
+        fake = gateway()
+        fake.doctype_reads = {"Item Price": False, "Price List": False}
+        capabilities = session.bootstrap(fake)["capabilities"]
+        self.assertEqual(capabilities["write.invoice.submit"], "enabled")
 
     def test_void_amend_and_refund_stay_read_only(self):
         capabilities = session.bootstrap(gateway())["capabilities"]

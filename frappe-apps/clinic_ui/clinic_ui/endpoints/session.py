@@ -18,6 +18,7 @@ payload and are never logged.
 """
 
 from clinic_ui.core import dto
+from clinic_ui.core import finance_contract
 from clinic_ui.core.capabilities import bootstrap_capabilities
 from clinic_ui.core.epoch import session_epoch
 from clinic_ui.core.policy import (
@@ -280,14 +281,16 @@ def _purchase_write_flags(gateway, settings, role):
 
 
 def _finance_write_flags(gateway, settings, role):
-    """Return ``(invoice, payment)`` when the finance surface is open.
+    """Return ``(invoice, payment)`` when each finance surface is open.
 
     Independent of the purchasing and clinical flags: exact approved site,
-    boundary and installed-field preflight, the finance flag, the deployment
-    marker, a ready fence store and the caller's own native authority on the
-    document it would create. Customers, price lists, accounts, modes of payment
-    and the discount permission are decided per request; these flags only
-    advertise that the surface exists.
+    boundary and installed-field preflight, the finance flag and the caller's
+    own native authority on the document it would write. The converted invoice
+    lane needs create and submit authority and does not need the historical
+    deployment marker or fence store. The fenced payment lane still needs both.
+    Customers, price lists, accounts, modes of payment and the discount
+    permission are decided per request; these flags only advertise that the
+    surface exists.
     """
 
     disabled = (False, False)
@@ -300,12 +303,26 @@ def _finance_write_flags(gateway, settings, role):
             return disabled
         if not settings.finance_write_enabled:
             return disabled
-        if gateway.write_deployment_approved() is not True:
-            return disabled
-        if gateway.write_fence_ready() is not True:
-            return disabled
-        invoice_ok = gateway.native_finance_can_write("Sales Invoice") is True
-        payment_ok = gateway.native_finance_can_write("Payment Entry") is True
+        invoice_ok = (
+            gateway.native_finance_can_write("Sales Invoice") is True
+            and gateway.native_finance_can_submit("Sales Invoice") is True
+            and all(
+                gateway.native_doctype_can_read(doctype) is True
+                for doctype in (
+                    finance_contract.CUSTOMER_DOCTYPE,
+                    finance_contract.ITEM_DOCTYPE,
+                    finance_contract.COMPANY_DOCTYPE,
+                    finance_contract.INVOICE_DOCTYPE,
+                    finance_contract.GL_ENTRY_DOCTYPE,
+                    finance_contract.PAYMENT_LEDGER_DOCTYPE,
+                )
+            )
+        )
+        payment_ok = (
+            gateway.write_deployment_approved() is True
+            and gateway.write_fence_ready() is True
+            and gateway.native_finance_can_write("Payment Entry") is True
+        )
         return invoice_ok, payment_ok
     except Exception:
         return disabled

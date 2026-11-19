@@ -245,6 +245,32 @@ def authorize_finance_write(gateway, allowed_codes, csrf_token=None):
     return settings, view, role
 
 
+def authorize_invoice_write(gateway, allowed_codes, csrf_token=None):
+    """Read gate, explicit CSRF, and the converted invoice-write gate.
+
+    The converted invoice lane relies on Frappe/Marley permissions, controller
+    validation and native transactions instead of the historical operation
+    fence, write budget, receipt, acknowledgement barrier and deployment
+    marker. It still requires the authenticated session, a valid same-session
+    CSRF token, the exact approved site configuration, the finance flag and the
+    clinic role code. Native Sales Invoice create/submit authority and every
+    Customer/Item/Price List/Item Price read are checked per request; no
+    configuration value is authority on its own.
+
+    The fenced payment/receipt lane deliberately keeps ``authorize_finance_write``
+    above, including the deployment marker and the fence store.
+    """
+
+    settings, view, role = authorize(gateway, allowed_codes)
+    if view.user == write_fence.LATCH_ACTOR:
+        gateway.deny()
+    if not gateway.csrf_token_valid(csrf_token):
+        gateway.deny()
+    if not settings.finance_write_enabled:
+        gateway.deny()
+    return settings, view, role
+
+
 def authorize_admin_user_write(gateway, allowed_codes, csrf_token=None):
     """Read gate, explicit CSRF, and the converted admin user-create gate.
 

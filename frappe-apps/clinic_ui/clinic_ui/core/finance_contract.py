@@ -776,6 +776,10 @@ def _money_problems(detail):
 
 def _price_list_problem(detail):
     price_list = detail.get("price_list")
+    if price_list is None:
+        # The converted lane lets the installed pricing controller resolve the
+        # price list; per-line native pricing is checked below instead.
+        return None
     if not isinstance(price_list, dict) or not price_list.get("exists"):
         return (
             HTTP_REFUSED,
@@ -798,7 +802,7 @@ def _price_list_problem(detail):
 
 
 def invoice_problems(detail, payload):
-    """Every pre-fence invoice decision, in operator order."""
+    """Every pre-dispatch invoice decision, in operator order."""
 
     if not isinstance(detail, dict):
         return ((HTTP_REFUSED, "detail", "target state is unreadable"),)
@@ -814,6 +818,36 @@ def invoice_problems(detail, payload):
     problem = _price_list_problem(detail)
     if problem:
         problems.append(problem)
+    price_currency = detail.get("price_currency")
+    if "price_currency" in detail:
+        if not isinstance(price_currency, str) or not price_currency:
+            problems.append(
+                (
+                    HTTP_REFUSED,
+                    "selling_price_list",
+                    "the price list currency could not be resolved",
+                )
+            )
+        elif (
+            isinstance(detail.get("currency"), str)
+            and detail.get("currency")
+            and price_currency != detail["currency"]
+        ):
+            problems.append(
+                (
+                    HTTP_REFUSED,
+                    "selling_price_list",
+                    "the price list currency differs from the company currency",
+                )
+            )
+    if detail.get("price_conversion_unverified") is True:
+        problems.append(
+            (
+                HTTP_REFUSED,
+                "selling_price_list",
+                "the price list conversion rate is not one",
+            )
+        )
     problems.extend(_money_problems(detail))
 
     today = detail.get("today")
@@ -842,11 +876,20 @@ def invoice_problems(detail, payload):
     prices = detail.get("prices") or {}
     items = detail.get("items") or {}
     income_accounts = detail.get("income_accounts") or {}
+    price_unverified = detail.get("price_unverified") or ()
     seen = set()
     for index, line in enumerate(payload["items"], start=1):
         code = line["item_code"]
         label = f"items[{index}]"
         item = items.get(code)
+        if code in price_unverified:
+            problems.append(
+                (
+                    HTTP_REFUSED,
+                    f"{label}.rate",
+                    "the native price and pricing basis could not be verified",
+                )
+            )
         if not isinstance(item, dict) or not item.get("exists"):
             problems.append(
                 (HTTP_REFUSED, f"{label}.item_code", f"item {code} does not exist")
@@ -1038,6 +1081,24 @@ def payment_problems(detail, payload):
 # -- EXPECTED side effects -------------------------------------------------
 
 
+def _round_money(detail, value):
+    """Round through the installed policy the caller supplied.
+
+    Frappe's configured rounding method is not Python ``round`` (a half-cent
+    such as 0.125 becomes 0.13 under the installed legacy policy). The gateway
+    passes that policy as ``money_rounder``; a missing callable is the legacy
+    pure-Python test fallback only.
+    """
+
+    rounder = detail.get("money_rounder") if isinstance(detail, dict) else None
+    if callable(rounder):
+        try:
+            return float(rounder(value))
+        except Exception as exc:
+            raise FinanceContractError("installed money rounding unavailable") from exc
+    return round(float(value), 2)
+
+
 def invoice_totals(detail, payload):
     """The server-owned totals: rates come from the installed price list."""
 
@@ -1045,9 +1106,9 @@ def invoice_totals(detail, payload):
     lines = []
     net_total = 0.0
     for line in payload["items"]:
-        rate = round(float(prices.get(line["item_code"]) or 0.0), 2)
-        amount = round(line["qty"] * rate, 2)
-        net_total = round(net_total + amount, 2)
+        rate = _round_money(detail, prices.get(line["item_code"]) or 0.0)
+        amount = _round_money(detail, line["qty"] * rate)
+        net_total = _round_money(detail, net_total + amount)
         lines.append(
             {
                 "item_code": line["item_code"],
@@ -1056,8 +1117,8 @@ def invoice_totals(detail, payload):
                 "amount": amount,
             }
         )
-    discount = round(float(payload.get("discount") or 0.0), 2)
-    grand_total = round(net_total - discount, 2)
+    discount = _round_money(detail, payload.get("discount") or 0.0)
+    grand_total = _round_money(detail, net_total - discount)
     return {
         "lines": lines,
         "net_total": net_total,
@@ -1069,29 +1130,41 @@ def invoice_totals(detail, payload):
 
 def expected_invoice(detail, payload):
     totals = invoice_totals(detail, payload)
+    income_accounts = detail.get("income_accounts") or {}
+    credit_by_account = {}
+    for line in totals["lines"]:
+        account = income_accounts.get(line["item_code"])
+        if account:
+            credit_by_account[account] = _round_money(
+                detail,
+                credit_by_account.get(account, 0.0) + line["amount"],
+            )
+    debit_account = detail.get("receivable_account")
     return {
         "doctype": INVOICE_DOCTYPE,
         "kind": INVOICE_KIND,
         "docstatus": SUBMITTED_DOCSTATUS,
         "status": INVOICE_UNPAID_STATUS,
         "currency": detail.get("currency"),
-        "debit_account": detail.get("receivable_account"),
+        "debit_account": debit_account,
         # The installed controller credits the line income accounts resolved
-        # from installed records (never the client payload).
-        "credit_accounts": sorted(
-            {
-                account
-                for account in (detail.get("income_accounts") or {}).values()
-                if account
-            }
+        # from installed records (never the client payload), merging rows that
+        # share an account.
+        "credit_accounts": sorted(credit_by_account),
+        "debit_by_account": (
+            {debit_account: totals["grand_total"]} if debit_account else {}
         ),
+        "credit_by_account": credit_by_account,
         "net_total": totals["net_total"],
         "grand_total": totals["grand_total"],
         "gl_rows": len(totals["lines"]) * GL_ROWS_PER_INVOICE_LINE
         + GL_ROWS_PER_INVOICE,
+        "gl_rows_max": len(totals["lines"]) * GL_ROWS_PER_INVOICE_LINE
+        + GL_ROWS_PER_INVOICE,
         "debit_total": totals["grand_total"],
         "credit_total": totals["net_total"],
         "sle_rows": 0,
+        "update_stock": PINNED_UPDATE_STOCK,
         "ple_rows": 1,
         "unexpected_gl_rows": 0,
     }
@@ -1125,10 +1198,10 @@ def expected_payment(detail, payload):
 
 
 def invoice_gl_sums(gl_rows, expected):
-    """Classify posted GL rows on the EXPECTED invoice's reviewed accounts.
+    """Legacy total classifier for expected-account tests/helpers.
 
-    The real gateway's closed-world re-read uses this same rule, so the
-    EXPECTED builder and the reader can never drift on the account keys.
+    Posted invoice verification uses ``invoice_gl_accounts`` so merged or
+    separate account groups are checked by account sum, not by line count.
     """
 
     receivable = expected.get("debit_account")
@@ -1145,6 +1218,43 @@ def invoice_gl_sums(gl_rows, expected):
         else:
             unexpected += 1
     return round(debit_total, 2), round(credit_total, 2), unexpected
+
+
+def invoice_gl_accounts(gl_rows, expected):
+    """Group actual GL rows by reviewed account and side.
+
+    The installed controller merges rows that share an account/cost center, so
+    no per-line row count is asserted. Only the reviewed receivable debit
+    account and the reviewed income credit accounts are accepted; a wrong-side
+    posting or any other account is counted as unexpected.
+    """
+
+    debit_account = expected.get("debit_account")
+    credit_accounts = set(expected.get("credit_accounts") or ())
+    debit_by_account = {}
+    credit_by_account = {}
+    unexpected = 0
+    for gl in gl_rows:
+        account = gl.get("account")
+        debit = float(gl.get("debit") or 0.0)
+        credit = float(gl.get("credit") or 0.0)
+        if not account:
+            unexpected += 1
+        elif account == debit_account:
+            if credit:
+                unexpected += 1
+            debit_by_account[account] = (
+                debit_by_account.get(account, 0.0) + debit
+            )
+        elif account in credit_accounts:
+            if debit:
+                unexpected += 1
+            credit_by_account[account] = (
+                credit_by_account.get(account, 0.0) + credit
+            )
+        else:
+            unexpected += 1
+    return debit_by_account, credit_by_account, unexpected
 
 
 def payment_gl_unexpected(gl_rows, expected):
@@ -1302,9 +1412,10 @@ def side_effect_problem(facts, expected):
     """Compare the closed-world re-read against the EXPECTED list.
 
     Nothing beyond the list is accepted: the posted document, the reviewed GL
-    row count and debit/credit sums (Debtors Dr / Sales Cr), no stock ledger
-    row, the reviewed Payment Ledger row count, and — for a payment — the
-    invoice's outstanding delta and status transition.
+    account grouping and sums (Debtors Dr / Sales Cr), no unknown account,
+    the pinned ``update_stock`` state (SLE is not read for an invoice), the
+    reviewed Payment Ledger row count, and — for a payment — the invoice's
+    outstanding delta and status transition.
     """
 
     if not isinstance(facts, dict) or not isinstance(expected, dict):
@@ -1314,8 +1425,9 @@ def side_effect_problem(facts, expected):
     if facts.get("docstatus") != expected.get("docstatus"):
         return "the finance document has the wrong docstatus"
     gl_rows = facts.get("gl_rows")
-    if _count(gl_rows) is False or gl_rows != expected["gl_rows"]:
-        return "gl row count differs"
+    if expected["kind"] != INVOICE_KIND:
+        if _count(gl_rows) is False or gl_rows != expected["gl_rows"]:
+            return "gl row count differs"
     unexpected = facts.get("unexpected_gl_rows")
     if _count(unexpected) is False or unexpected != expected["unexpected_gl_rows"]:
         return "a gl row on an account outside the reviewed set was posted"
@@ -1340,7 +1452,34 @@ def side_effect_problem(facts, expected):
             facts.get("credit_total"), expected["credit_total"]
         ):
             return "the income credit sum differs from the net total"
-        if facts.get("sle_rows") != expected["sle_rows"]:
+        if _count(gl_rows) is False or gl_rows > expected.get(
+            "gl_rows_max", expected["gl_rows"]
+        ):
+            return "more gl rows were posted than the reviewed maximum"
+        accounts = facts.get("gl_accounts")
+        if not isinstance(accounts, dict):
+            return "posted gl account grouping is unreadable"
+        actual_debit = accounts.get("debit")
+        actual_credit = accounts.get("credit")
+        if not isinstance(actual_debit, dict) or not isinstance(
+            actual_credit, dict
+        ):
+            return "posted gl account grouping is unreadable"
+        for account, amount in (expected.get("debit_by_account") or {}).items():
+            if not _money_equal(actual_debit.get(account), amount):
+                return "the receivables debit account sum differs"
+        for account, amount in (expected.get("credit_by_account") or {}).items():
+            if not _money_equal(actual_credit.get(account), amount):
+                return "an income credit account sum differs"
+        if facts.get("sle_verified") is True:
+            if facts.get("sle_rows") != expected["sle_rows"]:
+                return "a stock ledger row was posted by an invoice"
+        elif "update_stock" in facts:
+            if facts.get("update_stock") != expected.get(
+                "update_stock", PINNED_UPDATE_STOCK
+            ):
+                return "the posted invoice update_stock differs"
+        elif facts.get("sle_rows") != expected["sle_rows"]:
             return "a stock ledger row was posted by an invoice"
         if not _money_equal(
             facts.get("outstanding_amount"), expected["grand_total"]

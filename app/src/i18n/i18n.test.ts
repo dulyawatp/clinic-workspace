@@ -4,6 +4,14 @@ import th from "./catalog/th.json";
 import { initI18n, translateClinicalText } from "./index";
 
 describe("i18n catalogue", () => {
+  it("keeps native invoice recovery guidance explicit in both languages", () => {
+    expect([en["financeWrite.lookupNotice"], th["financeWrite.lookupNotice"]]).toMatchInlineSnapshot(`
+      [
+        "Check the server after an uncertain submission. Results cannot prove which operation created an invoice. Do not submit again until the outcome is checked.",
+        "ตรวจสอบเซิร์ฟเวอร์เมื่อไม่ทราบผลการยืนยัน ผลค้นหาไม่สามารถยืนยันได้ว่าการดำเนินการใดสร้างใบแจ้งหนี้ อย่ายืนยันซ้ำจนกว่าจะตรวจสอบผล",
+      ]
+    `);
+  });
   it("keeps Thai and English catalogue key sets identical", () => {
     expect(Object.keys(en).sort()).toEqual(Object.keys(th).sort());
   });

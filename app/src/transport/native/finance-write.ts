@@ -1,7 +1,8 @@
 import { FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
 import { nativeCsrfToken } from "./session";
 
-export type FinanceWriteKind = "invoice_submit" | "payment_receive";
+/** Invoice submission is the converted lane in `invoice-write.ts`; the payment lane keeps its fence. */
+export type FinanceWriteKind = "payment_receive";
 
 export type FinanceWriteFailure =
   | "locked"
@@ -12,9 +13,8 @@ export type FinanceWriteFailure =
   | "forbidden"
   | "unavailable";
 
-/** One pending-write lock per kind: an invoice never blocks a payment. */
+/** One pending-write lock for the fenced payment lane. */
 const LOCKS: Record<FinanceWriteKind, string> = {
-  invoice_submit: "clinic.finance-write.pending.invoice_submit",
   payment_receive: "clinic.finance-write.pending.payment_receive",
 };
 
@@ -28,21 +28,6 @@ export class NativeFinanceWriteError extends Error {
     this.name = "NativeFinanceWriteError";
     this.code = code;
   }
-}
-
-export interface InvoiceLineInput {
-  item_code: string;
-  qty: number;
-}
-
-export interface SubmitInvoiceInput {
-  operation_key: string;
-  customer: string;
-  selling_price_list: string;
-  due_date: string;
-  items: InvoiceLineInput[];
-  /** An absolute discount amount; no rate is ever implied or invented. */
-  discount?: number;
 }
 
 export interface PaymentAllocationInput {
@@ -59,45 +44,18 @@ export interface ReceivePaymentInput {
   reference_no?: string;
 }
 
-export interface InvoicePreviewLine {
-  item_code: string;
-  qty: number;
-  rate: number;
-  amount: number;
+export interface FinancePaymentResult {
+  status: "received";
+  payment: string;
+  invoice: string;
+  outstanding: number;
 }
-
-/** The server-resolved preview: every figure here is server truth. */
-export interface InvoicePreview {
-  status: "preview";
-  customer: string;
-  currency: string;
-  company: string;
-  selling_price_list: string;
-  due_date: string;
-  lines: InvoicePreviewLine[];
-  net_total: number;
-  discount: number;
-  discount_available: boolean;
-  total_taxes: number;
-  total: number;
-}
-
-export type FinanceWriteResult =
-  | { status: "submitted"; invoice: string; total: number }
-  | {
-      status: "received";
-      payment: string;
-      invoice: string;
-      outstanding: number;
-    };
 
 const ENDPOINTS: Record<FinanceWriteKind, string> = {
-  invoice_submit: "clinic_ui.api.finance_write.submit_invoice",
   payment_receive: "clinic_ui.api.finance_write.receive_payment",
 };
 
 const STATUSES: Record<FinanceWriteKind, string> = {
-  invoice_submit: "submitted",
   payment_receive: "received",
 };
 
@@ -183,77 +141,10 @@ function failure(status: number, body: unknown): NativeFinanceWriteError {
   return new NativeFinanceWriteError("uncertain");
 }
 
-function parsePreviewLine(value: unknown): InvoicePreviewLine {
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, ["item_code", "qty", "rate", "amount"]) ||
-    !isText(value.item_code) ||
-    !isAmount(value.qty) ||
-    !isAmount(value.rate) ||
-    !isAmount(value.amount)
-  )
-    throw new NativeFinanceWriteError("uncertain");
-  return {
-    item_code: value.item_code,
-    qty: value.qty,
-    rate: value.rate,
-    amount: value.amount,
-  };
-}
-
-function parsePreview(body: unknown): InvoicePreview {
-  if (!isRecord(body) || !isRecord(body.message))
-    throw new NativeFinanceWriteError("uncertain");
-  const message = body.message;
-  if (
-    !hasExactKeys(message, [
-      "status",
-      "customer",
-      "currency",
-      "company",
-      "selling_price_list",
-      "due_date",
-      "lines",
-      "net_total",
-      "discount",
-      "discount_available",
-      "total_taxes",
-      "total",
-    ]) ||
-    message.status !== "preview" ||
-    !isText(message.customer) ||
-    !isText(message.currency) ||
-    !isText(message.company) ||
-    !isText(message.selling_price_list) ||
-    !isText(message.due_date) ||
-    !Array.isArray(message.lines) ||
-    !isAmount(message.net_total) ||
-    !isAmount(message.discount) ||
-    typeof message.discount_available !== "boolean" ||
-    !isAmount(message.total_taxes) ||
-    !isAmount(message.total)
-  )
-    throw new NativeFinanceWriteError("uncertain");
-  return {
-    status: "preview",
-    customer: message.customer,
-    currency: message.currency,
-    company: message.company,
-    selling_price_list: message.selling_price_list,
-    due_date: message.due_date,
-    lines: message.lines.map(parsePreviewLine),
-    net_total: message.net_total,
-    discount: message.discount,
-    discount_available: message.discount_available,
-    total_taxes: message.total_taxes,
-    total: message.total,
-  };
-}
-
 function parseWriteResult(
   kind: FinanceWriteKind,
   body: unknown,
-): { result: FinanceWriteResult; ackToken: string } {
+): { result: FinancePaymentResult; ackToken: string } {
   if (!isRecord(body) || !isRecord(body.message))
     throw new NativeFinanceWriteError("uncertain");
   const message = body.message;
@@ -262,42 +153,25 @@ function parseWriteResult(
   if (message.status !== STATUSES[kind])
     throw new NativeFinanceWriteError("uncertain");
 
-  if (kind === "payment_receive") {
-    if (
-      !hasExactKeys(message, [
-        "status",
-        "payment",
-        "invoice",
-        "outstanding",
-        "ackToken",
-      ]) ||
-      !isText(message.payment) ||
-      !isText(message.invoice) ||
-      !isAmount(message.outstanding)
-    )
-      throw new NativeFinanceWriteError("uncertain");
-    return {
-      result: {
-        status: "received",
-        payment: message.payment,
-        invoice: message.invoice,
-        outstanding: message.outstanding,
-      },
-      ackToken: message.ackToken,
-    };
-  }
-
   if (
-    !hasExactKeys(message, ["status", "invoice", "total", "ackToken"]) ||
+    !hasExactKeys(message, [
+      "status",
+      "payment",
+      "invoice",
+      "outstanding",
+      "ackToken",
+    ]) ||
+    !isText(message.payment) ||
     !isText(message.invoice) ||
-    !isAmount(message.total)
+    !isAmount(message.outstanding)
   )
     throw new NativeFinanceWriteError("uncertain");
   return {
     result: {
-      status: "submitted",
+      status: "received",
+      payment: message.payment,
       invoice: message.invoice,
-      total: message.total,
+      outstanding: message.outstanding,
     },
     ackToken: message.ackToken,
   };
@@ -340,7 +214,7 @@ async function acknowledge(
 async function submit(
   kind: FinanceWriteKind,
   input: Record<string, unknown>,
-): Promise<FinanceWriteResult> {
+): Promise<FinancePaymentResult> {
   const operationKey = input.operation_key;
   if (!isText(operationKey)) throw new NativeFinanceWriteError("validation");
 
@@ -383,7 +257,7 @@ async function submit(
     throw error;
   }
 
-  let parsed: { result: FinanceWriteResult; ackToken: string };
+  let parsed: { result: FinancePaymentResult; ackToken: string };
   try {
     parsed = parseWriteResult(kind, body);
   } catch {
@@ -402,52 +276,9 @@ async function submit(
   return parsed.result;
 }
 
-/**
- * Fetch the server-resolved invoice preview. This writes nothing and takes no
- * lock: the client's own arithmetic is never shown as truth.
- */
-export async function previewInvoice(
-  input: SubmitInvoiceInput,
-): Promise<InvoicePreview> {
-  const token = nativeCsrfToken();
-  if (!token) throw new NativeFinanceWriteError("locked");
-  const response = await frappeRequest(
-    "clinic_ui.api.finance_write.save_invoice_draft",
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        [FRAPPE_CSRF_HEADER]: token,
-      },
-      body: JSON.stringify(input),
-    },
-  );
-  const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) throw failure(response.status, body);
-  return parsePreview(body);
-}
-
-export async function submitInvoice(
-  input: SubmitInvoiceInput,
-): Promise<FinanceWriteResult> {
-  return submit("invoice_submit", {
-    operation_key: input.operation_key,
-    customer: input.customer,
-    selling_price_list: input.selling_price_list,
-    due_date: input.due_date,
-    items: input.items.map((line) => ({
-      item_code: line.item_code,
-      qty: line.qty,
-    })),
-    ...(input.discount && input.discount > 0
-      ? { discount: input.discount }
-      : {}),
-  });
-}
-
 export async function receivePayment(
   input: ReceivePaymentInput,
-): Promise<FinanceWriteResult> {
+): Promise<FinancePaymentResult> {
   return submit("payment_receive", {
     operation_key: input.operation_key,
     invoice: input.invoice,

@@ -7045,29 +7045,218 @@ class Gateway:
         except Exception:
             return False
 
-    def _finance_price_list(self, name):
-        if not name:
-            return {"exists": False}
+    def native_finance_can_submit(self, doctype):
+        """The acting user's native submit authority on one accounting document."""
+
         try:
-            row = self.frappe.db.get_value(
-                finance_contract.PRICE_LIST_DOCTYPE,
-                name,
-                ["selling", "enabled", "currency"],
-                as_dict=True,
+            return bool(
+                self.frappe.has_permission(
+                    doctype,
+                    ptype="submit",
+                    user=self.frappe.session.user,
+                )
             )
         except Exception:
-            row = None
-        if row is None:
-            return {"exists": False}
-        get = getattr(row, "get", lambda key, default=None: default)
+            return False
+
+    def _finance_field_readable(self, doctype, fieldname):
+        """True when one DocField is readable and unmasked for the session user."""
+
+        meta = self.frappe.get_meta(doctype)
+        accessible_permlevels = meta.get_permlevel_access(
+            "read", user=self.frappe.session.user
+        )
+        field_definition = meta.get_field(fieldname)
+        if (
+            field_definition is None
+            or field_definition.permlevel not in accessible_permlevels
+        ):
+            return False
+        masked_fields = meta.get_masked_fields() or ()
+        return not any(
+            getattr(masked, "fieldname", None) == fieldname
+            for masked in masked_fields
+        )
+
+    def _finance_can_read_document(self, doctype, name):
+        """Check native read permission against the loaded document.
+
+        Passing only a docname can skip row-level user-permission conditions;
+        loading the document first and passing the object makes Frappe apply
+        the current user's own document and user-permission checks.
+        """
+
+        if not isinstance(name, str) or not name.strip():
+            return False
+        try:
+            document = self.frappe.get_doc(doctype, name)
+            return bool(
+                self.frappe.has_permission(
+                    doctype,
+                    ptype="read",
+                    doc=document,
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
+    def _finance_price_list_currency(self, price_list, company, transaction_date):
+        """Native price-list currency and conversion rate.
+
+        Uses the installed pricing helper, not a local Price List selector. A
+        failure is reported as unreadable; the caller refuses rather than
+        guessing a currency.
+        """
+
+        try:
+            from erpnext.stock.get_item_details import (
+                get_price_list_currency_and_exchange_rate,
+            )
+
+            make_context = getattr(self.frappe, "_dict", None)
+            if not callable(make_context):
+                return None, None
+            details = get_price_list_currency_and_exchange_rate(
+                make_context(
+                    {
+                        "doctype": finance_contract.INVOICE_DOCTYPE,
+                        "price_list": price_list,
+                        "company": company,
+                        "transaction_date": transaction_date,
+                    }
+                )
+            )
+        except Exception:
+            return None, None
+        if not isinstance(details, dict):
+            return None, None
+        currency = self._text_value(details.get("price_list_currency"))
+        rate = details.get("plc_conversion_rate")
+        try:
+            rate = float(rate) if rate is not None else 1.0
+        except Exception:
+            return currency, None
+        return currency, rate
+
+    def _finance_money_rounder(self, value):
+        """Round with the installed Frappe policy, never Python ``round``."""
+
+        try:
+            flt = self.frappe.utils.flt
+            return float(flt(value, 2))
+        except Exception:
+            raise patient_write.StoreUnavailable() from None
+
+    def _finance_get_item_details(self, args):
+        """Call the installed native pricing method; never a local selector."""
+
+        try:
+            from erpnext.stock.get_item_details import get_item_details
+
+            make_context = getattr(self.frappe, "_dict", None)
+            if not callable(make_context):
+                raise ValueError("frappe._dict is unavailable")
+            details = get_item_details(make_context(args))
+        except Exception:
+            raise patient_write.StoreUnavailable() from None
+        if not isinstance(details, dict):
+            raise patient_write.StoreUnavailable()
+        return details
+
+    def _finance_verified_item_price(self, args, item, line, currency):
+        """One native priced line, verified against the requested basis.
+
+        Native pricing may resolve customer, date, UOM and packing-unit prices.
+        This lane only accepts a result whose quantity, stock UOM, conversion
+        factor, currency and rate equal the requested stock-UOM line and whose
+        rate has no unverified discount or margin applied.
+        """
+
+        details = self._finance_get_item_details(args)
+        raw_rate = self._finance_money(details.get("rate"))
+        price_list_rate = self._finance_money(details.get("price_list_rate"))
+        qty = self._finance_money(details.get("qty"))
+        conversion_factor = self._finance_money(details.get("conversion_factor"))
+        discount_amount = self._finance_money(details.get("discount_amount")) or 0.0
+        discount_percentage = (
+            self._finance_money(details.get("discount_percentage")) or 0.0
+        )
+        margin_rate = (
+            self._finance_money(details.get("margin_rate_or_amount")) or 0.0
+        )
+        pricing_rules = details.get("pricing_rules")
+        has_pricing_rule = bool(
+            pricing_rules and pricing_rules not in ("[]", "null", "None")
+        )
+        uom = self._text_value(details.get("uom"))
+        stock_uom = self._text_value(details.get("stock_uom"))
+        priced_currency = self._text_value(details.get("currency"))
+        expected_uom = item.get("stock_uom")
+        tolerance = finance_contract.MONEY_TOLERANCE
+
+        # The installed method leaves ``rate`` at zero when no pricing rule
+        # rewrites it; the resolved price-list rate is then the line rate. Any
+        # applied rule, discount or margin must still be refused as unverified.
+        rate = raw_rate
+        if (
+            (rate is None or rate <= 0)
+            and not has_pricing_rule
+            and abs(discount_amount) <= tolerance
+            and abs(discount_percentage) <= tolerance
+            and abs(margin_rate) <= tolerance
+        ):
+            rate = price_list_rate
+        if rate is not None:
+            rate = self._finance_money_rounder(rate)
+        if price_list_rate is not None:
+            price_list_rate = self._finance_money_rounder(price_list_rate)
+        verified = (
+            rate is not None
+            and rate > 0
+            and price_list_rate is not None
+            and price_list_rate > 0
+            and abs(rate - price_list_rate) <= tolerance
+            and abs(discount_amount) <= tolerance
+            and abs(discount_percentage) <= tolerance
+            and abs(margin_rate) <= tolerance
+            and not has_pricing_rule
+            and qty is not None
+            and abs(qty - line["qty"]) <= tolerance
+            and conversion_factor is not None
+            and abs(conversion_factor - 1.0) <= tolerance
+            and uom == expected_uom
+            and stock_uom == expected_uom
+            and (priced_currency is None or priced_currency == currency)
+        )
         return {
-            "exists": True,
-            "selling": bool(get("selling")),
-            "enabled": bool(get("enabled")),
-            "currency": self._text_value(get("currency")),
+            "rate": rate,
+            "income_account": self._text_value(details.get("income_account")),
+            "cost_center": self._text_value(details.get("cost_center")),
+            "verified": verified,
         }
 
     def _finance_item(self, item_code):
+        exists = False
+        try:
+            exists = bool(
+                self.frappe.db.exists(finance_contract.ITEM_DOCTYPE, item_code)
+            )
+        except Exception:
+            return {"exists": False, "denied": True}
+        if not exists:
+            return {"exists": False, "denied": False}
+        if not self._finance_can_read_document(
+            finance_contract.ITEM_DOCTYPE, item_code
+        ):
+            return {"exists": False, "denied": True}
+        if not all(
+            self._finance_field_readable(
+                finance_contract.ITEM_DOCTYPE, field
+            )
+            for field in ("is_sales_item", "stock_uom")
+        ):
+            return {"exists": False, "denied": True}
         try:
             row = self.frappe.db.get_value(
                 finance_contract.ITEM_DOCTYPE,
@@ -7078,27 +7267,14 @@ class Gateway:
         except Exception:
             row = None
         if row is None:
-            return {"exists": False}
+            return {"exists": False, "denied": False}
         get = getattr(row, "get", lambda key, default=None: default)
         return {
             "exists": True,
+            "denied": False,
             "is_sales_item": bool(get("is_sales_item")),
             "stock_uom": self._text_value(get("stock_uom")),
         }
-
-    def _finance_item_price(self, item_code, price_list):
-        if not price_list:
-            return None
-        try:
-            return self._finance_money(
-                self.frappe.db.get_value(
-                    "Item Price",
-                    {"item_code": item_code, "price_list": price_list},
-                    "price_list_rate",
-                )
-            )
-        except Exception:
-            return None
 
     def _finance_company_defaults(self, company):
         if not company:
@@ -7131,79 +7307,132 @@ class Gateway:
             "cost_center": self._text_value(get("cost_center")),
         }
 
-    def _finance_item_defaults(self, item_code, company):
-        if not item_code or not company:
-            return {}
-        try:
-            rows = self.frappe.db.get_all(
-                finance_contract.ITEM_DEFAULT_DOCTYPE,
-                filters={"parent": item_code, "company": company},
-                fields=["income_account", "cost_center"],
-                limit=1,
-            ) or ()
-        except Exception:
-            rows = ()
-        if not rows:
-            return {}
-        get = getattr(rows[0], "get", lambda key, default=None: default)
-        return {
-            "income_account": self._text_value(get("income_account")),
-            "cost_center": self._text_value(get("cost_center")),
-        }
-
     def native_finance_invoice_detail(self, payload, discount_enabled=False):
-        """Read the pre-fence invoice decision fields under native authority."""
+        """Read the invoice decision fields through native pricing authority.
+
+        Customer, Item and Company are read under the acting user's own
+        document permission (loaded-document checks apply user-permission
+        conditions). Item pricing is resolved by the installed ERPNext
+        ``get_item_details`` method, so Cashier roles do not need Item Price or
+        Price List DocPerm and no purchase price is exposed. The native result
+        is accepted only when its quantity, stock UOM, conversion factor,
+        currency and rate match this stock-UOM line and carry no unverified
+        discount or margin. The company is exactly the framework's native
+        session default; this lane never guesses a single installed company.
+        Discounts remain unavailable.
+        """
 
         try:
-            company, currency = self._purchase_company_currency()
-            defaults = self._finance_company_defaults(company)
-            price_list = self._finance_price_list(payload["selling_price_list"])
+            company, currency = self._purchase_draft_company_currency()
+            company_denied = bool(company) and not self._finance_can_read_document(
+                finance_contract.COMPANY_DOCTYPE, company
+            )
+            defaults = (
+                {} if company_denied else self._finance_company_defaults(company)
+            )
+            today = self.site_today()
+            customer = payload["customer"]
+            customer_exists = bool(
+                self.frappe.db.exists(finance_contract.CUSTOMER_DOCTYPE, customer)
+            )
+            price_currency = None
+            price_conversion = None
+            price_conversion_unverified = False
+            if company and currency:
+                price_currency, price_conversion = (
+                    self._finance_price_list_currency(
+                        payload["selling_price_list"], company, today
+                    )
+                )
+                price_conversion_unverified = (
+                    price_conversion is None
+                    or abs(price_conversion - 1.0)
+                    > finance_contract.MONEY_TOLERANCE
+                )
+
             prices = {}
             items = {}
             income_accounts = {}
+            cost_centers = {}
+            price_unverified = set()
             cost_center = ""
             for line in payload["items"]:
                 code = line["item_code"]
                 if code in items:
                     continue
-                items[code] = self._finance_item(code)
-                prices[code] = self._finance_item_price(
-                    code, payload["selling_price_list"]
-                )
-                own = self._finance_item_defaults(code, company)
-                income_accounts[code] = (
-                    own.get("income_account")
-                    or defaults.get("default_income_account")
-                    or ""
-                )
-                if not cost_center:
-                    cost_center = own.get("cost_center") or ""
+                item = self._finance_item(code)
+                items[code] = item
+                if not item.get("exists") or item.get("denied") is True:
+                    continue
+                if (
+                    not company
+                    or not currency
+                    or not price_currency
+                    or price_currency != currency
+                    or price_conversion_unverified
+                ):
+                    price_unverified.add(code)
+                    continue
+                args = {
+                    "doctype": finance_contract.INVOICE_DOCTYPE,
+                    "item_code": code,
+                    "company": company,
+                    "customer": customer,
+                    "currency": currency,
+                    "conversion_rate": 1.0,
+                    "selling_price_list": payload["selling_price_list"],
+                    "price_list": payload["selling_price_list"],
+                    "transaction_date": today,
+                    "posting_date": today,
+                    "qty": line["qty"],
+                    "uom": item.get("stock_uom"),
+                    "stock_uom": item.get("stock_uom"),
+                    "conversion_factor": 1.0,
+                    "update_stock": finance_contract.PINNED_UPDATE_STOCK,
+                    "is_pos": 0,
+                }
+                try:
+                    priced = self._finance_verified_item_price(
+                        args, item, line, currency
+                    )
+                except Exception:
+                    price_unverified.add(code)
+                    continue
+                prices[code] = priced["rate"]
+                income_accounts[code] = priced["income_account"] or ""
+                if priced["cost_center"]:
+                    cost_centers[code] = priced["cost_center"]
+                    if not cost_center:
+                        cost_center = priced["cost_center"]
+                if priced["verified"] is not True:
+                    price_unverified.add(code)
+
             if not cost_center:
                 cost_center = defaults.get("cost_center") or ""
-            discount_available = (
-                finance_contract.discount_problem(
-                    self._finance_meta_fields(), enabled=discount_enabled
-                )
-                is None
-            )
             return {
-                "today": self.site_today(),
+                "today": today,
                 "company": company,
                 "currency": currency,
-                "customer_exists": bool(
-                    self.frappe.db.exists(
-                        finance_contract.CUSTOMER_DOCTYPE, payload["customer"]
-                    )
+                "company_denied": company_denied,
+                "customer_exists": customer_exists,
+                "customer_denied": customer_exists
+                and not self._finance_can_read_document(
+                    finance_contract.CUSTOMER_DOCTYPE, customer
                 ),
-                "price_list": price_list,
+                "price_currency": price_currency or "",
+                "price_conversion_unverified": price_conversion_unverified,
                 "prices": prices,
+                "price_unverified": tuple(sorted(price_unverified)),
+                "price_denied": False,
                 "items": items,
                 "receivable_account": (
                     defaults.get("default_receivable_account") or ""
                 ),
                 "income_accounts": income_accounts,
+                "cost_centers": cost_centers,
                 "cost_center": cost_center,
-                "discount_available": discount_available,
+                "money_rounder": self._finance_money_rounder,
+                "discount_available": False,
             }
         except Exception:
             raise patient_write.StoreUnavailable() from None
@@ -7239,6 +7468,114 @@ class Gateway:
             "grand_total": self._finance_money(get("grand_total")),
             "customer": self._text_value(get("customer")),
         }
+
+    def native_finance_invoice_view(self, native_invoice_id):
+        """Three-field invoice read under document and field rights.
+
+        The document read permission is checked first. ``status`` must then
+        exist at a readable permlevel and must not be masked for the current
+        user; ``name`` and ``docstatus`` are standard columns read only after
+        that check. No customer, item, quantity or amount is fetched here.
+        ``None`` covers a denied document, a restricted or masked status, a
+        malformed row and any adapter failure.
+        """
+
+        if (
+            not isinstance(native_invoice_id, str)
+            or not native_invoice_id.strip()
+        ):
+            return None
+        try:
+            frappe = self.frappe
+            document = frappe.get_doc(
+                finance_contract.INVOICE_DOCTYPE, native_invoice_id
+            )
+            if not frappe.has_permission(
+                finance_contract.INVOICE_DOCTYPE,
+                ptype="read",
+                doc=document,
+                user=frappe.session.user,
+            ):
+                return None
+            if not self._finance_field_readable(
+                finance_contract.INVOICE_DOCTYPE, "status"
+            ):
+                return None
+        except Exception:
+            return None
+        name = self._text_value(getattr(document, "name", None))
+        status = self._text_value(getattr(document, "status", None))
+        docstatus = getattr(document, "docstatus", None)
+        if not name or not status:
+            return None
+        if (
+            not isinstance(docstatus, int)
+            or isinstance(docstatus, bool)
+            or docstatus not in (0, 1, 2)
+        ):
+            return None
+        return {
+            "invoice_id": name,
+            "status": status,
+            "docstatus": docstatus,
+        }
+
+    def native_finance_invoice_names(self, customer, limit):
+        """Bounded, permission-aware invoice names for one readable Customer.
+
+        ``frappe.get_list`` applies the framework's own permission filtering and
+        permission-query conditions for the session user; ``get_all`` and raw
+        SQL are deliberately never used on this discovery path. The customer
+        filter and ``status`` are DocFields that can carry a permlevel or a
+        mask, so both pass the current user's own field-level read check before
+        the query is built. One row beyond the bound is requested, so an
+        over-full page is reported as ``None`` rather than silently truncated.
+        The caller still applies the document and field-level checks per record.
+        """
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit < 1
+            or limit > 1000
+        ):
+            return None
+        if not isinstance(customer, str) or not customer.strip():
+            return None
+        try:
+            if not self._finance_field_readable(
+                finance_contract.INVOICE_DOCTYPE, "status"
+            ):
+                return None
+            if not self._finance_field_readable(
+                finance_contract.INVOICE_DOCTYPE, "customer"
+            ):
+                return None
+            rows = self.frappe.get_list(
+                finance_contract.INVOICE_DOCTYPE,
+                filters={"customer": customer},
+                fields=["name"],
+                order_by="modified desc, name asc",
+                limit_page_length=limit + 1,
+            )
+        except Exception:
+            return None
+        if not isinstance(rows, (list, tuple)):
+            return None
+        if len(rows) > limit:
+            return None
+        names = []
+        for row in rows:
+            name = (
+                row.get("name")
+                if hasattr(row, "get")
+                else getattr(row, "name", None)
+            )
+            name = self._text_value(name)
+            if not name:
+                return None
+            names.append(name)
+        return names
 
     def _finance_mode_of_payment(self, name, company):
         if not name:
@@ -7475,61 +7812,6 @@ class Gateway:
             for row in rows
         ]
 
-    def _finance_invoice_facts(self, reference, expected, baseline):
-        """Closed-world re-read: posted state, GL classification, no stock row."""
-
-        if not isinstance(baseline, dict) or not isinstance(expected, dict):
-            raise patient_write.WriteUncertain()
-        try:
-            row = self.frappe.db.get_value(
-                finance_contract.INVOICE_DOCTYPE,
-                reference,
-                [
-                    "docstatus",
-                    "status",
-                    "currency",
-                    "grand_total",
-                    "net_total",
-                    "outstanding_amount",
-                ],
-                as_dict=True,
-            )
-            if row is None:
-                raise patient_write.WriteUncertain()
-            get = getattr(row, "get", lambda key, default=None: default)
-            gl_rows = self._finance_gl_rows(
-                finance_contract.INVOICE_DOCTYPE, reference
-            )
-            debit_total, credit_total, unexpected = (
-                finance_contract.invoice_gl_sums(gl_rows, expected)
-            )
-            counts = self._finance_counts()
-            facts = {
-                "doctype": finance_contract.INVOICE_DOCTYPE,
-                "docstatus": get("docstatus"),
-                "status": self._text_value(get("status")),
-                "currency": self._text_value(get("currency")),
-                "grand_total": self._finance_money(get("grand_total")),
-                "net_total": self._finance_money(get("net_total")),
-                "outstanding_amount": self._finance_money(
-                    get("outstanding_amount")
-                ),
-                "gl_rows": counts["gl_rows"]
-                - int(baseline.get("gl_rows") or 0),
-                "debit_total": round(debit_total, 2),
-                "credit_total": round(credit_total, 2),
-                "unexpected_gl_rows": unexpected,
-                "sle_rows": counts["sle_rows"]
-                - int(baseline.get("sle_rows") or 0),
-                "ple_rows": counts["ple_rows"]
-                - int(baseline.get("ple_rows") or 0),
-            }
-            return facts
-        except patient_write.WriteUncertain:
-            raise
-        except Exception:
-            raise patient_write.WriteUncertain() from None
-
     def _finance_payment_facts(self, reference, expected, baseline):
         """Closed-world re-read: payment state, GL classification, invoice delta."""
 
@@ -7577,8 +7859,129 @@ class Gateway:
         except Exception:
             raise patient_write.WriteUncertain() from None
 
-    def native_finance_invoice_facts(self, reference, expected, baseline):
-        return self._finance_invoice_facts(reference, expected, baseline)
+    def _finance_permission_filtered_rows(self, doctype, filters, fields, limit):
+        """Read ledger rows through the user's own native read permission."""
+
+        try:
+            if self.frappe.has_permission(
+                doctype, ptype="read", user=self.frappe.session.user
+            ) is not True:
+                return None
+            rows = self.frappe.get_list(
+                doctype,
+                filters=filters,
+                fields=fields,
+                order_by="name asc",
+                limit_page_length=limit,
+            )
+        except Exception:
+            return None
+        if not isinstance(rows, (list, tuple)):
+            return None
+        return list(rows)
+
+    def native_finance_invoice_posted_facts(self, reference, expected):
+        """Read the actual submitted invoice and its posted effects.
+
+        Runs before the caller's commit. The document is loaded and re-checked
+        under the acting user's own read permission (so user-permission row
+        conditions apply), and every field this comparison uses must be at a
+        readable, unmasked permlevel. GL, Payment Ledger and Stock Ledger rows
+        are read through permission-filtered ``get_list``; a denied or unreadable
+        ledger refuses the verification instead of claiming success.
+        """
+
+        if not isinstance(reference, str) or not reference.strip():
+            return None
+        if not isinstance(expected, dict):
+            return None
+        try:
+            frappe = self.frappe
+            document = frappe.get_doc(
+                finance_contract.INVOICE_DOCTYPE, reference
+            )
+            if not frappe.has_permission(
+                finance_contract.INVOICE_DOCTYPE,
+                ptype="read",
+                doc=document,
+                user=frappe.session.user,
+            ):
+                return None
+            for field in (
+                "status",
+                "currency",
+                "grand_total",
+                "net_total",
+                "outstanding_amount",
+                "update_stock",
+            ):
+                if not self._finance_field_readable(
+                    finance_contract.INVOICE_DOCTYPE, field
+                ):
+                    return None
+
+            gl_rows = self._finance_permission_filtered_rows(
+                finance_contract.GL_ENTRY_DOCTYPE,
+                {
+                    "voucher_type": finance_contract.INVOICE_DOCTYPE,
+                    "voucher_no": reference,
+                },
+                ["account", "debit", "credit"],
+                int(expected.get("gl_rows_max", expected["gl_rows"])) + 1,
+            )
+            if gl_rows is None:
+                return None
+            debit_by_account, credit_by_account, unexpected = (
+                finance_contract.invoice_gl_accounts(gl_rows, expected)
+            )
+            debit_total = sum(debit_by_account.values())
+            credit_total = sum(credit_by_account.values())
+            ple_rows = self._finance_permission_filtered_rows(
+                finance_contract.PAYMENT_LEDGER_DOCTYPE,
+                {
+                    "voucher_type": finance_contract.INVOICE_DOCTYPE,
+                    "voucher_no": reference,
+                },
+                ["name"],
+                2,
+            )
+            if ple_rows is None:
+                return None
+
+            return {
+                "doctype": finance_contract.INVOICE_DOCTYPE,
+                "docstatus": getattr(document, "docstatus", None),
+                "status": self._text_value(getattr(document, "status", None)),
+                "currency": self._text_value(
+                    getattr(document, "currency", None)
+                ),
+                "grand_total": self._finance_money(
+                    getattr(document, "grand_total", None)
+                ),
+                "net_total": self._finance_money(
+                    getattr(document, "net_total", None)
+                ),
+                "outstanding_amount": self._finance_money(
+                    getattr(document, "outstanding_amount", None)
+                ),
+                "update_stock": getattr(document, "update_stock", None),
+                "gl_rows": len(gl_rows),
+                "debit_total": round(debit_total, 2),
+                "credit_total": round(credit_total, 2),
+                "unexpected_gl_rows": unexpected,
+                "gl_accounts": {
+                    "debit": debit_by_account,
+                    "credit": credit_by_account,
+                },
+                # No Stock Ledger Entry read: Cashier has no native SLE permission
+                # and a Sales Invoice is pinned to update_stock=0. The posted
+                # document's own update_stock is verified instead.
+                "sle_rows": None,
+                "sle_verified": False,
+                "ple_rows": len(ple_rows),
+            }
+        except Exception:
+            return None
 
     def native_finance_payment_facts(self, reference, expected, baseline):
         return self._finance_payment_facts(reference, expected, baseline)

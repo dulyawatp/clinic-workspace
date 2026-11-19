@@ -38,6 +38,7 @@ CONVERTED = {
     "write.procedure.create",
     "write.stock.consume",
     "write.purchase_order.draft",
+    "write.invoice.submit",
     "write.admin.user",
 }
 
@@ -53,8 +54,14 @@ PURCHASE = {"write.purchase_order.draft"}
 FENCED = {
     "write.purchase_order.submit",
     "write.stock.receive",
+    "write.payment.receive",
     "write.admin.master",
 }
+
+# The finance lane converted only its invoice. Payment receive stays fenced and
+# read_only while the ledger carries unresolved keys.
+FINANCE = {"write.invoice.submit"}
+FINANCE_FENCED = {"write.payment.receive"}
 
 # The admin lane converted only its user write. The master write stays fenced
 # and is asserted disabled while the ledger carries unresolved keys.
@@ -79,7 +86,6 @@ UNRELATED = {
     "write.stock.adjust",
     "write.purchase_order.draft",
     "write.purchase_order.submit",
-    "write.invoice.submit",
     "write.payment.receive",
     "write.admin.master",
 }
@@ -110,12 +116,12 @@ def _capabilities(gates, role="DOC"):
 
 
 class LaneTests(unittest.TestCase):
-    def test_converted_set_is_the_patient_appointment_procedure_purchase_and_admin_lanes(self):
+    def test_converted_set_is_the_patient_appointment_procedure_purchase_finance_and_admin_lanes(self):
         self.assertEqual(set(development.CONVERTED), CONVERTED)
         self.assertFalse(CONVERTED & strict.DEFERRED_WRITE_CAPABILITIES)
         self.assertEqual(
             development.CONVERTED_FAMILIES,
-            ("patient", "appointment", "procedure", "purchase", "admin"),
+            ("patient", "appointment", "procedure", "purchase", "finance", "admin"),
         )
         self.assertEqual(set(development.FENCED_WRITES), FENCED)
         self.assertFalse(CONVERTED & FENCED)
@@ -279,7 +285,7 @@ class LaneTests(unittest.TestCase):
 
         self.assertEqual(
             tuple(report),
-            ("patient", "appointment", "procedure", "purchase", "admin"),
+            ("patient", "appointment", "procedure", "purchase", "finance", "admin"),
         )
         for name in PROCEDURE:
             self.assertEqual(
@@ -396,6 +402,158 @@ class PurchaseLaneTests(unittest.TestCase):
         )
         self.assertEqual(
             report["purchase"]["write.purchase_order.submit"],
+            {"expected": False, "observed": "read_only"},
+        )
+
+
+class FinanceLaneTests(unittest.TestCase):
+    def test_invoice_is_the_only_converted_finance_write(self):
+        finance = {
+            name
+            for name, (family, _roles) in strict.WRITE_CAPABILITY_GATES.items()
+            if family == "finance"
+        }
+
+        self.assertEqual(finance & set(development.CONVERTED), FINANCE)
+        self.assertEqual(finance - set(development.CONVERTED), FINANCE_FENCED)
+        self.assertTrue(FINANCE_FENCED <= set(development.FENCED_WRITES))
+        self.assertEqual(
+            strict.WRITE_CAPABILITY_GATES["write.invoice.submit"], ("finance", ("CAS",))
+        )
+        self.assertEqual(
+            strict.WRITE_CAPABILITY_GATES["write.payment.receive"],
+            ("finance", ("CAS",)),
+        )
+
+    def test_cas_invoice_enabled_when_the_finance_gate_is_on(self):
+        gates = _gates(finance=1)
+        capabilities = _capabilities(gates, role="CAS")
+
+        self.assertEqual(capabilities["write.invoice.submit"], "enabled")
+        self.assertEqual(capabilities["write.payment.receive"], "read_only")
+        self.assertEqual(
+            development.lane_problems(capabilities, gates, role="CAS"), []
+        )
+        self.assertEqual(development.fenced_write_problems(capabilities, 2), [])
+
+    def test_cas_invoice_must_stay_disabled_when_the_finance_gate_is_off(self):
+        gates = _gates(patient=1, appointment=1)
+        capabilities = _capabilities(gates, role="CAS")
+
+        self.assertEqual(capabilities["write.invoice.submit"], "read_only")
+        self.assertEqual(
+            development.lane_problems(capabilities, gates, role="CAS"), []
+        )
+
+    def test_cas_invoice_enabled_while_the_finance_gate_is_off_is_reported(self):
+        gates = _gates(patient=1, appointment=1)
+        capabilities = dict(
+            _capabilities(gates, role="CAS"),
+            **{"write.invoice.submit": "enabled"},
+        )
+        problems = development.lane_problems(capabilities, gates, role="CAS")
+
+        self.assertTrue(
+            any(
+                "enabled while closed" in p and "write.invoice.submit" in p
+                for p in problems
+            ),
+            problems,
+        )
+
+    def test_cas_invoice_disabled_with_the_finance_gate_on_is_reported(self):
+        gates = _gates(finance=1)
+        capabilities = dict(
+            _capabilities(gates, role="CAS"),
+            **{"write.invoice.submit": "read_only"},
+        )
+        problems = development.lane_problems(capabilities, gates, role="CAS")
+
+        self.assertTrue(
+            any("not enabled" in p and "write.invoice.submit" in p for p in problems),
+            problems,
+        )
+
+    def test_payment_receive_enabled_with_an_unresolved_ledger_is_reported(self):
+        gates = _gates(finance=1)
+        capabilities = dict(
+            _capabilities(gates, role="CAS"),
+            **{"write.payment.receive": "enabled"},
+        )
+        problems = development.fenced_write_problems(capabilities, 2)
+
+        self.assertTrue(
+            any("write.payment.receive" in p for p in problems), problems
+        )
+
+    def test_payment_receive_stays_read_only_with_an_unresolved_ledger(self):
+        gates = _gates(finance=1)
+        capabilities = _capabilities(gates, role="CAS")
+
+        self.assertEqual(capabilities["write.payment.receive"], "read_only")
+        self.assertEqual(development.fenced_write_problems(capabilities, 2), [])
+
+    def test_unpublished_payment_receive_with_an_unresolved_ledger_is_reported(self):
+        gates = _gates(finance=1)
+        capabilities = {
+            name: state
+            for name, state in _capabilities(gates, role="CAS").items()
+            if name != "write.payment.receive"
+        }
+        problems = development.fenced_write_problems(capabilities, 2)
+
+        self.assertTrue(
+            any(
+                "not published" in p and "write.payment.receive" in p
+                for p in problems
+            ),
+            problems,
+        )
+
+    def test_resolved_ledger_makes_no_payment_readiness_claim(self):
+        gates = _gates(finance=1)
+        capabilities = dict(
+            _capabilities(gates, role="CAS"),
+            **{"write.payment.receive": "enabled"},
+        )
+
+        self.assertEqual(development.fenced_write_problems(capabilities, 0), [])
+
+    def test_doc_bootstrap_does_not_expect_the_invoice_lane(self):
+        gates = _gates(patient=1, appointment=1, procedure=1, finance=1)
+        capabilities = _capabilities(gates)
+
+        self.assertEqual(capabilities["write.invoice.submit"], "read_only")
+        self.assertEqual(development.lane_problems(capabilities, gates), [])
+
+    def test_doc_invoice_enabled_is_reported(self):
+        gates = _gates(patient=1, appointment=1, procedure=1, finance=1)
+        capabilities = dict(
+            _capabilities(gates), **{"write.invoice.submit": "enabled"}
+        )
+        problems = development.lane_problems(capabilities, gates)
+
+        self.assertTrue(
+            any(
+                "enabled while closed" in p and "write.invoice.submit" in p
+                for p in problems
+            ),
+            problems,
+        )
+
+    def test_cas_lane_report_covers_the_finance_family(self):
+        gates = _gates(finance=1)
+        report = development.lane_report(
+            _capabilities(gates, role="CAS"), gates, role="CAS"
+        )
+
+        self.assertIn("finance", report)
+        self.assertEqual(
+            report["finance"]["write.invoice.submit"],
+            {"expected": True, "observed": "enabled"},
+        )
+        self.assertEqual(
+            report["finance"]["write.payment.receive"],
             {"expected": False, "observed": "read_only"},
         )
 
@@ -631,6 +789,33 @@ class CredentialTests(unittest.TestCase):
         credentials = {"users": [{"clinic_code": "DOC"}, mgr]}
 
         self.assertIs(development.credential_for(credentials, "MGR"), mgr)
+
+    def test_missing_cas_credential_fails_instead_of_passing_unverified(self):
+        credentials = {
+            "users": [
+                {"clinic_code": "DOC", "email": "doc@example.invalid", "password": "x"},
+                {"clinic_code": "CAS", "email": "cas@example.invalid"},
+            ]
+        }
+        problem = development.cas_credential_problem(credentials)
+
+        self.assertIsNotNone(problem)
+        self.assertIn("CAS", problem)
+        self.assertIn("cannot be verified", problem)
+
+    def test_complete_cas_credential_raises_no_problem(self):
+        credentials = {
+            "users": [
+                {
+                    "clinic_code": "CAS",
+                    "email": "cas@example.invalid",
+                    "password": "x",
+                    "roles": ["Accounts User"],
+                }
+            ]
+        }
+
+        self.assertIsNone(development.cas_credential_problem(credentials))
 
     def test_missing_adm_credential_fails_instead_of_passing_unverified(self):
         credentials = {

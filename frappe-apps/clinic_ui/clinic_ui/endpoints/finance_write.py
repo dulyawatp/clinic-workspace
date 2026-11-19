@@ -1,56 +1,37 @@
-"""Designed finance (invoice submit + payment receive) writes.
+"""Designed finance writes: a converted invoice lane and a fenced payment lane.
 
-Order is fixed and test-asserted for every operation, exactly like the
-purchasing family:
+The family now spans two lanes:
 
-1. shared read gate plus the explicit same-session CSRF and finance-write
-   deployment gates, then the pinned boundary and installed-field preflight;
-   either drift denies before validation,
-2. strict body validation; the client sends at most a customer, a selling price
-   list, an explicit due date and itemized ``(item, quantity)`` lines — never a
-   rate, a total, a currency, a company, a docstatus, a ledger account, a tax
-   row or a card number,
-3. the native write authority on the document this operation would create,
-4. every pre-fence refusal with a named line: unknown customer, missing or
-   non-selling price list, a due date before the posting date, a missing
-   receivable/income account or cost center, an item without a selling price or
-   income account, a duplicate charge, a discount that is not enabled, a
-   draft/cancelled/paid invoice, an over-allocation, an allocation sum that
-   differs from the paid amount, a refused payment mode (``Bank Transfer`` is
-   named), a mode without a company account, a repeated payment, a card payment
-   without a terminal reference, native authority drift and the durable budget,
-5. the pre-fence GL / Payment-Ledger / Stock-Ledger baseline used by the
-   closed-world delta re-read,
-6. the persistent site-wide fence, then the same decisions again against
-   current rows,
-7. one mutation unit through the installed submittable document (insert, then
-   submit), a closed-world re-read against the EXPECTED side-effect list, the
-   expected receipt encoded before that commit, one explicit commit and then the
-   terminal append,
-8. the one-shot acknowledgement token.
+- the **converted invoice lane** (``save_invoice_draft`` and
+  ``submit_invoice``) relies on Frappe/Marley permissions, validation,
+  controller lifecycle and native transactions instead of the historical
+  operation fence, write budget, deployment marker, receipt and
+  acknowledgement barrier. The preview resolves the installed document the
+  submit would post and writes nothing. The submit inserts and submits exactly
+  one ``Sales Invoice`` and reads it back under the caller's own native read
+  authority. ``view`` and ``invoices`` are its bounded, permission-aware
+  read/discovery surface for an unknown outcome;
+- the **fenced payment lane** (``receive_payment``) is unchanged and stays
+  behind the pinned boundary, deployment marker, ready fence store, durable
+  budget, shared fence, closed-world re-read, receipt and one-shot
+  acknowledgement. ``ack`` remains for that lane and for historical invoice
+  receipts already in the ledger.
 
-``save_invoice_draft`` is the server-side **preview**: it runs the same
-validation and pre-fence reads and returns the resolved document the single
-submit would post, but it writes nothing (no fence claim, no budget). The
-approved write budget has one invoice unit, so the designed draft→submit flow is
-one fenced mutation unit — exactly like a batch master plus receipt.
+The client sends at most a customer, a selling price list, an explicit due date
+and itemized ``(item, quantity)`` lines — never a rate, a total, a currency, a
+company, a docstatus, a ledger account, a tax row or a card number. Every
+pre-dispatch refusal is named; a post-dispatch failure is uncertain and is
+never retried automatically.
 
-A payment is one ``Payment Entry`` of type ``Receive``; the reference allocation
-is server-built and must sum to the paid amount. No PAN/CVV is ever accepted,
-prepared, logged or echoed.
-
-Every designed refusal happens **before** the fence claim. A refusal inside a
-held fence would leave the operation unresolved — a best-effort ``UNKNOWN``
-marker, otherwise ``DISPATCHED`` — and latch the whole site.
-A post-dispatch failure is uncertain: the key stays locked and the response is
-``409 {"code": "WRITE_LOCKED"}`` with no retry. The endpoint rolls back the
-partial transaction; a rollback failure raises ``RollbackFailed`` instead of
-returning a normal error.
+A payment is one ``Payment Entry`` of type ``Receive``; the reference
+allocation is server-built and must sum to the paid amount. No PAN/CVV is ever
+accepted, prepared, logged or echoed.
 """
 
 from clinic_ui.core import finance_contract, patient_write
 from clinic_ui.core.policy import INVOICE_ROLE_CODES, PAYMENT_ROLE_CODES
-from clinic_ui.endpoints import common
+from clinic_ui.core.text import is_valid_text
+from clinic_ui.endpoints import aliases, common
 
 HTTP_OK = 200
 HTTP_REFUSED = finance_contract.HTTP_REFUSED
@@ -60,10 +41,15 @@ HTTP_CONFLICT = 409
 VALIDATION_CODE = "VALIDATION"
 LOCKED_CODE = "WRITE_LOCKED"
 CONFLICT_CODE = "OPERATION_CONFLICT"
+UNCERTAIN_CODE = "WRITE_UNCERTAIN"
 
 PREVIEW_RESULT = "preview"
 SUBMITTED_RESULT = "submitted"
 RECEIVED_RESULT = "received"
+
+# Discovery is bounded, and a page over the bound refuses rather than truncates.
+MAX_NATIVE_INVOICES = 50
+MAX_INVOICE_STATUS_LENGTH = 64
 
 
 class SuccessUncertain(Exception):
@@ -101,6 +87,36 @@ def _mark_unknown(claim, reason):
         claim.unknown(reason)
     except Exception:
         return
+
+
+def _deny_unreadable_masters(gateway, detail, payload):
+    """Refuse a master the caller's own native read permission does not cover.
+
+    The gateway marks a document that exists but is unreadable (or a price that
+    came from an unreadable Item Price row) explicitly. That is a permission
+    denial (403), never a validation message that would disclose record state.
+    """
+
+    if not isinstance(detail, dict):
+        gateway.deny()
+    if detail.get("company_denied") is True:
+        gateway.deny()
+    if detail.get("customer_denied") is True:
+        gateway.deny()
+    if detail.get("price_denied") is True:
+        gateway.deny()
+    price_list = detail.get("price_list")
+    if isinstance(price_list, dict) and price_list.get("denied") is True:
+        gateway.deny()
+    items = detail.get("items")
+    if not isinstance(items, dict):
+        gateway.deny()
+    for line in payload["items"]:
+        entry = items.get(line["item_code"])
+        if not isinstance(entry, dict):
+            gateway.deny()
+        if entry.get("denied") is True:
+            gateway.deny()
 
 
 class RollbackFailed(RuntimeError):
@@ -170,6 +186,27 @@ def _shared_gate(gateway, csrf_token, allowed_codes):
     return settings, view, role
 
 
+def _invoice_gate(gateway, csrf_token):
+    """Converted invoice gate: session, CSRF, exact site, flag, role, preflight.
+
+    No operation fence, write budget, receipt, acknowledgement token or
+    deployment marker is read. The pinned boundary and installed-field
+    preflight stay, and the caller's own native create/submit authority is
+    checked per request. The payment lane keeps ``_shared_gate`` unchanged.
+    """
+
+    settings, view, role = common.authorize_invoice_write(
+        gateway, INVOICE_ROLE_CODES, csrf_token
+    )
+    if role not in INVOICE_ROLE_CODES:
+        gateway.deny()
+    if gateway.native_finance_boundary_problem() is not None:
+        gateway.deny()
+    if gateway.native_finance_install_problem() is not None:
+        gateway.deny()
+    return settings, view, role
+
+
 DOCUMENTS = {
     finance_contract.INVOICE_KIND: finance_contract.INVOICE_DOCTYPE,
     finance_contract.PAYMENT_KIND: finance_contract.PAYMENT_DOCTYPE,
@@ -203,6 +240,7 @@ def _prepare_invoice(detail, payload):
 
     totals = finance_contract.invoice_totals(detail, payload)
     income_accounts = detail.get("income_accounts") or {}
+    cost_centers = detail.get("cost_centers") or {}
     items = detail.get("items") or {}
     lines = []
     for priced in totals["lines"]:
@@ -218,7 +256,8 @@ def _prepare_invoice(detail, payload):
                 "uom": unit,
                 "stock_uom": unit,
                 "income_account": income_accounts.get(code),
-                "cost_center": detail.get("cost_center"),
+                "cost_center": cost_centers.get(code)
+                or detail.get("cost_center"),
             }
         )
     deductions = []
@@ -523,9 +562,7 @@ def _perform(
 def save_invoice_draft(gateway, body, csrf_token=None):
     """Return the server-resolved invoice preview; nothing is persisted."""
 
-    settings, _view, _role = _shared_gate(
-        gateway, csrf_token, INVOICE_ROLE_CODES
-    )
+    settings, _view, _role = _invoice_gate(gateway, csrf_token)
     try:
         payload = finance_contract.validate_invoice(body)
     except finance_contract.FinanceContractError:
@@ -538,14 +575,12 @@ def save_invoice_draft(gateway, body, csrf_token=None):
         detail = gateway.native_finance_invoice_detail(
             payload, settings.invoice_discount_enabled
         )
-    except (
-        patient_write.WriteLocked,
-        patient_write.StoreUnavailable,
-        patient_write.WriteUncertain,
-    ):
-        return _locked_response(gateway)
+    except Exception:
+        # Nothing has been dispatched yet; an unreadable target is a refusal.
+        gateway.deny()
     if detail is None:
-        return _locked_response(gateway)
+        gateway.deny()
+    _deny_unreadable_masters(gateway, detail, payload)
 
     refused = _refusal(
         gateway, finance_contract.invoice_problems(detail, payload)
@@ -582,29 +617,68 @@ def save_invoice_draft(gateway, body, csrf_token=None):
 
 
 def submit_invoice(gateway, body, csrf_token=None):
-    """Create and submit exactly one sales invoice."""
+    """Create and submit exactly one sales invoice through the native lane."""
 
-    return _perform(
-        gateway,
-        body,
-        csrf_token,
-        kind=finance_contract.INVOICE_KIND,
-        allowed_codes=INVOICE_ROLE_CODES,
-        validate=finance_contract.validate_invoice,
-        read_detail=lambda gw, payload, settings: (
-            gw.native_finance_invoice_detail(
-                payload, settings.invoice_discount_enabled
-            )
-        ),
-        problems=finance_contract.invoice_problems,
-        expected=finance_contract.expected_invoice,
-        prepare=_prepare_invoice,
-        mutate=lambda gw, prepared: gw.create_and_submit_native_sales_invoice(
-            prepared
-        ),
-        read_facts=lambda gw, reference, exp, baseline: (
-            gw.native_finance_invoice_facts(reference, exp, baseline)
-        ),
+    settings, _view, role = _invoice_gate(gateway, csrf_token)
+    if role not in INVOICE_ROLE_CODES:
+        gateway.deny()
+    try:
+        payload = finance_contract.validate_invoice(body)
+    except finance_contract.FinanceContractError:
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    if gateway.native_finance_can_write(finance_contract.INVOICE_DOCTYPE) is not True:
+        gateway.deny()
+    if gateway.native_finance_can_submit(finance_contract.INVOICE_DOCTYPE) is not True:
+        gateway.deny()
+
+    try:
+        detail = gateway.native_finance_invoice_detail(
+            payload, settings.invoice_discount_enabled
+        )
+    except Exception:
+        # Nothing has been dispatched yet; an unreadable target is a refusal.
+        gateway.deny()
+    if detail is None:
+        gateway.deny()
+    _deny_unreadable_masters(gateway, detail, payload)
+
+    prepared = _prepare_invoice(detail, payload)
+    refused = _refusal(gateway, finance_contract.invoice_problems(detail, payload))
+    if refused is not None:
+        return refused
+    if (
+        finance_contract.prepared_problem(
+            finance_contract.INVOICE_KIND, prepared
+        )
+        is not None
+    ):
+        return _respond_error(gateway, HTTP_REFUSED, VALIDATION_CODE)
+
+    expected = finance_contract.expected_invoice(detail, payload)
+    try:
+        reference = gateway.create_and_submit_native_sales_invoice(prepared)
+        facts = gateway.native_finance_invoice_posted_facts(reference, expected)
+        if (
+            facts is None
+            or finance_contract.side_effect_problem(facts, expected) is not None
+        ):
+            raise patient_write.WriteUncertain()
+        gateway.commit()
+    except Exception:
+        # The insert/submit may have reached the installed controller; never
+        # claim that nothing changed.
+        _rollback_or_raise(gateway)
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
+
+    gateway.strip_message_channels()
+    return gateway.respond_write(
+        HTTP_OK,
+        {
+            "status": SUBMITTED_RESULT,
+            "invoice": reference,
+            "total": facts["grand_total"],
+        },
     )
 
 
@@ -657,3 +731,128 @@ def acknowledge(gateway, body, csrf_token=None):
     if status != "acked":
         return _respond_error(gateway, HTTP_CONFLICT, CONFLICT_CODE)
     return gateway.respond_write(HTTP_OK, {"acknowledged": True})
+
+
+# -- read surface ----------------------------------------------------------
+#
+# Converted-workflow inspection only. Nothing here resolves write authority,
+# reads an amount, line or rate, or dispatches a native mutation. The read lane
+# is independent of the finance write flag: turning writes off must not hide an
+# invoice that already exists.
+
+
+def _strict_text(value, max_length):
+    """Bounded, control-free text without surrounding whitespace, else ``None``."""
+
+    if not is_valid_text(value, max_length) or value != value.strip():
+        return None
+    return value
+
+
+def _invoice_read_gate(gateway):
+    """Authenticated/no-store gate for the invoice read surface.
+
+    It requires the authenticated session, a finance clinic role and the exact
+    approved development site. Every record read afterwards still needs the
+    current user's own native Sales Invoice read permission and field rights.
+    """
+
+    _settings, _view, role = common.authorize(gateway, INVOICE_ROLE_CODES)
+    if role not in INVOICE_ROLE_CODES:
+        gateway.deny()
+    if aliases.native_read_scope_enabled(gateway) is not True:
+        gateway.deny()
+
+
+def _invoice_item(gateway, invoice_id):
+    """Return the three-field item for one readable invoice, or ``None``."""
+
+    try:
+        detail = gateway.native_finance_invoice_view(invoice_id)
+    except Exception:
+        return None
+    if not isinstance(detail, dict):
+        return None
+    name = detail.get("invoice_id")
+    status = detail.get("status")
+    docstatus = detail.get("docstatus")
+    if name is None or status is None:
+        return None
+    if _strict_text(name, finance_contract.MAX_TEXT_LENGTH) is None:
+        return None
+    if name != invoice_id:
+        return None
+    if _strict_text(status, MAX_INVOICE_STATUS_LENGTH) is None:
+        return None
+    if (
+        not isinstance(docstatus, int)
+        or isinstance(docstatus, bool)
+        or docstatus not in (0, 1, 2)
+    ):
+        return None
+    return {
+        "invoice_id": name,
+        "status": status,
+        "docstatus": docstatus,
+    }
+
+
+def view(gateway, invoice_id=None):
+    """Return one readable invoice's native id, status and docstatus.
+
+    The caller supplies a native docname; only the identifier it supplied is
+    echoed back. No customer, item, quantity or amount is returned. A
+    malformed, unknown or unreadable value is a 403.
+    """
+
+    _invoice_read_gate(gateway)
+    if _strict_text(invoice_id, finance_contract.MAX_TEXT_LENGTH) is None:
+        gateway.deny()
+    item = _invoice_item(gateway, invoice_id)
+    if item is None:
+        gateway.deny()
+    return {"invoice": item}
+
+
+def invoices(gateway, customer=None):
+    """Return the readable recent invoices for one Customer.
+
+    Discovery is bounded and permission-filtered: the caller's own native
+    Customer read authority is required before the query, the list is read
+    through the framework's permission-filtered ``get_list``, each row is
+    re-checked under the caller's own native Sales Invoice read authority, and
+    an over-full, malformed or duplicated page refuses the whole read rather
+    than returning a partial list. This is enough to inspect an unknown submit
+    outcome without a fence receipt.
+    """
+
+    _invoice_read_gate(gateway)
+    if _strict_text(customer, finance_contract.MAX_TEXT_LENGTH) is None:
+        gateway.deny()
+    if (
+        gateway.native_doctype_can_read(finance_contract.CUSTOMER_DOCTYPE, customer)
+        is not True
+    ):
+        gateway.deny()
+    try:
+        names = gateway.native_finance_invoice_names(
+            customer, MAX_NATIVE_INVOICES
+        )
+    except Exception:
+        gateway.deny()
+    if not isinstance(names, (list, tuple)):
+        gateway.deny()
+
+    items = []
+    seen = set()
+    for name in names:
+        if _strict_text(name, finance_contract.MAX_TEXT_LENGTH) is None:
+            gateway.deny()
+        if name in seen:
+            gateway.deny()
+        seen.add(name)
+        item = _invoice_item(gateway, name)
+        if item is None:
+            gateway.deny()
+        items.append(item)
+    return {"items": items}

@@ -10,6 +10,7 @@ the prepared body, the discount path exists only when the installed child and
 the site-config permission flag are both present, and no refund kind exists.
 """
 
+import math
 import unittest
 
 from clinic_ui.core import finance_contract, write_budgets
@@ -941,6 +942,40 @@ class PreparedBodyTests(unittest.TestCase):
                 )
 
 
+class InvoiceTotalsRoundingTests(unittest.TestCase):
+    @staticmethod
+    def frappe_legacy_round(value, precision=2):
+        """Frappe's default legacy policy: half away from zero at precision."""
+
+        multiplier = 10**precision
+        number = round(float(value) * multiplier, 8)
+        floor_number = math.floor(number)
+        if number - floor_number == 0.5:
+            number = floor_number + 1
+        else:
+            number = round(number)
+        return number / multiplier
+
+    def test_a_half_cent_uses_the_installed_rounding_policy(self):
+        payload = finance_contract.validate_invoice(
+            invoice_body(items=[{"item_code": "ITEM-1", "qty": 12.5}])
+        )
+        detail = invoice_detail(
+            prices={"ITEM-1": 0.01},
+            money_rounder=self.frappe_legacy_round,
+        )
+
+        totals = finance_contract.invoice_totals(detail, payload)
+
+        self.assertEqual(totals["lines"][0]["amount"], 0.13)
+        self.assertEqual(totals["net_total"], 0.13)
+        self.assertEqual(totals["grand_total"], 0.13)
+
+    def test_python_round_would_have_produced_a_different_half_cent(self):
+        self.assertEqual(round(0.125, 2), 0.12)
+        self.assertEqual(self.frappe_legacy_round(0.125, 2), 0.13)
+
+
 class SideEffectTests(unittest.TestCase):
     def invoice_expected(self):
         payload = finance_contract.validate_invoice(invoice_body())
@@ -961,7 +996,13 @@ class SideEffectTests(unittest.TestCase):
             "gl_rows": expected["gl_rows"],
             "debit_total": expected["debit_total"],
             "credit_total": expected["credit_total"],
-            "sle_rows": expected["sle_rows"],
+            "gl_accounts": {
+                "debit": dict(expected["debit_by_account"]),
+                "credit": dict(expected["credit_by_account"]),
+            },
+            "sle_rows": None,
+            "sle_verified": False,
+            "update_stock": 0,
             "ple_rows": expected["ple_rows"],
             "unexpected_gl_rows": 0,
             "outstanding_amount": expected["grand_total"],
@@ -1044,6 +1085,66 @@ class SideEffectTests(unittest.TestCase):
             finance_contract.payment_gl_unexpected(gl_rows, expected), 0
         )
 
+    def test_merged_gl_rows_are_grouped_by_account(self):
+        expected = self.invoice_expected()
+        gl_rows = [
+            {
+                "account": expected["debit_account"],
+                "debit": 20.0,
+                "credit": 0.0,
+            },
+            {
+                "account": "Sales - SITCO",
+                "debit": 0.0,
+                "credit": 10.0,
+            },
+            {
+                "account": "Sales - SITCO",
+                "debit": 0.0,
+                "credit": 10.0,
+            },
+        ]
+
+        debit, credit, unexpected = finance_contract.invoice_gl_accounts(
+            gl_rows, expected
+        )
+
+        self.assertEqual(debit, {expected["debit_account"]: 20.0})
+        self.assertEqual(credit, {"Sales - SITCO": 20.0})
+        self.assertEqual(unexpected, 0)
+
+    def test_separate_income_account_gl_rows_stay_separate(self):
+        expected = self.invoice_expected()
+        expected["credit_accounts"] = ["Sales A - SITCO", "Sales B - SITCO"]
+        gl_rows = [
+            {
+                "account": expected["debit_account"],
+                "debit": 20.0,
+                "credit": 0.0,
+            },
+            {
+                "account": "Sales A - SITCO",
+                "debit": 0.0,
+                "credit": 10.0,
+            },
+            {
+                "account": "Sales B - SITCO",
+                "debit": 0.0,
+                "credit": 10.0,
+            },
+        ]
+
+        debit, credit, unexpected = finance_contract.invoice_gl_accounts(
+            gl_rows, expected
+        )
+
+        self.assertEqual(debit, {expected["debit_account"]: 20.0})
+        self.assertEqual(
+            credit,
+            {"Sales A - SITCO": 10.0, "Sales B - SITCO": 10.0},
+        )
+        self.assertEqual(unexpected, 0)
+
     def test_a_gl_row_outside_the_expected_accounts_is_unexpected(self):
         expected = self.invoice_expected()
         gl_rows = [
@@ -1088,12 +1189,70 @@ class SideEffectTests(unittest.TestCase):
             )
         )
 
+    def test_two_lines_with_one_income_account_merge_into_two_gl_rows(self):
+        payload = finance_contract.validate_invoice(
+            invoice_body(
+                items=[
+                    {"item_code": "ITEM-1", "qty": 1},
+                    {"item_code": "ITEM-2", "qty": 1},
+                ]
+            )
+        )
+        detail = invoice_detail(
+            prices={"ITEM-1": 10.0, "ITEM-2": 5.0},
+            income_accounts={
+                "ITEM-1": "Sales - SITCO",
+                "ITEM-2": "Sales - SITCO",
+            },
+        )
+        expected = finance_contract.expected_invoice(detail, payload)
+        self.assertEqual(expected["gl_rows_max"], 3)
+        facts = self.invoice_facts(expected)
+        facts["gl_rows"] = 2
+        facts["gl_accounts"] = {
+            "debit": {expected["debit_account"]: 15.0},
+            "credit": {"Sales - SITCO": 15.0},
+        }
+        self.assertIsNone(
+            finance_contract.side_effect_problem(facts, expected)
+        )
+
+    def test_two_separate_income_accounts_keep_three_gl_rows(self):
+        payload = finance_contract.validate_invoice(
+            invoice_body(
+                items=[
+                    {"item_code": "ITEM-1", "qty": 1},
+                    {"item_code": "ITEM-2", "qty": 1},
+                ]
+            )
+        )
+        detail = invoice_detail(
+            prices={"ITEM-1": 10.0, "ITEM-2": 5.0},
+            income_accounts={
+                "ITEM-1": "Sales A - SITCO",
+                "ITEM-2": "Sales B - SITCO",
+            },
+        )
+        expected = finance_contract.expected_invoice(detail, payload)
+        facts = self.invoice_facts(expected)
+        facts["gl_rows"] = 3
+        facts["gl_accounts"] = {
+            "debit": {expected["debit_account"]: 15.0},
+            "credit": {
+                "Sales A - SITCO": 10.0,
+                "Sales B - SITCO": 5.0,
+            },
+        }
+        self.assertIsNone(
+            finance_contract.side_effect_problem(facts, expected)
+        )
+
     def test_a_wrong_gl_count_is_refused(self):
         expected = self.invoice_expected()
         facts = self.invoice_facts(expected)
-        facts["gl_rows"] = expected["gl_rows"] + 1
+        facts["gl_rows"] = expected["gl_rows_max"] + 1
         self.assertIn(
-            "gl row count",
+            "more gl rows",
             finance_contract.side_effect_problem(facts, expected),
         )
 
@@ -1106,9 +1265,19 @@ class SideEffectTests(unittest.TestCase):
             finance_contract.side_effect_problem(facts, expected),
         )
 
-    def test_a_stock_ledger_movement_on_an_invoice_is_refused(self):
+    def test_a_nonzero_posted_update_stock_is_refused(self):
         expected = self.invoice_expected()
         facts = self.invoice_facts(expected)
+        facts["update_stock"] = 1
+        self.assertIn(
+            "update_stock",
+            finance_contract.side_effect_problem(facts, expected),
+        )
+
+    def test_a_verified_stock_ledger_row_is_still_refused(self):
+        expected = self.invoice_expected()
+        facts = self.invoice_facts(expected)
+        facts["sle_verified"] = True
         facts["sle_rows"] = 1
         self.assertIn(
             "stock ledger",

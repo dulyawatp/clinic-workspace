@@ -82,10 +82,41 @@ it("hides both finance forms while the capabilities are read_only", async () => 
   expect(screen.queryByTestId("invoice-write-form")).toBeNull();
 });
 
-it("previews the server totals and then submits without client arithmetic", async () => {
+it("offers native invoice lookup without write capability and handles list, detail and denied reads", async () => {
+  const user = userEvent.setup();
+  serve({ "read.patient": "enabled" });
+  server.use(
+    http.get("/api/method/clinic_ui.api.finance_write.invoices", ({ request }) => {
+      expect(new URL(request.url).searchParams.get("customer")).toBe("CUST & 1");
+      return HttpResponse.json({ message: { items: [{ invoice_id: "SINV-1", status: "Unpaid", docstatus: 1 }] } });
+    }),
+    http.get("/api/method/clinic_ui.api.finance_write.view", ({ request }) => {
+      const id = new URL(request.url).searchParams.get("invoice_id");
+      return id === "SINV-1"
+        ? HttpResponse.json({ message: { invoice: { invoice_id: id, status: "Unpaid", docstatus: 1 } } })
+        : new HttpResponse(null, { status: 403 });
+    }),
+  );
+  renderWithFixtures(<InvoicesPage />, { role: "CAS", sessionMode: "live", path: ROUTES.invoices });
+  const lookup = await screen.findByRole("region", { name: "ค้นหาใบแจ้งหนี้บนเซิร์ฟเวอร์" });
+  await user.type(within(lookup).getByLabelText("ลูกค้าสำหรับค้นหา"), "CUST & 1");
+  await user.click(within(lookup).getByRole("button", { name: "ค้นหาใบแจ้งหนี้ของลูกค้า" }));
+  expect(await within(lookup).findByText(/SINV-1 · Unpaid/)).toBeInTheDocument();
+  await user.type(within(lookup).getByLabelText("เลขใบแจ้งหนี้สำหรับค้นหา"), "SINV-1");
+  await user.click(within(lookup).getByRole("button", { name: "ค้นหาตามเลขใบแจ้งหนี้" }));
+  expect(await within(lookup).findByText(/SINV-1 · Unpaid/)).toBeInTheDocument();
+  await user.clear(within(lookup).getByLabelText("เลขใบแจ้งหนี้สำหรับค้นหา"));
+  await user.type(within(lookup).getByLabelText("เลขใบแจ้งหนี้สำหรับค้นหา"), "missing");
+  await user.click(within(lookup).getByRole("button", { name: "ค้นหาตามเลขใบแจ้งหนี้" }));
+  expect(await within(lookup).findByRole("alert")).toBeInTheDocument();
+  expect(within(lookup).queryByText(/SINV-1 · Unpaid/)).toBeNull();
+});
+
+it("previews the server totals and then submits once without acknowledging", async () => {
   const user = userEvent.setup();
   const previews: Record<string, unknown>[] = [];
   const bodies: Record<string, unknown>[] = [];
+  let acknowledgements = 0;
   serve(ENABLED);
   server.use(
     http.post(PREVIEW, async ({ request }) => {
@@ -95,15 +126,13 @@ it("previews the server totals and then submits without client arithmetic", asyn
     http.post(SUBMIT, async ({ request }) => {
       bodies.push((await request.json()) as Record<string, unknown>);
       return HttpResponse.json({
-        message: {
-          status: "submitted",
-          invoice: "SINV-1",
-          total: 20,
-          ackToken: TOKEN,
-        },
+        message: { status: "submitted", invoice: "SINV-1", total: 20 },
       });
     }),
-    http.post(ACK, ack),
+    http.post(ACK, () => {
+      acknowledgements += 1;
+      return ack();
+    }),
   );
   renderWithFixtures(<InvoicesPage />, {
     role: "CAS",
@@ -138,6 +167,7 @@ it("previews the server totals and then submits without client arithmetic", asyn
   expect(bodies[0]).not.toHaveProperty("rate");
   expect(bodies[0]).not.toHaveProperty("grand_total");
   expect(await screen.findByText(/ยอดที่โพสต์ 20\.00/)).toBeTruthy();
+  expect(acknowledgements).toBe(0);
 });
 
 it("offers the discount only when the server advertises the path", async () => {
@@ -173,15 +203,9 @@ it("shows the discount field and sends an absolute amount when available", async
     http.post(SUBMIT, async ({ request }) => {
       bodies.push((await request.json()) as Record<string, unknown>);
       return HttpResponse.json({
-        message: {
-          status: "submitted",
-          invoice: "SINV-1",
-          total: 18,
-          ackToken: TOKEN,
-        },
+        message: { status: "submitted", invoice: "SINV-1", total: 18 },
       });
     }),
-    http.post(ACK, ack),
   );
   renderWithFixtures(<InvoicesPage />, {
     role: "CAS",
@@ -229,6 +253,78 @@ it("surfaces a server refusal without posting twice", async () => {
   );
 
   expect(await screen.findByText(/เซิร์ฟเวอร์ปฏิเสธรายการนี้/)).toBeTruthy();
+  expect(calls).toBe(1);
+  expect(
+    within(form).getByRole("button", { name: "ยืนยันออกใบแจ้งหนี้" }),
+  ).toBeEnabled();
+});
+
+it("stops the mounted form after an uncertain submit", async () => {
+  const user = userEvent.setup();
+  let calls = 0;
+  serve(ENABLED);
+  server.use(
+    http.post(SUBMIT, () => {
+      calls += 1;
+      return new HttpResponse(null, { status: 500 });
+    }),
+  );
+  renderWithFixtures(<InvoicesPage />, {
+    role: "CAS",
+    sessionMode: "live",
+    path: ROUTES.invoices,
+  });
+  const form = await screen.findByTestId("invoice-write-form");
+  await fillInvoice(user, form);
+  const submitButton = within(form).getByRole("button", {
+    name: "ยืนยันออกใบแจ้งหนี้",
+  });
+  await user.click(submitButton);
+
+  expect(await screen.findByText(/ผลลัพธ์ไม่แน่นอน/)).toBeTruthy();
+  expect(submitButton).toBeDisabled();
+  expect(
+    within(form).getByRole("button", { name: "ตรวจทานยอดจากเซิร์ฟเวอร์" }),
+  ).toBeDisabled();
+  expect(within(form).getByLabelText("จำนวน")).toBeDisabled();
+  expect(calls).toBe(1);
+});
+
+it("rejects a legacy ackToken envelope and stops the form", async () => {
+  const user = userEvent.setup();
+  let calls = 0;
+  let acknowledgements = 0;
+  serve(ENABLED);
+  server.use(
+    http.post(SUBMIT, () => {
+      calls += 1;
+      return HttpResponse.json({
+        message: {
+          status: "submitted",
+          invoice: "SINV-1",
+          total: 20,
+          ackToken: TOKEN,
+        },
+      });
+    }),
+    http.post(ACK, () => {
+      acknowledgements += 1;
+      return ack();
+    }),
+  );
+  renderWithFixtures(<InvoicesPage />, {
+    role: "CAS",
+    sessionMode: "live",
+    path: ROUTES.invoices,
+  });
+  const form = await screen.findByTestId("invoice-write-form");
+  await fillInvoice(user, form);
+  await user.click(
+    within(form).getByRole("button", { name: "ยืนยันออกใบแจ้งหนี้" }),
+  );
+
+  expect(await screen.findByText(/ผลลัพธ์ไม่แน่นอน/)).toBeTruthy();
+  expect(acknowledgements).toBe(0);
   expect(calls).toBe(1);
 });
 

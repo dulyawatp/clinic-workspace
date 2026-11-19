@@ -514,6 +514,7 @@ class FakeGateway:
         self.finance_boundary_problem = None
         self.finance_install_problem = None
         self.finance_create_authority = {}
+        self.finance_submit_authority = {}
         self.finance_invoice_detail = None
         self.finance_payment_detail = None
         self.finance_detail_calls = []
@@ -542,6 +543,15 @@ class FakeGateway:
         self.finance_fence_calls = []
         self.finance_fence_claim = FakeClaim()
         self.finance_fence_error = None
+        self.finance_invoice_view_value = None
+        self.finance_invoice_view_missing = False
+        self.finance_invoice_view_calls = []
+        self.finance_invoice_names = []
+        self.finance_invoice_list_calls = []
+        self.finance_invoice_list_error = None
+        self.finance_posted_facts = None
+        self.finance_posted_facts_calls = []
+        self.finance_posted_facts_error = None
 
     def setting(self, key):
         sequence = self.setting_sequences.get(key)
@@ -1959,6 +1969,64 @@ class FakeGateway:
     def native_finance_can_write(self, doctype):
         return self.finance_create_authority.get(doctype, True)
 
+    def native_finance_can_submit(self, doctype):
+        return self.finance_submit_authority.get(doctype, True)
+
+    def native_finance_invoice_view(self, invoice_id):
+        self.finance_invoice_view_calls.append(invoice_id)
+        if self.finance_invoice_view_missing:
+            return None
+        if self.finance_invoice_view_value is not None:
+            return dict(self.finance_invoice_view_value)
+        return {
+            "invoice_id": invoice_id,
+            "status": "Unpaid",
+            "docstatus": 1,
+        }
+
+    def native_finance_invoice_posted_facts(self, reference, expected):
+        self.finance_posted_facts_calls.append((reference, dict(expected)))
+        if self.finance_posted_facts_error is not None:
+            raise self.finance_posted_facts_error
+        if self.finance_posted_facts is not None:
+            facts = dict(self.finance_posted_facts)
+        else:
+            facts = {
+                "doctype": "Sales Invoice",
+                "docstatus": 1,
+                "status": "Unpaid",
+                "currency": expected.get("currency"),
+                "grand_total": expected.get("grand_total"),
+                "net_total": expected.get("net_total"),
+                "outstanding_amount": expected.get("grand_total"),
+                "gl_rows": expected.get("gl_rows"),
+                "debit_total": expected.get("debit_total"),
+                "credit_total": expected.get("credit_total"),
+                "unexpected_gl_rows": expected.get("unexpected_gl_rows"),
+                "sle_rows": None,
+                "sle_verified": False,
+                "update_stock": 0,
+                "ple_rows": 1,
+            }
+        facts.setdefault(
+            "gl_accounts",
+            {
+                "debit": {
+                    expected.get("debit_account"): expected.get("grand_total")
+                },
+                "credit": dict(expected.get("credit_by_account") or {}),
+            },
+        )
+        return facts
+
+    def native_finance_invoice_names(self, customer, limit):
+        self.finance_invoice_list_calls.append((customer, limit))
+        if self.finance_invoice_list_error is not None:
+            raise self.finance_invoice_list_error
+        if self.finance_invoice_names is None:
+            return None
+        return list(self.finance_invoice_names)
+
     def finance_invoice_detail_default(self):
         return {
             "today": "2026-11-16",
@@ -1992,9 +2060,7 @@ class FakeGateway:
         detail = self._finance_detail(detail, payload)
         if detail is None:
             return None
-        detail["discount_available"] = bool(
-            discount_enabled and detail.get("discount_child_present", True)
-        ) and bool(detail.get("discount_available", True))
+        detail["discount_available"] = False
         return detail
 
     def native_finance_payment_detail(self, payload):
