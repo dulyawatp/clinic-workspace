@@ -67,6 +67,25 @@ it("keeps the clinical note save separate from the draft and resets on switch", 
   expect(screen.queryByText("Sample note saved for this visit.")).not.toBeInTheDocument();
 });
 
+it("saves and completes a sample locally, then locks draft saving", async () => {
+  const restoreDialog = installDialogMethods();
+  const network = postSpy();
+  const user = userEvent.setup();
+  try {
+    renderVisit();
+    const save = await screen.findByRole("button", { name: "Save draft" });
+    await user.click(save);
+    expect(screen.getByTestId("visit-save-status")).toHaveTextContent(/sample draft saved/i);
+    await user.click(screen.getByRole("button", { name: "Review encounter" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Confirm sample completion" }));
+    expect(save).toBeDisabled();
+    expect(network.posts).toEqual([]);
+  } finally {
+    network.stop();
+    restoreDialog();
+  }
+});
+
 it("does not resolve a sample encounter in a live native session", async () => {
   vi.stubEnv("VITE_CLINIC_NATIVE", "1");
   server.use(http.get(NATIVE_BOOTSTRAP, () => nativeSession("DOC", {})));
