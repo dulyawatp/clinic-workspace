@@ -1,6 +1,6 @@
-"""Designed stock receive / transfer / adjust writes (default off).
+"""Designed stock receive / transfer writes and the converted adjust lane.
 
-Order is fixed and test-asserted for all three operations:
+``receive`` and ``transfer`` are unchanged and stay on the historical fence:
 
 1. shared read gate plus the explicit same-session CSRF and stock-write
    deployment gates, then the pinned boundary and installed-field preflight;
@@ -13,25 +13,37 @@ Order is fixed and test-asserted for all three operations:
    a missing, foreign or expired batch, insufficient stock at the source
    warehouse (the installed ``Insufficient Stock`` / ``Insufficient Stock for
    Batch`` titles), a missing or equal target warehouse, over-receipt against a
-   referenced purchase order, a company without a stock adjustment account and
-   the durable budget,
+   referenced purchase order and the durable budget,
 5. the pre-fence Stock Ledger / Bin baseline used by the delta re-read,
 6. the persistent site-wide fence, then the same decisions again against
    current rows,
-7. one mutation unit through the installed submittable document (for receive:
-   the batch master creation first, then the submitted ``Purchase Receipt``),
-   a closed-world re-read against the EXPECTED side-effect list, the encoded
-   terminal receipt, one explicit commit and its append — encoded before the
-   commit, so a fence-rejected receipt cannot follow a durable native write,
+7. one mutation unit through the installed submittable document, a closed-world
+   re-read against the EXPECTED side-effect list, the encoded terminal receipt,
+   one explicit commit and its append,
 8. the one-shot acknowledgement token.
 
-Every designed refusal happens **before** the fence claim. A refusal inside a
-held fence would terminate the operation ``UNKNOWN`` and latch the whole site.
-A post-dispatch failure is uncertain: the key stays locked and the response is
-``409 {"code": "WRITE_LOCKED"}`` with no retry. The endpoint rolls back the
-partial transaction; a rollback failure raises :class:`RollbackFailed` to Frappe
-cleanup instead of returning that 409, since a normal response could let the
-framework's request-end commit persist the partial write.
+``adjust`` is the **converted lane**. The client sends the native document
+fields themselves — ``purpose``, ``company``, ``item_code``, ``warehouse``,
+``qty``, ``valuation_rate``, ``expense_account`` and an optional batch — and
+this endpoint inserts and submits exactly one ``Stock Reconciliation`` through
+the installed controller. Frappe/Marley permissions, Select and quantity
+validation, posting-time rules, lifecycle and the transaction do the deciding;
+no value is guessed, substituted or checked again here. It still requires the
+authenticated session, the same-session CSRF token, the exact approved site,
+the stock flag, an existing clinic stock role code, the pinned boundary and the
+caller's own native create and submit authority (which grants nothing). The success envelope returns the native
+identifier and docstatus. A site with no reviewed reason field means the reason
+is simply not part of the payload and nothing claims it was stored.
+
+After a dispatch the endpoint rolls the partial transaction back first. A
+failed rollback raises :class:`RollbackFailed` to Frappe cleanup instead of
+returning a response, since a normal response could let the framework's
+request-end commit persist the partial write. Once the rollback succeeded the
+installed framework's own refusal keeps its meaning: its ``ValidationError``
+family (including ``MandatoryError`` and ``LinkValidationError``) answers
+``422 {"code": "VALIDATION"}`` and its ``PermissionError`` is a 403 denial.
+Any other post-dispatch failure is uncertain and answers
+``409 {"code": "WRITE_UNCERTAIN"}`` with no retry.
 """
 
 from clinic_ui.core import patient_write, stock_contract
@@ -46,6 +58,7 @@ HTTP_CONFLICT = 409
 VALIDATION_CODE = "VALIDATION"
 LOCKED_CODE = "WRITE_LOCKED"
 CONFLICT_CODE = "OPERATION_CONFLICT"
+UNCERTAIN_CODE = "WRITE_UNCERTAIN"
 
 RECEIVED_RESULT = "received"
 TRANSFERRED_RESULT = "transferred"
@@ -158,6 +171,31 @@ def _shared_gate(gateway, csrf_token, allowed_codes):
     return settings, view, role
 
 
+ADJUST_ROLES = STOCK_ROLE_CODES | ADJUST_ROLE_CODES
+
+
+def _adjust_gate(gateway, csrf_token):
+    """Converted adjustment gate: session, CSRF, exact site, flag, stock role.
+
+    The clinic gate accepts the existing stock or adjustment role code, so the
+    pharmacy Stock Manager reaches the endpoint exactly as Frappe already
+    permits; this grants nothing. The caller's own native Stock Reconciliation
+    create/submit authority is the real permission. No operation fence, write
+    budget, receipt, acknowledgement token or deployment marker is read. The
+    pinned boundary stays. The fenced receive/transfer lane keeps
+    ``_shared_gate`` unchanged.
+    """
+
+    settings, view, role = common.authorize_stock_adjust_write(
+        gateway, ADJUST_ROLES, csrf_token
+    )
+    if role not in ADJUST_ROLES:
+        gateway.deny()
+    if gateway.native_stock_boundary_problem() is not None:
+        gateway.deny()
+    return settings, view, role
+
+
 DOCUMENTS = {
     stock_contract.RECEIVE_KIND: stock_contract.PURCHASE_RECEIPT_DOCTYPE,
     stock_contract.TRANSFER_KIND: stock_contract.STOCK_ENTRY_DOCTYPE,
@@ -218,23 +256,6 @@ def _prepare_transfer(detail, payload):
         "target_warehouse": payload["target_warehouse"],
         "batch_no": payload.get("batch_id"),
         "create_batch": False,
-        "posting_date": detail.get("today"),
-        "set_posting_time": True,
-        "company": detail.get("company"),
-    }
-
-
-def _prepare_adjust(detail, payload):
-    item = detail.get("item") or {}
-    return {
-        "item_code": payload["item_code"],
-        "qty": payload["qty"],
-        "uom": item.get("stock_uom"),
-        "warehouse": payload["warehouse"],
-        "batch_no": payload.get("batch_id"),
-        "create_batch": False,
-        "reason": payload["reason"],
-        "expense_account": detail.get("stock_adjustment_account"),
         "posting_date": detail.get("today"),
         "set_posting_time": True,
         "company": detail.get("company"),
@@ -530,25 +551,61 @@ def transfer(gateway, body, csrf_token=None):
 
 
 def adjust(gateway, body, csrf_token=None):
-    """Reconcile a counted quantity (ADM only, reason recorded)."""
+    """Create and submit one reconciliation from the native document fields.
 
-    return _perform(
-        gateway,
-        body,
-        csrf_token,
-        kind=stock_contract.ADJUST_KIND,
-        allowed_codes=ADJUST_ROLE_CODES,
-        validate=stock_contract.validate_adjust,
-        read_detail=lambda gw, payload: gw.native_stock_adjust_detail(payload),
-        problems=stock_contract.adjust_problems,
-        expected=stock_contract.expected_adjust,
-        prepare=_prepare_adjust,
-        mutate=lambda gw, prepared: gw.create_native_stock_reconciliation(
-            prepared
-        ),
-        read_facts=lambda gw, reference, exp, baseline: (
-            gw.native_stock_adjust_facts(reference, exp, baseline)
-        ),
+    Input shape and the installed controller are the only validation: the body
+    carries the document's own fields, and Frappe decides permissions, Select
+    values, quantity, posting and the submit lifecycle.
+    """
+
+    _settings, _view, role = _adjust_gate(gateway, csrf_token)
+    if role not in ADJUST_ROLES:
+        gateway.deny()
+    try:
+        payload = stock_contract.validate_adjust(body)
+    except stock_contract.StockContractError:
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    doctype = stock_contract.STOCK_RECONCILIATION_DOCTYPE
+    if gateway.native_stock_can_create(doctype) is not True:
+        gateway.deny()
+    if gateway.native_stock_can_submit(doctype) is not True:
+        gateway.deny()
+
+    try:
+        created = gateway.create_and_submit_native_stock_reconciliation(payload)
+        reference = created.get("name") if isinstance(created, dict) else None
+        docstatus = (
+            created.get("docstatus") if isinstance(created, dict) else None
+        )
+        if not isinstance(reference, str) or not reference.strip():
+            raise patient_write.WriteUncertain()
+        if not isinstance(docstatus, int) or isinstance(docstatus, bool):
+            raise patient_write.WriteUncertain()
+        gateway.commit()
+    except Exception as exc:
+        # Roll the partial transaction back first; a rollback failure escapes
+        # (RollbackFailed), so no envelope can be followed by a request-end
+        # commit. Once the rollback succeeded the request holds no partial
+        # write, so an installed refusal may be reported as the definite
+        # outcome it is; anything else stays uncertain.
+        _rollback_or_raise(gateway)
+        if gateway.is_native_permission_denial(exc):
+            gateway.deny()
+        if gateway.is_native_validation_error(exc):
+            return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
+
+    gateway.strip_message_channels()
+    return gateway.respond_write(
+        HTTP_OK,
+        {
+            "status": ADJUSTED_RESULT,
+            "reconciliation": {
+                "reconciliation_id": reference,
+                "docstatus": docstatus,
+            },
+        },
     )
 
 

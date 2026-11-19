@@ -39,6 +39,7 @@ CONVERTED = {
     "write.stock.consume",
     "write.purchase_order.draft",
     "write.invoice.submit",
+    "write.stock.adjust",
     "write.admin.user",
 }
 
@@ -54,9 +55,15 @@ PURCHASE = {"write.purchase_order.draft"}
 FENCED = {
     "write.purchase_order.submit",
     "write.stock.receive",
+    "write.stock.transfer",
     "write.payment.receive",
     "write.admin.master",
 }
+
+# The stock lane converted only its adjustment. Receive and transfer stay
+# fenced, and consumption is never consuming-ready here.
+STOCK = {"write.stock.adjust"}
+STOCK_FENCED = {"write.stock.receive", "write.stock.transfer"}
 
 # The finance lane converted only its invoice. Payment receive stays fenced and
 # read_only while the ledger carries unresolved keys.
@@ -83,7 +90,6 @@ CONSUMING = {"write.stock.consume"}
 UNRELATED = {
     "write.stock.receive",
     "write.stock.transfer",
-    "write.stock.adjust",
     "write.purchase_order.draft",
     "write.purchase_order.submit",
     "write.payment.receive",
@@ -97,31 +103,46 @@ def _gates(**opened):
     return gates
 
 
-def _capabilities(gates, role="DOC"):
+def _capabilities(gates, role="DOC", adjust_authority=None):
     """Model the site bootstrap: expected writes minus the never-ready set.
 
-    The fence-gated purchase writes are modelled as disabled, which is the
-    state an unresolved ledger produces.
+    The fence-gated writes are modelled as disabled, which is the state an
+    unresolved ledger produces. ``write.stock.adjust`` follows the backend rule
+    rather than the strict role map: a stock role, the stock flag and the
+    caller's own probed reconciliation authority.
     """
 
     capabilities = {name: "read_only" for name in strict.WRITE_CAPABILITY_GATES}
-    expected = (
-        strict.expected_enabled_writes(gates, role)
-        - development.NEVER_ENABLED
-        - development.FENCED_WRITES
-    )
+    expected = strict.expected_enabled_writes(gates, role) - {
+        development.ADJUST_CAPABILITY
+    }
+    if (
+        role in development.ADJUST_ROLE_SET
+        and gates.get("stock") in (1, True, "1")
+        and adjust_authority is True
+    ):
+        expected.add(development.ADJUST_CAPABILITY)
+    expected = expected - development.NEVER_ENABLED - development.FENCED_WRITES
     for name in expected:
         capabilities[name] = "enabled"
     return capabilities
 
 
 class LaneTests(unittest.TestCase):
-    def test_converted_set_is_the_patient_appointment_procedure_purchase_finance_and_admin_lanes(self):
+    def test_converted_set_is_the_patient_appointment_procedure_purchase_stock_finance_and_admin_lanes(self):
         self.assertEqual(set(development.CONVERTED), CONVERTED)
         self.assertFalse(CONVERTED & strict.DEFERRED_WRITE_CAPABILITIES)
         self.assertEqual(
             development.CONVERTED_FAMILIES,
-            ("patient", "appointment", "procedure", "purchase", "finance", "admin"),
+            (
+                "patient",
+                "appointment",
+                "procedure",
+                "purchase",
+                "stock",
+                "finance",
+                "admin",
+            ),
         )
         self.assertEqual(set(development.FENCED_WRITES), FENCED)
         self.assertFalse(CONVERTED & FENCED)
@@ -285,7 +306,15 @@ class LaneTests(unittest.TestCase):
 
         self.assertEqual(
             tuple(report),
-            ("patient", "appointment", "procedure", "purchase", "finance", "admin"),
+            (
+                "patient",
+                "appointment",
+                "procedure",
+                "purchase",
+                "stock",
+                "finance",
+                "admin",
+            ),
         )
         for name in PROCEDURE:
             self.assertEqual(
@@ -719,6 +748,232 @@ class AdminLaneTests(unittest.TestCase):
         )
 
 
+class StockLaneTests(unittest.TestCase):
+    def test_adjust_is_the_only_converted_stock_write(self):
+        stock = {
+            name
+            for name, (family, _roles) in strict.WRITE_CAPABILITY_GATES.items()
+            if family == "stock"
+        }
+
+        self.assertEqual(stock & set(development.CONVERTED), STOCK)
+        self.assertEqual(stock - set(development.CONVERTED), STOCK_FENCED)
+        self.assertTrue(STOCK_FENCED <= set(development.FENCED_WRITES))
+        self.assertEqual(development.ADJUST_CAPABILITY, "write.stock.adjust")
+        self.assertEqual(tuple(development.ADJUST_ROLE_SET), ("PHA", "ADM"))
+        # The strict role map admits the adjustment for ADM only; this check
+        # decides it from the probed authority instead.
+        self.assertEqual(
+            strict.WRITE_CAPABILITY_GATES["write.stock.adjust"],
+            ("stock", ("ADM",)),
+        )
+
+    def test_expected_adjust_requires_the_native_authority(self):
+        gates = _gates(stock=1)
+
+        self.assertIn(
+            "write.stock.adjust",
+            development.expected_converted(gates, "PHA", True),
+        )
+        self.assertNotIn(
+            "write.stock.adjust",
+            development.expected_converted(gates, "PHA", False),
+        )
+        self.assertNotIn(
+            "write.stock.adjust",
+            development.expected_converted(gates, "PHA", None),
+        )
+
+    def test_expected_adjust_requires_the_open_stock_gate(self):
+        gates = _gates(patient=1, appointment=1)
+
+        self.assertNotIn(
+            "write.stock.adjust",
+            development.expected_converted(gates, "PHA", True),
+        )
+
+    def test_expected_adjust_requires_an_admitted_role(self):
+        gates = _gates(stock=1)
+
+        self.assertNotIn(
+            "write.stock.adjust",
+            development.expected_converted(gates, "DOC", True),
+        )
+
+    def test_unreadable_authority_is_a_problem_not_a_pass(self):
+        gates = _gates(stock=1)
+        capabilities = _capabilities(gates, role="PHA")
+
+        self.assertEqual(
+            development.adjust_lane_problems(capabilities, gates, "PHA", None),
+            ["native Stock Reconciliation authority unreadable"],
+        )
+
+    def test_pha_adjust_enabled_with_authority_and_gate_is_accepted(self):
+        gates = _gates(stock=1)
+        capabilities = _capabilities(gates, role="PHA", adjust_authority=True)
+
+        self.assertEqual(capabilities["write.stock.adjust"], "enabled")
+        self.assertEqual(
+            development.adjust_lane_problems(capabilities, gates, "PHA", True), []
+        )
+        self.assertEqual(
+            development.lane_problems(
+                capabilities, gates, role="PHA", adjust_authority=True
+            ),
+            [],
+        )
+
+    def test_pha_adjust_enabled_without_authority_is_reported(self):
+        # The flag and the role are not enough: no native reconciliation
+        # authority means the advertised enabled state is a defect.
+        gates = _gates(stock=1)
+        capabilities = dict(
+            _capabilities(gates, role="PHA", adjust_authority=False),
+            **{"write.stock.adjust": "enabled"},
+        )
+
+        problems = development.adjust_lane_problems(capabilities, gates, "PHA", False)
+        self.assertTrue(any("write.stock.adjust" in p for p in problems), problems)
+        self.assertTrue(
+            any(
+                "enabled while closed" in p and "write.stock.adjust" in p
+                for p in development.lane_problems(
+                    capabilities, gates, role="PHA", adjust_authority=False
+                )
+            )
+        )
+
+    def test_pha_adjust_read_only_with_authority_and_gate_open_is_reported(self):
+        gates = _gates(stock=1)
+        capabilities = _capabilities(gates, role="PHA", adjust_authority=True)
+        capabilities["write.stock.adjust"] = "read_only"
+
+        problems = development.adjust_lane_problems(capabilities, gates, "PHA", True)
+        self.assertTrue(any("expected 'enabled'" in p for p in problems), problems)
+        self.assertTrue(
+            any(
+                "not enabled" in p and "write.stock.adjust" in p
+                for p in development.lane_problems(
+                    capabilities, gates, role="PHA", adjust_authority=True
+                )
+            )
+        )
+
+    def test_adm_adjust_without_authority_stays_read_only(self):
+        gates = _gates(stock=1)
+        capabilities = _capabilities(gates, role="ADM", adjust_authority=False)
+
+        self.assertEqual(capabilities["write.stock.adjust"], "read_only")
+        self.assertEqual(
+            development.adjust_lane_problems(capabilities, gates, "ADM", False), []
+        )
+
+    def test_adm_adjust_enabled_without_authority_is_reported(self):
+        gates = _gates(stock=1)
+        capabilities = dict(
+            _capabilities(gates, role="ADM", adjust_authority=False),
+            **{"write.stock.adjust": "enabled"},
+        )
+
+        problems = development.adjust_lane_problems(capabilities, gates, "ADM", False)
+        self.assertTrue(any("write.stock.adjust" in p for p in problems), problems)
+
+    def test_doc_is_never_expected_to_adjust(self):
+        gates = _gates(patient=1, appointment=1, stock=1)
+        capabilities = _capabilities(gates, adjust_authority=True)
+
+        self.assertEqual(capabilities["write.stock.adjust"], "read_only")
+        self.assertEqual(
+            development.lane_problems(capabilities, gates, adjust_authority=True), []
+        )
+
+    def test_fenced_stock_writes_stay_disabled_with_an_unresolved_ledger(self):
+        gates = _gates(stock=1)
+        capabilities = _capabilities(gates, role="PHA", adjust_authority=True)
+
+        for name in sorted(STOCK_FENCED):
+            self.assertEqual(capabilities[name], "read_only", name)
+        self.assertEqual(capabilities["write.stock.consume"], "read_only")
+        self.assertEqual(development.fenced_write_problems(capabilities, 2), [])
+
+    def test_stock_lane_report_covers_the_stock_family(self):
+        gates = _gates(stock=1)
+        report = development.lane_report(
+            _capabilities(gates, role="PHA", adjust_authority=True),
+            gates,
+            role="PHA",
+            adjust_authority=True,
+        )
+
+        self.assertIn("stock", report)
+        self.assertEqual(
+            report["stock"]["write.stock.adjust"],
+            {"expected": True, "observed": "enabled"},
+        )
+        for name in sorted(STOCK_FENCED):
+            self.assertEqual(
+                report["stock"][name], {"expected": False, "observed": "read_only"}
+            )
+
+
+class StockAuthorityProbeTests(unittest.TestCase):
+    def test_probe_script_reads_create_and_submit_for_each_identity(self):
+        script = development.stock_adjust_probe_script(
+            ["pha@example.invalid", "adm@example.invalid"]
+        )
+
+        self.assertIn("'Stock Reconciliation'", script)
+        self.assertIn("ptype='create'", script)
+        self.assertIn("ptype='submit'", script)
+        self.assertIn("'pha@example.invalid'", script)
+        self.assertIn("'adm@example.invalid'", script)
+        self.assertNotIn("password", script)
+
+    def test_authority_requires_both_rights(self):
+        observed = {
+            "both@example.invalid": {"create": True, "submit": True},
+            "create@example.invalid": {"create": True, "submit": False},
+            "submit@example.invalid": {"create": False, "submit": True},
+            "none@example.invalid": {"create": False, "submit": False},
+        }
+
+        self.assertIs(
+            development.stock_adjust_authority(observed, "both@example.invalid"),
+            True,
+        )
+        self.assertIs(
+            development.stock_adjust_authority(observed, "create@example.invalid"),
+            False,
+        )
+        self.assertIs(
+            development.stock_adjust_authority(observed, "submit@example.invalid"),
+            False,
+        )
+        self.assertIs(
+            development.stock_adjust_authority(observed, "none@example.invalid"),
+            False,
+        )
+
+    def test_unreadable_probe_is_unknown(self):
+        for observed in (
+            None,
+            {},
+            {"missing@example.invalid": None},
+            {"bad@example.invalid": {"create": True}},
+            {"bad@example.invalid": {"create": 1, "submit": 1}},
+        ):
+            with self.subTest(observed=observed):
+                self.assertIsNone(
+                    development.stock_adjust_authority(
+                        observed, "bad@example.invalid"
+                    )
+                )
+
+    def test_empty_probe_targets_no_identity(self):
+        self.assertIn("emails = []", development.stock_adjust_probe_script([]))
+
+
 class FencedWriteTests(unittest.TestCase):
     def test_unresolved_ledger_keeps_submit_and_receipt_disabled(self):
         gates = _gates(patient=1, appointment=1, procedure=1, purchase=1)
@@ -789,6 +1044,33 @@ class CredentialTests(unittest.TestCase):
         credentials = {"users": [{"clinic_code": "DOC"}, mgr]}
 
         self.assertIs(development.credential_for(credentials, "MGR"), mgr)
+
+    def test_missing_pha_credential_fails_instead_of_passing_unverified(self):
+        credentials = {
+            "users": [
+                {"clinic_code": "DOC", "email": "doc@example.invalid", "password": "x"},
+                {"clinic_code": "PHA", "email": "pha@example.invalid"},
+            ]
+        }
+        problem = development.pha_credential_problem(credentials)
+
+        self.assertIsNotNone(problem)
+        self.assertIn("PHA", problem)
+        self.assertIn("cannot be verified", problem)
+
+    def test_complete_pha_credential_raises_no_problem(self):
+        credentials = {
+            "users": [
+                {
+                    "clinic_code": "PHA",
+                    "email": "pha@example.invalid",
+                    "password": "x",
+                    "roles": ["Stock Manager"],
+                }
+            ]
+        }
+
+        self.assertIsNone(development.pha_credential_problem(credentials))
 
     def test_missing_cas_credential_fails_instead_of_passing_unverified(self):
         credentials = {

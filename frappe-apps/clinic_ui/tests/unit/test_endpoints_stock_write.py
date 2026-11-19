@@ -1,10 +1,10 @@
-"""Endpoint tests for the stock receive/transfer/adjust family.
+"""Endpoint tests for the stock receive/transfer family and the adjust lane.
 
-The fake gateway proves gate ordering, the strict bodies, every pre-fence
-refusal (role, boundary/install drift, unknown masters, missing/expired batch,
-insufficient stock with a named line, over-receipt, missing target warehouse,
-missing adjustment account, budget), the fence-before-native ordering, the
-closed-world side-effect check, the receipt and the one-shot ack.
+The fake gateway proves gate ordering and the strict bodies for the retained
+fenced receive/transfer lane. For the converted adjustment lane it proves the
+CSRF/role/site gate, native create and submit authority, the native field
+payload (purpose, company, valuation rate, difference account), the uncertain
+outcome path, and that no fence, budget, receipt or acknowledgement is read.
 """
 
 import unittest
@@ -17,6 +17,8 @@ from .fake_gateway import (
     Denied,
     FakeGateway,
     FakeStockReceipt,
+    NativePermissionDenied,
+    NativeValidationError,
     SECRET,
     session_view,
     settings,
@@ -97,7 +99,6 @@ def gateway(role="PHA", **overrides):
     fake.site_today_value = "2026-11-16"
     fake.stock_receive_detail = detail()
     fake.stock_transfer_detail = detail()
-    fake.stock_adjust_detail = detail()
     fake.stock_baseline_value = {
         "stock_ledger_rows": 5,
         "gl_rows": 10,
@@ -135,10 +136,13 @@ def transfer_body(**overrides):
 def adjust_body(**overrides):
     values = {
         "operation_key": KEY,
+        "purpose": "Stock Reconciliation",
+        "company": "SIT Synthetic Company USD",
         "item_code": "ITEM-1",
-        "qty": 3.0,
         "warehouse": "WH-1",
-        "reason": "Count discrepancy",
+        "qty": 3.0,
+        "valuation_rate": 12.5,
+        "expense_account": "Temporary Opening - SITCO",
         "batch_id": "BATCH-1",
     }
     values.update(overrides)
@@ -393,58 +397,202 @@ class TransferTests(unittest.TestCase):
 
 
 class AdjustTests(unittest.TestCase):
-    def test_a_reconciliation_with_a_reason_is_submitted_once(self):
+    def test_a_reconciliation_is_created_and_submitted_natively(self):
         fake = gateway(role="ADM")
+
+        payload = stock_write.adjust(fake, adjust_body(), CSRF)
+
+        self.assertEqual(
+            payload,
+            {
+                "status": "adjusted",
+                "reconciliation": {
+                    "reconciliation_id": "SR-1",
+                    "docstatus": 1,
+                },
+            },
+        )
+        prepared = fake.stock_reconciliation_calls[0]
+        self.assertEqual(prepared["purpose"], "Stock Reconciliation")
+        self.assertEqual(prepared["company"], "SIT Synthetic Company USD")
+        self.assertEqual(prepared["item_code"], "ITEM-1")
+        self.assertEqual(prepared["warehouse"], "WH-1")
+        self.assertEqual(prepared["qty"], 3.0)
+        self.assertEqual(prepared["valuation_rate"], 12.5)
+        self.assertEqual(
+            prepared["expense_account"], "Temporary Opening - SITCO"
+        )
+        self.assertEqual(prepared["batch_id"], "BATCH-1")
+        self.assertEqual(fake.stock_detail_calls, [])
+        self.assertEqual(fake.stock_fence_calls, [])
+        self.assertEqual(fake.stock_receipt_list_calls, [])
+        self.assertEqual(fake.stock_ack_calls, [])
+        self.assertEqual(fake.commit_calls, 1)
+
+    def test_both_clinic_roles_reach_the_native_document(self):
+        for role in ("PHA", "ADM"):
+            with self.subTest(role=role):
+                fake = gateway(role=role)
+                payload = stock_write.adjust(fake, adjust_body(), CSRF)
+                self.assertEqual(payload["status"], "adjusted")
+                self.assertEqual(len(fake.stock_reconciliation_calls), 1)
+
+    def test_native_create_and_submit_authority_decide_for_both_roles(self):
+        for role in ("PHA", "ADM"):
+            for authority in (
+                "stock_create_authority",
+                "stock_submit_authority",
+            ):
+                with self.subTest(role=role, authority=authority):
+                    fake = gateway(role=role)
+                    setattr(
+                        fake,
+                        authority,
+                        {"Stock Reconciliation": False},
+                    )
+                    with self.assertRaises(Denied):
+                        stock_write.adjust(fake, adjust_body(), CSRF)
+                    self.assertEqual(fake.stock_reconciliation_calls, [])
+
+    def test_the_deployment_marker_and_fence_store_are_not_required(self):
+        fake = gateway(role="ADM")
+        fake.deployment_approved = False
+        fake.fence_ready = False
 
         payload = stock_write.adjust(fake, adjust_body(), CSRF)
 
         self.assertEqual(payload["status"], "adjusted")
-        self.assertEqual(
-            payload["movement"],
-            {
-                "kind": "stock_adjust",
-                "item_code": "ITEM-1",
-                "warehouse": "WH-1",
-                "qty": 3.0,
-                "reason": "Count discrepancy",
-            },
-        )
-        prepared = fake.stock_reconciliation_calls[0]
-        self.assertEqual(prepared["qty"], 3.0)
-        self.assertEqual(prepared["reason"], "Count discrepancy")
-        self.assertEqual(
-            prepared["expense_account"], "Stock Adjustment - SITCO"
-        )
-        self.assertEqual(fake.stock_fence_calls[0][1], "stock_adjust")
-
-    def test_only_the_adjustment_role_may_reconcile(self):
-        fake = gateway(role="PHA")
-        with self.assertRaises(Denied):
-            stock_write.adjust(fake, adjust_body(), CSRF)
         self.assertEqual(fake.stock_fence_calls, [])
 
-    def test_a_missing_reason_is_validation(self):
+    def test_the_body_must_carry_the_document_identity_fields(self):
+        for missing in (
+            "purpose",
+            "company",
+            "item_code",
+            "warehouse",
+        ):
+            with self.subTest(missing=missing):
+                body = adjust_body()
+                body.pop(missing)
+                fake = gateway(role="ADM")
+                payload = stock_write.adjust(fake, body, CSRF)
+                self.assertEqual(payload, {"code": "VALIDATION"})
+                self.assertEqual(fake.write_responses[-1][0], 422)
+                self.assertEqual(fake.stock_reconciliation_calls, [])
+
+    def test_the_body_is_strict_and_rejects_a_reason(self):
         fake = gateway(role="ADM")
-        payload = stock_write.adjust(fake, adjust_body(reason=" "), CSRF)
+
+        payload = stock_write.adjust(
+            fake, {**adjust_body(), "reason": "Count discrepancy"}, CSRF
+        )
+
         self.assertEqual(payload, {"code": "VALIDATION"})
-        self.assertEqual(fake.write_responses[-1][0], 422)
-        self.assertEqual(fake.stock_fence_calls, [])
+        self.assertEqual(fake.stock_reconciliation_calls, [])
 
-    def test_a_missing_adjustment_account_is_refused_pre_fence(self):
+    def test_a_negative_quantity_or_rate_is_validation(self):
+        for drift in ({"qty": -1.0}, {"valuation_rate": -1.0}):
+            with self.subTest(drift=drift):
+                fake = gateway(role="ADM")
+                payload = stock_write.adjust(
+                    fake, adjust_body(**drift), CSRF
+                )
+                self.assertEqual(payload, {"code": "VALIDATION"})
+                self.assertEqual(fake.stock_reconciliation_calls, [])
+
+    def test_optional_native_fields_are_passed_through_as_absent(self):
         fake = gateway(role="ADM")
-        fake.stock_adjust_detail = detail(stock_adjustment_account=None)
+        body = adjust_body()
+        for key in ("qty", "valuation_rate", "expense_account", "batch_id"):
+            body.pop(key)
+
+        payload = stock_write.adjust(fake, body, CSRF)
+
+        self.assertEqual(payload["status"], "adjusted")
+        prepared = fake.stock_reconciliation_calls[0]
+        self.assertIsNone(prepared["qty"])
+        self.assertIsNone(prepared["valuation_rate"])
+        self.assertIsNone(prepared["expense_account"])
+        self.assertIsNone(prepared["batch_id"])
+
+    def test_each_native_purpose_is_passed_through(self):
+        for purpose in (
+            "Stock Reconciliation",
+            "Opening Stock",
+            "Adjustment Entry",
+        ):
+            with self.subTest(purpose=purpose):
+                fake = gateway(role="ADM")
+                stock_write.adjust(
+                    fake, adjust_body(purpose=purpose), CSRF
+                )
+                self.assertEqual(
+                    fake.stock_reconciliation_calls[0]["purpose"], purpose
+                )
+
+    def test_a_post_dispatch_failure_is_uncertain_and_never_claims(self):
+        fake = gateway(role="ADM")
+        fake.stock_mutation_error = patient_write.WriteUncertain()
+
+        payload = stock_write.adjust(fake, adjust_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.write_responses[-1][0], 409)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_native_validation_refusal_is_a_known_validation(self):
+        fake = gateway(role="ADM")
+        fake.stock_mutation_error = NativeValidationError()
 
         payload = stock_write.adjust(fake, adjust_body(), CSRF)
 
         self.assertEqual(payload, {"code": "VALIDATION"})
-        self.assertEqual(fake.stock_fence_calls, [])
+        self.assertEqual(fake.write_responses[-1][0], 422)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.commit_calls, 0)
+
+    def test_a_native_permission_refusal_is_a_denial(self):
+        fake = gateway(role="ADM")
+        fake.stock_mutation_error = NativePermissionDenied()
+
+        with self.assertRaises(Denied):
+            stock_write.adjust(fake, adjust_body(), CSRF)
+
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.commit_calls, 0)
+
+    def test_an_unknown_post_dispatch_failure_stays_uncertain(self):
+        fake = gateway(role="ADM")
+        fake.stock_mutation_error = RuntimeError("boom")
+
+        payload = stock_write.adjust(fake, adjust_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.write_responses[-1][0], 409)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_validation_refusal_with_a_failed_rollback_escapes(self):
+        fake = gateway(role="ADM")
+        fake.stock_mutation_error = NativeValidationError()
+
+        def failing_rollback():
+            raise RuntimeError("rollback exploded")
+
+        with mock.patch.object(fake, "rollback", failing_rollback):
+            with self.assertRaises(stock_write.RollbackFailed):
+                stock_write.adjust(fake, adjust_body(), CSRF)
+
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(fake.commit_calls, 0)
 
     def test_zero_quantity_writes_the_count_off(self):
         fake = gateway(role="ADM")
 
         payload = stock_write.adjust(fake, adjust_body(qty=0), CSRF)
 
-        self.assertEqual(payload["movement"]["qty"], 0.0)
+        self.assertEqual(payload["status"], "adjusted")
+        self.assertEqual(fake.stock_reconciliation_calls[0]["qty"], 0.0)
 
 
 class PreparedBodyTests(unittest.TestCase):
@@ -463,24 +611,15 @@ class PreparedBodyTests(unittest.TestCase):
             "SIT Synthetic Company USD",
         )
 
-        fake = gateway(role="ADM")
-        stock_write.adjust(fake, adjust_body(), CSRF)
-        self.assertEqual(
-            fake.stock_reconciliation_calls[0]["company"],
-            "SIT Synthetic Company USD",
-        )
-
     def test_a_detail_without_a_company_is_refused_pre_fence(self):
         for label, role, operation, body in (
             ("receive", "PHA", stock_write.receive, receive_body()),
             ("transfer", "PHA", stock_write.transfer, transfer_body()),
-            ("adjust", "ADM", stock_write.adjust, adjust_body()),
         ):
             with self.subTest(label=label):
                 fake = gateway(role=role)
                 fake.stock_receive_detail = detail(company=None)
                 fake.stock_transfer_detail = detail(company=None)
-                fake.stock_adjust_detail = detail(company=None)
                 payload = operation(fake, body, CSRF)
                 self.assertEqual(payload, {"code": "VALIDATION"})
                 self.assertEqual(fake.write_responses[-1][0], 417)
@@ -733,12 +872,28 @@ class AckTests(unittest.TestCase):
 
 
 class BootstrapTests(unittest.TestCase):
-    def test_inventory_role_sees_receive_and_transfer_only(self):
+    def test_inventory_role_advertises_its_native_reconcile_authority(self):
         capabilities = session.bootstrap(gateway())["capabilities"]
         self.assertEqual(capabilities["write.stock.receive"], "enabled")
         self.assertEqual(capabilities["write.stock.transfer"], "enabled")
-        self.assertEqual(capabilities["write.stock.adjust"], "read_only")
+        self.assertEqual(capabilities["write.stock.adjust"], "enabled")
         self.assertEqual(capabilities["write.stock.consume"], "read_only")
+
+    def test_reconcile_needs_native_create_and_submit(self):
+        for role in ("PHA", "ADM"):
+            for authority in (
+                "stock_create_authority",
+                "stock_submit_authority",
+            ):
+                with self.subTest(role=role, authority=authority):
+                    fake = gateway(role=role)
+                    setattr(
+                        fake, authority, {"Stock Reconciliation": False}
+                    )
+                    capabilities = session.bootstrap(fake)["capabilities"]
+                    self.assertEqual(
+                        capabilities["write.stock.adjust"], "read_only"
+                    )
 
     def test_admin_role_sees_only_the_adjustment_surface(self):
         capabilities = session.bootstrap(gateway(role="ADM"))["capabilities"]

@@ -194,14 +194,18 @@ def _procedure_write_flags(gateway, settings, role):
 
 
 def _stock_write_flags(gateway, settings, role):
-    """Return ``(receive, transfer, adjust)`` when the stock surface is open.
+    """Return ``(receive, transfer, adjust)`` when each stock surface is open.
 
     Independent of every other write flag: exact approved site, boundary and
-    installed-field preflight, the stock flag, the deployment marker, a ready
-    fence store and the caller's own native authority on the document it would
-    submit. Masters, batches and quantities are decided per request; these
-    flags only advertise that the surface exists. Reconciliation is the ADM
-    surface, receive/transfer the inventory one.
+    installed-field preflight, the stock flag and the caller's own native
+    authority on the document it would submit. Receive and transfer stay on the
+    historical fence, so they still need the deployment marker and a ready
+    fence store. The converted adjustment lane needs native create and submit
+    authority for either existing stock role code and no longer reads the
+    marker or the fence store; it advertises only the authority Frappe already
+    grants. Masters, quantities, purpose and every other native document field
+    are decided per request; these flags only advertise that the surface
+    exists.
     """
 
     disabled = (False, False, False)
@@ -212,21 +216,22 @@ def _stock_write_flags(gateway, settings, role):
             return disabled
         if not settings.stock_write_enabled:
             return disabled
-        if gateway.write_deployment_approved() is not True:
-            return disabled
-        if gateway.write_fence_ready() is not True:
-            return disabled
         receive_ok = (
             role in STOCK_ROLE_CODES
+            and gateway.write_deployment_approved() is True
+            and gateway.write_fence_ready() is True
             and gateway.native_stock_can_create("Purchase Receipt") is True
         )
         transfer_ok = (
             role in STOCK_ROLE_CODES
+            and gateway.write_deployment_approved() is True
+            and gateway.write_fence_ready() is True
             and gateway.native_stock_can_create("Stock Entry") is True
         )
         adjust_ok = (
-            role in ADJUST_ROLE_CODES
+            role in (STOCK_ROLE_CODES | ADJUST_ROLE_CODES)
             and gateway.native_stock_can_create("Stock Reconciliation") is True
+            and gateway.native_stock_can_submit("Stock Reconciliation") is True
         )
         return receive_ok, transfer_ok, adjust_ok
     except Exception:

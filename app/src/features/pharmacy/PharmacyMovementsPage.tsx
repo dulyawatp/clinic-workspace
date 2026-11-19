@@ -23,7 +23,6 @@ import {
   FilterField,
   OpsNote,
   OpsTabs,
-  SourceNote,
   useOpsFormat,
 } from "../operations/ops-ui";
 import { AdjustStockForm, TransferStockForm } from "./stock-write";
@@ -128,12 +127,7 @@ export function PharmacyMovementsPage() {
     }
     if (tab === "reconcile") {
       if (!isAdmin) {
-        setError(
-          copy(
-            "ต้องมีสิทธิ์กระทบยอดแยก ใช้ผู้ดูแลตัวอย่าง",
-            "Separate reconciliation privilege required; use demo admin",
-          ),
-        );
+        setError(t("stockWrite.sampleAdmin"));
         return;
       }
     } else {
@@ -196,12 +190,8 @@ export function PharmacyMovementsPage() {
       <div className="pc-page__body">
         <SampleBanner
           label={copy("ข้อมูลตัวอย่าง", "Demo data")}
-          title={copy(
-            "ข้อมูลตัวอย่างในเครื่อง · ยังไม่ยืนยันสัญญาเซิร์ฟเวอร์",
-            "Browser-local sample records · server contracts unverified",
-          )}
+          title={t("stockWrite.sampleBanner")}
         />
-        <SourceNote />
         <OpsTabs
           label={copy("โอนย้ายและเบิกใช้", "Stock operations")}
           active={tab}
@@ -211,14 +201,15 @@ export function PharmacyMovementsPage() {
             setReason("");
             setError(null);
           }}
-          tabs={TABS.map((row) => ({ id: row.id, label: copy(row.th, row.en) }))}
+          tabs={TABS.map((row) => ({
+            id: row.id,
+            label: row.id === "reconcile" ? t("stockWrite.sampleTab") : copy(row.th, row.en),
+          }))}
         />
 
         <Card
-          title={copy(
-            "ตรวจรายการและผลกระทบก่อนยืนยัน",
-            "Review movement & stock effect",
-          )}
+          title={t("stockWrite.sampleTitle")}
+          hint={t("stockWrite.sampleNotice")}
         >
           <div className="ops-form">
             <div className="ops-form__grid">
@@ -320,10 +311,7 @@ export function PharmacyMovementsPage() {
               </button>
               {tab === "reconcile" && !isAdmin ? (
                 <span className="pc-field__hint">
-                  {copy(
-                    "ต้องมีสิทธิ์กระทบยอดแยก ใช้ผู้ดูแลตัวอย่าง",
-                    "Separate reconciliation privilege required; use demo admin",
-                  )}
+                  {t("stockWrite.sampleAdmin")}
                 </span>
               ) : null}
             </div>
@@ -362,7 +350,7 @@ export function PharmacyMovementsPage() {
         <AdjustStockForm />
 
         <Card
-          title={copy("บัญชีคลัง", "Immutable ledger")}
+          title={t("stockWrite.sampleLedger")}
           hint={copy(
             "ลำดับธุรกรรมต้นทาง ไม่ใช่ยอดคงเหลือหรือสถานะย้อนหลังที่สร้างขึ้น",
             "Source transaction timeline, not reconstructed historical balances or document states.",
@@ -445,12 +433,7 @@ export function PharmacyMovementsPage() {
         </Card>
 
         <OpsNote>{t("procedure.noTransport")}</OpsNote>
-        <OpsNote>
-          {copy(
-            "ล็อตหมดอายุเบิกหรือโอนตามปกติไม่ได้ การกระทบยอด/ตัดจำหน่ายเก็บเป็นคำขอเท่านั้น ไม่แก้จำนวนหรือบัญชีคลัง ต้องใช้เอกสารและสิทธิ์เซิร์ฟเวอร์ที่ตรวจแล้ว",
-            "Expired lots cannot be issued or transferred normally. Reconciliation/write-off stores a request only, never edits balances or ledger. Requires verified server document and authorization.",
-          )}
-        </OpsNote>
+        <OpsNote>{t("stockWrite.sampleNotice")}</OpsNote>
       </div>
     </div>
   );

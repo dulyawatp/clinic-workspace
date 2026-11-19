@@ -290,10 +290,13 @@ TRANSFER_KEYS = frozenset(
 ADJUST_KEYS = frozenset(
     {
         "operation_key",
+        "purpose",
+        "company",
         "item_code",
-        "qty",
         "warehouse",
-        "reason",
+        "qty",
+        "valuation_rate",
+        "expense_account",
         "batch_id",
     }
 )
@@ -476,6 +479,36 @@ def _require_qty(value, *, positive):
     return float(value)
 
 
+def _require_rate(value):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise StockContractError("valuation_rate is invalid")
+    if value != value or value in (float("inf"), float("-inf")):
+        raise StockContractError("valuation_rate is invalid")
+    if float(value) < 0:
+        raise StockContractError("valuation_rate is invalid")
+    return float(value)
+
+
+def _optional_qty(value):
+    if value is None:
+        return None
+    return _require_qty(value, positive=False)
+
+
+def _optional_rate(value):
+    if value is None:
+        return None
+    return _require_rate(value)
+
+
+def _optional_native_text(value, field):
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return _require_text(value, field)
+
+
 def validate_receive(body):
     body = _require_body(body, RECEIVE_KEYS)
     for required in (
@@ -529,18 +562,30 @@ def validate_transfer(body):
 
 
 def validate_adjust(body):
+    """Shape of the native reconciliation body.
+
+    Only the document identity fields are required. ``qty``, ``valuation_rate``,
+    ``expense_account`` and ``batch_id`` may be absent, null or empty so the
+    installed controller applies its own defaults.
+    """
+
     body = _require_body(body, ADJUST_KEYS)
-    for required in ("operation_key", "item_code", "qty", "warehouse", "reason"):
+    for required in ("operation_key", "purpose", "company", "item_code", "warehouse"):
         if required not in body:
             raise StockContractError(f"missing field {required}")
     return {
         "kind": ADJUST_KIND,
         "operation_key": require_operation_key(body["operation_key"]),
+        "purpose": _require_text(body["purpose"], "purpose"),
+        "company": _require_text(body["company"], "company"),
         "item_code": _require_text(body["item_code"], "item_code"),
-        "qty": _require_qty(body["qty"], positive=False),
         "warehouse": _require_text(body["warehouse"], "warehouse"),
-        "reason": _require_text(body["reason"], "reason", MAX_REASON_LENGTH),
-        "batch_id": _optional_text(body.get("batch_id"), "batch_id"),
+        "qty": _optional_qty(body.get("qty")),
+        "valuation_rate": _optional_rate(body.get("valuation_rate")),
+        "expense_account": _optional_native_text(
+            body.get("expense_account"), "expense_account"
+        ),
+        "batch_id": _optional_native_text(body.get("batch_id"), "batch_id"),
     }
 
 
@@ -743,33 +788,6 @@ def transfer_problems(detail, payload):
     return tuple(problems)
 
 
-def adjust_problems(detail, payload):
-    """Every pre-fence reconciliation decision, in operator order."""
-
-    if not isinstance(detail, dict):
-        return ((HTTP_REFUSED, "detail", "target state is unreadable"),)
-    problems = list(_item_problems(detail, payload))
-    if problems:
-        return tuple(problems)
-    warehouse_problem = _warehouse_problem(
-        detail, "warehouse", payload["warehouse"]
-    )
-    if warehouse_problem:
-        problems.append(warehouse_problem)
-    problems.extend(
-        _batch_problems(detail, payload, allow_create=False, require_stock=False)
-    )
-    if not _text(detail.get("stock_adjustment_account"), MAX_TEXT_LENGTH):
-        problems.append(
-            (
-                HTTP_REFUSED,
-                "expense_account",
-                "the company has no stock adjustment account",
-            )
-        )
-    return tuple(problems)
-
-
 # -- EXPECTED side effects -------------------------------------------------
 
 
@@ -797,18 +815,6 @@ def expected_transfer(detail, payload):
             payload["target_warehouse"]: float(payload["qty"]),
         },
         "gl_rows_max": GL_ROWS_PER_ENTRY * 2,
-    }
-
-
-def expected_adjust(detail, payload):
-    return {
-        "doctype": STOCK_RECONCILIATION_DOCTYPE,
-        "kind": ADJUST_KIND,
-        "item_code": payload["item_code"],
-        "sle_rows": 1,
-        "bin_mode": "set",
-        "bins": {payload["warehouse"]: float(payload["qty"])},
-        "gl_rows_max": GL_ROWS_PER_ENTRY,
     }
 
 
@@ -858,13 +864,6 @@ def prepared_problem(kind, prepared):
         if prepared.get("source_warehouse") == prepared.get("target_warehouse"):
             return "prepared target equals the source warehouse"
         return None
-    if not _text(prepared.get("warehouse"), MAX_TEXT_LENGTH):
-        return "prepared body has no warehouse"
-    if not _text(prepared.get("expense_account"), MAX_TEXT_LENGTH):
-        return "prepared body has no stock adjustment account"
-    if not _text(prepared.get("reason"), MAX_REASON_LENGTH):
-        return "prepared body has no reason"
-    return None
 
 
 def side_effect_problem(facts, expected):

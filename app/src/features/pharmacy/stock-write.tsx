@@ -5,6 +5,8 @@ import { useCapabilities } from "../shell/CapabilityProvider";
 import {
   adjustNativeStock,
   receiveNativeStock,
+  StockAdjustRejectedError,
+  StockAdjustOutcomeUnknownError,
   transferNativeStock,
   type NativeStockWriteError,
 } from "../../transport/native/stock-write";
@@ -17,9 +19,13 @@ import {
  * forms send masters, a quantity and (for a new batch) its expiry; every
  * decision — batch validity, stock sufficiency, over-receipt, the restricted
  * reconciliation account — stays server-side.
+ *
+ * Reconciliation uses the native stock reconciliation fields.
  */
 
 function failureKey(error: unknown): string {
+  if (error instanceof StockAdjustRejectedError)
+    return `stockWrite.${error.kind}`;
   const code = (error as NativeStockWriteError | null)?.code;
   if (code === "validation") return "stockWrite.validation";
   if (code === "forbidden") return "stockWrite.forbidden";
@@ -39,6 +45,7 @@ interface FieldProps {
   kind?: "text" | "number" | "date";
   maxLength?: number;
   required?: boolean;
+  disabled?: boolean;
   onChange: (value: string) => void;
 }
 
@@ -49,6 +56,7 @@ function Field({
   kind = "text",
   maxLength = 140,
   required = false,
+  disabled = false,
   onChange,
 }: FieldProps) {
   return (
@@ -57,9 +65,11 @@ function Field({
       <input
         id={id}
         type={kind}
+        step={kind === "number" ? "any" : undefined}
         maxLength={kind === "text" ? maxLength : undefined}
         value={value}
         required={required}
+        disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
       />
     </div>
@@ -76,6 +86,8 @@ interface FormShellProps {
   done: boolean;
   error: string | null;
   saving: boolean;
+  doneText?: string;
+  disabled?: boolean;
 }
 
 function FormShell({
@@ -88,6 +100,8 @@ function FormShell({
   done,
   error,
   saving,
+  doneText,
+  disabled = false,
 }: FormShellProps) {
   const { t } = useTranslation();
   return (
@@ -107,14 +121,14 @@ function FormShell({
       >
         <div className="admin-write-fields">{children}</div>
         <div className="ops-form__actions">
-          <Button type="submit" disabled={saving}>
+          <Button type="submit" disabled={saving || disabled}>
             {saving ? t("stockWrite.saving") : t(submitKey)}
           </Button>
         </div>
       </form>
       {done ? (
         <p role="status" className="ops-note">
-          {t(doneKey)}
+          {doneText ?? t(doneKey)}
         </p>
       ) : null}
       {error ? (
@@ -349,43 +363,39 @@ export function AdjustStockForm() {
   const [item, setItem] = useState("");
   const [qty, setQty] = useState("");
   const [warehouse, setWarehouse] = useState("");
-  const [reason, setReason] = useState("");
+  const [purpose, setPurpose] = useState("Stock Reconciliation");
+  const [company, setCompany] = useState("");
+  const [valuationRate, setValuationRate] = useState("");
+  const [expenseAccount, setExpenseAccount] = useState("");
   const [batch, setBatch] = useState("");
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
+  const [reconciliationId, setReconciliationId] = useState("");
   const [error, setError] = useState<string | null>(null);
-
   if (get("write.stock.adjust") !== "enabled") return null;
 
   async function submit() {
     if (saving) return;
-    const amount = Number(qty);
-    if (
-      !item.trim() ||
-      !warehouse.trim() ||
-      !reason.trim() ||
-      !Number.isFinite(amount) ||
-      amount < 0
-    ) {
-      setError(t("stockWrite.invalid"));
-      return;
-    }
     setError(null);
     setDone(false);
     setSaving(true);
     try {
-      await adjustNativeStock({
+      const result = await adjustNativeStock({
         operation_key: newOperationKey(),
+        purpose,
+        company: company.trim(),
         item_code: item.trim(),
-        qty: amount,
+        qty: qty === "" ? null : Number(qty),
         warehouse: warehouse.trim(),
-        reason: reason.trim(),
+        ...(valuationRate !== "" ? { valuation_rate: Number(valuationRate) } : {}),
+        ...(expenseAccount.trim() ? { expense_account: expenseAccount.trim() } : {}),
         batch_id: batch.trim() || undefined,
       });
+      setReconciliationId(result.reconciliation.reconciliation_id);
       setDone(true);
       setQty("");
     } catch (failure) {
-      setError(t(failureKey(failure)));
+      setError(t(failure instanceof StockAdjustOutcomeUnknownError ? "stockWrite.adjustUncertain" : failureKey(failure)));
     } finally {
       setSaving(false);
     }
@@ -399,9 +409,19 @@ export function AdjustStockForm() {
       doneKey="stockWrite.adjustDone"
       onSubmit={submit}
       done={done}
+      doneText={t("stockWrite.adjustDoneId", { id: reconciliationId })}
       error={error}
       saving={saving}
     >
+      <div className="admin-write-field">
+        <label htmlFor={`${id}-purpose`}>{t("stockWrite.purpose")}</label>
+        <select id={`${id}-purpose`} value={purpose} onChange={(event) => setPurpose(event.target.value)}>
+          <option value="Stock Reconciliation">{t("stockWrite.purposeReconciliation")}</option>
+          <option value="Opening Stock">{t("stockWrite.purposeOpening")}</option>
+          <option value="Adjustment Entry">{t("stockWrite.purposeAdjustment")}</option>
+        </select>
+      </div>
+      <Field id={`${id}-company`} label={t("stockWrite.company")} value={company} required onChange={setCompany} />
       <Field
         id={`${id}-item`}
         label={t("stockWrite.item")}
@@ -425,13 +445,13 @@ export function AdjustStockForm() {
         onChange={setWarehouse}
       />
       <Field
-        id={`${id}-reason`}
-        label={t("stockWrite.reason")}
-        value={reason}
-        maxLength={280}
-        required
-        onChange={setReason}
+        id={`${id}-valuation`}
+        label={t("stockWrite.valuationRate")}
+        value={valuationRate}
+        kind="number"
+        onChange={setValuationRate}
       />
+      <Field id={`${id}-expense`} label={t("stockWrite.expenseAccount")} value={expenseAccount} onChange={setExpenseAccount} />
       <Field
         id={`${id}-batch`}
         label={t("stockWrite.batch")}

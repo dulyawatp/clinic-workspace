@@ -598,6 +598,22 @@ class Gateway:
         except Exception:
             return False
 
+    def is_native_validation_error(self, exc):
+        """True only for the installed framework's own ``ValidationError`` family.
+
+        The pinned v16 hierarchy makes ``MandatoryError`` and
+        ``LinkValidationError`` subclasses of ``frappe.exceptions.
+        ValidationError`` (``PermissionError`` is a separate type), so one
+        identity check covers all three. Identity-based on purpose: a class that
+        merely has a similar name stays an uncertain outcome. When the framework
+        type is unreadable this returns ``False``.
+        """
+
+        try:
+            return isinstance(exc, self.frappe.ValidationError)
+        except Exception:
+            return False
+
     def respond_anonymous(self):
         """Return the fixed anonymous body with an explicit 401 status.
 
@@ -5524,6 +5540,20 @@ class Gateway:
         except Exception:
             return False
 
+    def native_stock_can_submit(self, doctype):
+        """The acting user's native submit authority on one stock document."""
+
+        try:
+            return bool(
+                self.frappe.has_permission(
+                    doctype,
+                    ptype="submit",
+                    user=self.frappe.session.user,
+                )
+            )
+        except Exception:
+            return False
+
     def _stock_item(self, item_code):
         row = self.frappe.db.get_value(
             stock_contract.ITEM_DOCTYPE,
@@ -5646,28 +5676,6 @@ class Gateway:
                 "available_qty": self._stock_bin_qty(
                     payload["item_code"], payload["source_warehouse"]
                 ),
-            }
-        except Exception:
-            raise patient_write.StoreUnavailable() from None
-
-    def native_stock_adjust_detail(self, payload):
-        """Read the pre-fence reconciliation decision fields."""
-
-        try:
-            warehouse = self._stock_warehouse(payload["warehouse"])
-            company = warehouse.get("company")
-            account = None
-            if company:
-                account = self.frappe.db.get_value(
-                    "Company", company, "stock_adjustment_account"
-                )
-            return {
-                "today": self.site_today(),
-                "company": company,
-                "stock_adjustment_account": self._text_value(account),
-                "item": self._stock_item(payload["item_code"]),
-                "warehouse": warehouse,
-                "batch": self._stock_batch(payload.get("batch_id")),
             }
         except Exception:
             raise patient_write.StoreUnavailable() from None
@@ -5821,6 +5829,47 @@ class Gateway:
             return self._text_value(reconciliation.name)
         except Exception:
             raise patient_write.WriteUncertain() from None
+
+    def create_and_submit_native_stock_reconciliation(self, payload):
+        """One reconciliation from the native document fields: insert, submit.
+
+        The body already carries the document's own fields. This adapter adds
+        nothing and validates nothing; the installed controller decides. Native
+        exceptions are deliberately propagated unchanged so the endpoint can
+        tell a refusal from a lost outcome after it rolls the transaction back:
+        Frappe's ``ValidationError`` family (including ``MandatoryError`` and
+        ``LinkValidationError``) and its own ``PermissionError`` keep their type.
+        A rolled-back request may safely answer with a definite refusal because
+        ``frappe.db.rollback()`` ends the write transaction and the later
+        request-end commit only commits the fresh, empty one.
+        """
+
+        row = {
+            "item_code": payload["item_code"],
+            "warehouse": payload["warehouse"],
+        }
+        if payload.get("qty") is not None:
+            row["qty"] = payload["qty"]
+        if payload.get("valuation_rate") is not None:
+            row["valuation_rate"] = payload["valuation_rate"]
+        if payload.get("batch_id"):
+            row["batch_no"] = payload["batch_id"]
+            row["use_serial_batch_fields"] = 1
+        document = {
+            "doctype": stock_contract.STOCK_RECONCILIATION_DOCTYPE,
+            "company": payload["company"],
+            "purpose": payload["purpose"],
+            "items": [row],
+        }
+        if payload.get("expense_account"):
+            document["expense_account"] = payload["expense_account"]
+        reconciliation = self.frappe.get_doc(document)
+        reconciliation.insert()
+        reconciliation.submit()
+        return {
+            "name": self._text_value(reconciliation.name),
+            "docstatus": getattr(reconciliation, "docstatus", None),
+        }
 
     def _stock_docstatus(self, reference, expected):
         doctype = expected.get("doctype")

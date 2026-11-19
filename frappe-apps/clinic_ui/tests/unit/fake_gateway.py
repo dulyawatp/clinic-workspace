@@ -25,6 +25,14 @@ class NativePermissionDenied(Exception):
     """
 
 
+class NativeValidationError(Exception):
+    """Stands in for the framework's own ``ValidationError`` family type.
+
+    ``MandatoryError`` and ``LinkValidationError`` derive from it in the pinned
+    hierarchy, so one identity check covers them.
+    """
+
+
 class FakeCreateReceipt:
     """One committed create row as the gateway would enumerate it."""
 
@@ -440,7 +448,6 @@ class FakeGateway:
         self.stock_create_authority = {}
         self.stock_receive_detail = None
         self.stock_transfer_detail = None
-        self.stock_adjust_detail = None
         self.stock_detail_calls = []
         self.stock_detail_sequence = []
         self.stock_baseline_value = {
@@ -467,6 +474,7 @@ class FakeGateway:
         self.stock_fence_calls = []
         self.stock_fence_claim = FakeClaim()
         self.stock_fence_error = None
+        self.stock_submit_authority = {}
 
         # -- purchasing (PO draft/submit + receipt) surface -----------------
         self.purchase_boundary_problem = None
@@ -599,6 +607,11 @@ class FakeGateway:
         """Identity-based recognition, mirroring the real adapter."""
 
         return isinstance(exc, NativePermissionDenied)
+
+    def is_native_validation_error(self, exc):
+        """Identity-based recognition, mirroring the real adapter."""
+
+        return isinstance(exc, NativeValidationError)
 
     def native_patient_display_name(self, native_patient_id):
         self.patient_reads.append(native_patient_id)
@@ -1679,9 +1692,6 @@ class FakeGateway:
     def native_stock_transfer_detail(self, payload):
         return self._stock_detail(self.stock_transfer_detail, payload)
 
-    def native_stock_adjust_detail(self, payload):
-        return self._stock_detail(self.stock_adjust_detail, payload)
-
     def native_stock_baseline(self, kind, warehouses, item_code):
         self.stock_baseline_calls.append((kind, tuple(warehouses), item_code))
         return dict(self.stock_baseline_value)
@@ -1732,6 +1742,17 @@ class FakeGateway:
             prepared,
             self.stock_reconciliation_id,
         )
+
+    def native_stock_can_submit(self, doctype):
+        return self.stock_submit_authority.get(doctype, True)
+
+    def create_and_submit_native_stock_reconciliation(self, prepared):
+        """Converted adjustment lane: record and return the native identifier."""
+
+        if self.stock_mutation_error is not None:
+            raise self.stock_mutation_error
+        self.stock_reconciliation_calls.append(dict(prepared))
+        return {"name": self.stock_reconciliation_id, "docstatus": 1}
 
     def _stock_side_effect_facts(
         self, reference, expected, baseline, doctype

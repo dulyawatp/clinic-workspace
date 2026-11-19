@@ -17,17 +17,26 @@ finance lane converted only ``write.invoice.submit`` for CAS: it needs the
 caller's own native Sales Invoice create and submit authority, so the synthetic
 CAS bootstrap is required and a missing CAS credential fails this run rather
 than passing the lane unverified. ``write.payment.receive`` stays fenced and
-must remain ``read_only`` while the ledger has unresolved keys. The DOC
-bootstrap covers DOC only; the MGR purchase lane is checked from its own
+must remain ``read_only`` while the ledger has unresolved keys. The stock lane
+converted only its adjustment: ``write.stock.adjust`` follows the caller's own
+native ``Stock Reconciliation`` create and submit authority plus the stock flag,
+never the role map or the flag alone, so the run probes that authority and
+asserts PHA and ADM separately from it - a role without the permission stays
+``read_only``, which is the contract ADM identity on this site - while receive
+and transfer stay fenced and ``write.stock.consume`` stays ``read_only``
+whatever the gate says.
+The DOC bootstrap covers DOC only; the MGR purchase lane is checked from its own
 bootstrap when the private state already carries that credential, and the run
 reports the gap otherwise. The ADM bootstrap cannot be optional and cannot be
 the contract-created ADM user: the enabled admin lane needs the caller's own
 native ``User`` create authority, which only the private ``adm_bootstrap``
 identity carries, so a missing ``adm_bootstrap`` fails this run rather than
 passing the lane unverified. The contract ADM identity is read separately and
-must never advertise the admin writes. This reads the DOC, CAS, MGR and ADM
-bootstraps, the synthetic directory and the historical ledger, and compares the
-exact counts the caller supplies. It writes, retries and repairs nothing, and it
+must never advertise the admin writes. The PHA bootstrap is required the same
+way: without it the converted stock lane cannot be verified. This reads the DOC,
+CAS, MGR, PHA and ADM bootstraps, the probed native stock authority, the
+synthetic directory and the historical ledger, and compares the exact counts the
+caller supplies. It writes, retries and repairs nothing, and it
 claims nothing about the deployment as a whole: the strict gate is verify.py.
 """
 
@@ -49,6 +58,7 @@ CONVERTED_FAMILIES = (
     "appointment",
     "procedure",
     "purchase",
+    "stock",
     "finance",
     "admin",
 )
@@ -67,18 +77,30 @@ NEVER_ENABLED = frozenset({"write.stock.consume"})
 # Writes that stay on the historical fence: the purchase lane converted only
 # its draft, so an unresolved ledger keeps the submit and the PO-referenced
 # receipt disabled, the admin lane converted only its user write, so
-# ``write.admin.master`` stays fenced the same way, and the finance lane
-# converted only its invoice, so ``write.payment.receive`` remains fenced and
+# ``write.admin.master`` stays fenced the same way, the finance lane converted
+# only its invoice, so ``write.payment.receive`` remains fenced, and the stock
+# lane converted only its adjustment, so receive and transfer stay fenced and
 # ``read_only`` while the ledger is unresolved. None of them is ever counted as
 # converted here.
 FENCED_WRITES = frozenset(
     {
         "write.purchase_order.submit",
         "write.stock.receive",
+        "write.stock.transfer",
         "write.payment.receive",
         "write.admin.master",
     }
 )
+
+# The stock lane converted only its adjustment, and the site bootstrap decides
+# it from the caller's own native ``Stock Reconciliation`` create and submit
+# authority plus the stock flag - never from the role map alone. The probed
+# authority is therefore part of the expectation, and it mirrors the endpoint's
+# admitted role set: on this site the contract ADM identity holds no
+# reconciliation permission and must stay ``read_only``.
+ADJUST_CAPABILITY = "write.stock.adjust"
+ADJUST_ROLE_SET = ("PHA", "ADM")
+
 
 CONVERTED = tuple(
     name
@@ -86,6 +108,12 @@ CONVERTED = tuple(
     if family in CONVERTED_FAMILIES and name not in FENCED_WRITES
 )
 SEEDED_PATIENT = ("WS-SIT-1", strict.EXPECTED_PATIENT_NAME)
+
+
+def gate_open(value):
+    """True when a site gate flag reads open, matching the strict gate."""
+
+    return value in (1, True, "1")
 
 
 def _converted(families):
@@ -170,15 +198,45 @@ def adm_credential_problem(credentials):
     return None
 
 
-def expected_converted(gates, role):
-    """Return the converted writes that must be enabled for ``role``."""
+def pha_credential_problem(credentials):
+    """Return why the PHA bootstrap cannot run, or ``None``.
 
-    return (
-        set(CONVERTED) & strict.expected_enabled_writes(gates, role)
-    ) - NEVER_ENABLED - FENCED_WRITES
+    The stock lane converted only its adjustment, and that state is decided by
+    the caller's own native ``Stock Reconciliation`` authority, so the run needs
+    the synthetic PHA identity. A missing credential fails this run rather than
+    leaving the converted lane unverified and green.
+    """
+
+    if credential_for(credentials, "PHA") is None:
+        return (
+            "no complete PHA synthetic credential in the private state; "
+            "the converted stock adjust lane cannot be verified"
+        )
+    return None
 
 
-def lane_problems(capabilities, gates, role="DOC"):
+def expected_converted(gates, role, adjust_authority=None):
+    """Return the converted writes that must be enabled for ``role``.
+
+    ``adjust_authority`` is the probed native ``Stock Reconciliation`` create and
+    submit authority of that identity: ``write.stock.adjust`` is expected only
+    for a role the lane admits, with the stock flag open and that authority
+    actually present. The strict role tuple alone never enables it here.
+    """
+
+    strict_expected = strict.expected_enabled_writes(gates, role)
+    strict_expected = strict_expected - {ADJUST_CAPABILITY}
+    expected = set(CONVERTED) & strict_expected
+    if (
+        role in ADJUST_ROLE_SET
+        and gate_open(gates.get("stock"))
+        and adjust_authority is True
+    ):
+        expected.add(ADJUST_CAPABILITY)
+    return expected - NEVER_ENABLED - FENCED_WRITES
+
+
+def lane_problems(capabilities, gates, role="DOC", adjust_authority=None):
     """Return problems when the converted lanes or the deferral disagree.
 
     The patient and appointment lanes are open here and must stay enabled for
@@ -196,9 +254,14 @@ def lane_problems(capabilities, gates, role="DOC"):
     ``read_only``. The finance lane converted only ``write.invoice.submit`` for
     CAS: with the finance gate on it must be enabled and with the gate off it
     must stay ``read_only``; the fenced payment receive is never asserted here.
+    The stock lane converted only ``write.stock.adjust``, which is expected only
+    for the roles the lane admits, with the stock flag open and the probed
+    native reconciliation authority present: neither the role map nor the flag
+    alone enables it, and a role without that authority (the contract ADM
+    identity on this site) must stay ``read_only``.
     Submit, the receipt, payment receive and ``write.admin.master`` are
-    fence-gated and are not asserted here; the stock, finance and deferred
-    clinical lanes are never asserted ready.
+    fence-gated and are not asserted here; the deferred clinical lanes are never
+    asserted ready.
     """
 
     if not isinstance(capabilities, dict):
@@ -207,7 +270,7 @@ def lane_problems(capabilities, gates, role="DOC"):
     absent = sorted(set(CONVERTED) - set(capabilities))
     if absent:
         problems.append(f"converted capabilities missing: {absent}")
-    expected = expected_converted(gates, role)
+    expected = expected_converted(gates, role, adjust_authority)
     admitted = {
         name
         for name in _converted(ALWAYS_OPEN_FAMILIES)
@@ -289,10 +352,10 @@ def contract_admin_problems(capabilities, unresolved):
     return problems
 
 
-def lane_report(capabilities, gates, role="DOC"):
+def lane_report(capabilities, gates, role="DOC", adjust_authority=None):
     """Return each converted lane's expected and observed capability states."""
 
-    expected = expected_converted(gates, role)
+    expected = expected_converted(gates, role, adjust_authority)
     return {
         family: {
             name: {"expected": name in expected, "observed": capabilities.get(name)}
@@ -301,6 +364,86 @@ def lane_report(capabilities, gates, role="DOC"):
         }
         for family in CONVERTED_FAMILIES
     }
+
+
+def stock_adjust_probe_script(emails):
+    """Backend probe: native ``Stock Reconciliation`` rights per identity.
+
+    Mirrors the gateway's own ``native_stock_can_create`` and
+    ``native_stock_can_submit`` reads for the named users, so the converted lane
+    is compared with authority rather than with the role map. Identities are
+    synthetic; no password or token is passed.
+    """
+
+    return (
+        "cd sites && ../env/bin/python - <<'PY'\n"
+        "import json\n"
+        "import frappe\n"
+        f"frappe.init(site={strict.SITE!r}, sites_path='.')\n"
+        "frappe.connect()\n"
+        f"emails = {sorted(set(emails))!r}\n"
+        "out = {}\n"
+        "for email in emails:\n"
+        "    try:\n"
+        "        create = bool(frappe.has_permission(\n"
+        "            'Stock Reconciliation', ptype='create', user=email))\n"
+        "        submit = bool(frappe.has_permission(\n"
+        "            'Stock Reconciliation', ptype='submit', user=email))\n"
+        "    except Exception:\n"
+        "        create = submit = None\n"
+        "    out[email] = {'create': create, 'submit': submit}\n"
+        "print(json.dumps(out))\n"
+        "PY"
+    )
+
+
+def stock_adjust_authority(observed, email):
+    """Return one identity's probed create+submit authority, or ``None``.
+
+    ``None`` means the probe did not report both rights, which is never a pass.
+    """
+
+    if not isinstance(observed, dict):
+        return None
+    entry = observed.get(email)
+    if not isinstance(entry, dict):
+        return None
+    create, submit = entry.get("create"), entry.get("submit")
+    if not isinstance(create, bool) or not isinstance(submit, bool):
+        return None
+    return create and submit
+
+
+def adjust_lane_problems(capabilities, gates, role, authority):
+    """Return problems for the converted stock adjustment of one identity.
+
+    ``authority`` is that identity's probed native ``Stock Reconciliation``
+    create and submit authority. The lane is expected enabled only for a role it
+    admits, with the stock flag open and the authority present; every other
+    combination must read ``read_only``. An unreadable probe is a problem, never
+    a pass, and an enabled state without the authority is the exact false green
+    this check exists to catch.
+    """
+
+    if not isinstance(capabilities, dict):
+        return ["capabilities are not a map"]
+    if authority is None:
+        return ["native Stock Reconciliation authority unreadable"]
+    expected = (
+        "enabled"
+        if role in ADJUST_ROLE_SET
+        and gate_open(gates.get("stock"))
+        and authority is True
+        else "read_only"
+    )
+    observed = capabilities.get(ADJUST_CAPABILITY)
+    if observed != expected:
+        return [
+            f"{ADJUST_CAPABILITY} is {observed!r} for {role}, expected "
+            f"{expected!r} (native authority {authority!r}, stock gate "
+            f"{gates.get('stock')!r})"
+        ]
+    return []
 
 
 def fence_problems(ledger, expected_events, expected_unresolved):
@@ -396,6 +539,28 @@ def main(argv=None):
         for family, key in strict.GATE_CONFIG_KEYS.items()
     }
     record("site write gates readable", gate_probe.returncode == 0, gates)
+
+    # The converted stock adjustment is decided by the caller's own native
+    # ``Stock Reconciliation`` create and submit authority, so the identities
+    # are probed before any lane is judged: neither the role map nor the flag
+    # alone may stand in for that authority.
+    pha = credential_for(credentials, "PHA")
+    adm_bootstrap = adm_bootstrap_credential(credentials)
+    contract_adm_user = credential_for(credentials, "ADM")
+    probe_emails = [
+        user["email"]
+        for user in (pha, adm_bootstrap, contract_adm_user)
+        if isinstance(user, dict) and user.get("email")
+    ]
+    adjust_probe = strict.in_backend(stock_adjust_probe_script(probe_emails))
+    adjust_rights = (
+        json.loads(adjust_probe.stdout) if adjust_probe.returncode == 0 else {}
+    )
+    record(
+        "native Stock Reconciliation authority readable",
+        adjust_probe.returncode == 0,
+        adjust_rights,
+    )
 
     doc = next(u for u in credentials["users"] if u["clinic_code"] == "DOC")
     opener = urllib.request.build_opener(
@@ -536,7 +701,7 @@ def main(argv=None):
     # That is the private ``adm_bootstrap`` identity, never the contract ADM
     # user, so the bootstrap credential is required: without it the run fails
     # instead of leaving the converted lane unverified and green.
-    adm = adm_bootstrap_credential(credentials)
+    adm = adm_bootstrap
     adm_gap = adm_credential_problem(credentials)
     record(
         "synthetic ADM bootstrap credential present",
@@ -579,7 +744,7 @@ def main(argv=None):
 
     # The contract-created ADM user is read separately and never stands in for
     # the bootstrap: it must not advertise the admin writes it cannot execute.
-    contract_adm = credential_for(credentials, "ADM")
+    contract_adm = contract_adm_user
     contract_adm_capabilities = None
     contract_adm_roles = None
     if contract_adm is None:
@@ -617,6 +782,50 @@ def main(argv=None):
         contract_adm_boot = json.loads(body).get("message", {}) if status == 200 else {}
         contract_adm_capabilities = contract_adm_boot.get("capabilities") or {}
         contract_adm_roles = contract_adm_boot.get("user", {}).get("roles")
+
+    # The stock lane converted only its adjustment, and its state follows the
+    # caller's own native reconciliation authority. There is no substitute
+    # bootstrap: a missing PHA credential fails this run rather than leaving the
+    # converted lane unverified and green.
+    pha_gap = pha_credential_problem(credentials)
+    record(
+        "synthetic PHA bootstrap credential present",
+        pha_gap is None,
+        pha_gap or {"email": pha["email"]},
+    )
+    pha_capabilities = None
+    if pha is not None:
+        pha_opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+        )
+        pha_login = {"usr": pha["email"], "pwd": pha["password"]}
+        status, _, body = strict.request(
+            pha_opener,
+            "/api/method/login",
+            method="POST",
+            data=urllib.parse.urlencode(pha_login).encode(),
+        )
+        record(
+            "synthetic PHA login",
+            status == 200 and b"Logged In" in body,
+            {"status": status, "email": pha["email"]},
+        )
+        status, _, body = strict.request(
+            pha_opener, "/api/method/clinic_ui.api.session.bootstrap"
+        )
+        pha_boot = json.loads(body).get("message", {}) if status == 200 else {}
+        pha_capabilities = pha_boot.get("capabilities") or {}
+        record(
+            "PHA bootstrap is live",
+            status == 200
+            and pha_boot.get("mode") == "live"
+            and pha_boot.get("user", {}).get("roles") == ["PHA"],
+            {
+                "status": status,
+                "mode": pha_boot.get("mode"),
+                "roles": pha_boot.get("user", {}).get("roles"),
+            },
+        )
 
     status, _, body = strict.request(
         opener, "/api/method/clinic_ui.api.directory.synthetic_patients"
@@ -690,7 +899,10 @@ def main(argv=None):
         )
 
     if adm_capabilities is not None:
-        problems = lane_problems(adm_capabilities, gates, role="ADM")
+        adm_authority = stock_adjust_authority(adjust_rights, adm["email"])
+        problems = lane_problems(
+            adm_capabilities, gates, role="ADM", adjust_authority=adm_authority
+        )
         problems += fenced_write_problems(adm_capabilities, ledger.get("unresolved"))
         record(
             "ADM admin user lane and fenced admin master",
@@ -698,7 +910,9 @@ def main(argv=None):
             {
                 "role": "ADM",
                 "identity": "adm_bootstrap",
-                "lanes": lane_report(adm_capabilities, gates, role="ADM"),
+                "lanes": lane_report(
+                    adm_capabilities, gates, role="ADM", adjust_authority=adm_authority
+                ),
                 "fenced": {
                     name: adm_capabilities.get(name)
                     for name in sorted(FENCED_WRITES)
@@ -706,19 +920,77 @@ def main(argv=None):
                 "problems": problems,
             },
         )
+        adjust_problems = adjust_lane_problems(
+            adm_capabilities, gates, "ADM", adm_authority
+        )
+        record(
+            "ADM stock adjust matches its probed reconciliation authority",
+            not adjust_problems,
+            {
+                "role": "ADM",
+                "identity": "adm_bootstrap",
+                "expected": "enabled"
+                if adm_authority is True and gate_open(gates.get("stock"))
+                else "read_only",
+                "observed": adm_capabilities.get(ADJUST_CAPABILITY),
+                "native_authority": adm_authority,
+                "native_rights": adjust_rights.get(adm["email"]),
+                "stock_gate": gates.get("stock"),
+                "problems": adjust_problems,
+            },
+        )
+
+    if pha_capabilities is not None:
+        pha_authority = stock_adjust_authority(adjust_rights, pha["email"])
+        problems = lane_problems(
+            pha_capabilities, gates, role="PHA", adjust_authority=pha_authority
+        )
+        problems += adjust_lane_problems(pha_capabilities, gates, "PHA", pha_authority)
+        problems += fenced_write_problems(pha_capabilities, ledger.get("unresolved"))
+        record(
+            "PHA stock adjust lane and fenced stock writes",
+            not problems,
+            {
+                "role": "PHA",
+                "observed": pha_capabilities.get(ADJUST_CAPABILITY),
+                "native_authority": pha_authority,
+                "native_rights": adjust_rights.get(pha["email"]),
+                "stock_gate": gates.get("stock"),
+                "lanes": lane_report(
+                    pha_capabilities, gates, role="PHA", adjust_authority=pha_authority
+                ),
+                "fenced": {
+                    name: pha_capabilities.get(name)
+                    for name in sorted(FENCED_WRITES)
+                },
+                "problems": problems,
+            },
+        )
 
     if contract_adm_capabilities is not None:
+        contract_adm_authority = stock_adjust_authority(
+            adjust_rights, contract_adm["email"]
+        )
         problems = contract_admin_problems(
             contract_adm_capabilities, ledger.get("unresolved")
         )
+        adjust_problems = adjust_lane_problems(
+            contract_adm_capabilities, gates, "ADM", contract_adm_authority
+        )
         record(
-            "contract ADM identity does not advertise the admin writes",
-            contract_adm_roles == ["ADM"] and not problems,
+            "contract ADM identity does not advertise the admin writes and its "
+            "stock adjust tracks its authority",
+            contract_adm_roles == ["ADM"]
+            and not problems
+            and not adjust_problems,
             {
                 "role": contract_adm_roles,
                 "admin_user": contract_adm_capabilities.get("write.admin.user"),
                 "admin_master": contract_adm_capabilities.get("write.admin.master"),
-                "problems": problems,
+                "stock_adjust": contract_adm_capabilities.get(ADJUST_CAPABILITY),
+                "native_authority": contract_adm_authority,
+                "native_rights": adjust_rights.get(contract_adm["email"]),
+                "problems": problems + adjust_problems,
             },
         )
 

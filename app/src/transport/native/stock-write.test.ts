@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   adjustNativeStock,
   receiveNativeStock,
+  StockAdjustOutcomeUnknownError,
   stockWriteLocked,
   transferNativeStock,
 } from "./stock-write";
@@ -126,27 +127,113 @@ describe("native stock writes", () => {
     expect(stockWriteLocked("stock_transfer")).toBe(true);
   });
 
-  it("parses the adjusted movement with its reason", async () => {
-    vi.spyOn(globalThis, "fetch")
+  it("posts one reconciliation with no lock and no acknowledgement", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
-        success("adjusted", {
-          kind: "stock_adjust",
-          item_code: "ITEM-1",
-          warehouse: "WH-1",
-          qty: 3,
-          reason: "Count discrepancy",
-        }),
-      )
-      .mockResolvedValueOnce(acknowledged());
+        new Response(
+          JSON.stringify({
+            message: {
+              status: "adjusted",
+              reconciliation: { reconciliation_id: "SR-1", docstatus: 1 },
+            },
+          }),
+          { status: 200 },
+        ),
+      );
 
     await expect(
       adjustNativeStock({
         operation_key: OPERATION,
+        purpose: "Opening Stock",
+        company: "Clinic",
         item_code: "ITEM-1",
         qty: 3,
         warehouse: "WH-1",
-        reason: "Count discrepancy",
+        valuation_rate: 5,
+        expense_account: "Opening - C",
       }),
-    ).resolves.toMatchObject({ status: "adjusted" });
+    ).resolves.toEqual({
+      status: "adjusted",
+      reconciliation: { reconciliation_id: "SR-1", docstatus: 1 },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      operation_key: OPERATION,
+      purpose: "Opening Stock",
+      company: "Clinic",
+      item_code: "ITEM-1",
+      qty: 3,
+      warehouse: "WH-1",
+      valuation_rate: 5,
+      expense_account: "Opening - C",
+    });
+    expect(localStorage.length).toBe(0);
+  });
+
+  it("treats a 409 lock as unknown for a reconciliation and never retries", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ message: { code: "WRITE_LOCKED" } }), {
+        status: 409,
+      }),
+    );
+
+    await expect(
+      adjustNativeStock({
+        operation_key: OPERATION,
+        purpose: "Stock Reconciliation",
+        company: "Clinic",
+        item_code: "ITEM-1",
+        qty: 3,
+        warehouse: "WH-1",
+        valuation_rate: 5,
+        expense_account: "",
+      }),
+    ).rejects.toBeInstanceOf(StockAdjustOutcomeUnknownError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(localStorage.length).toBe(0);
+  });
+
+  it.each([
+    null,
+    { message: { status: "adjusted" } },
+    { message: { status: "adjusted", reconciliation: { reconciliation_id: "", docstatus: 1 } } },
+    { message: { status: "adjusted", reconciliation: { reconciliation_id: "SR-1", docstatus: 0 } } },
+    { message: { status: "draft", reconciliation: { reconciliation_id: "SR-1", docstatus: 1 } } },
+  ])("treats malformed successful reconciliation response as unknown", async (body) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify(body), { status: 200 }),
+    );
+    await expect(adjustNativeStock({
+      operation_key: OPERATION,
+      purpose: "Stock Reconciliation",
+      company: "Clinic",
+      item_code: "ITEM-1",
+      qty: 3,
+      warehouse: "WH-1",
+    })).rejects.toBeInstanceOf(StockAdjustOutcomeUnknownError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(localStorage.length).toBe(0);
+  });
+
+  it("keeps a 417 reconciliation refusal deterministic", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ message: { code: "VALIDATION" } }), {
+        status: 417,
+      }),
+    );
+
+    await expect(
+      adjustNativeStock({
+        operation_key: OPERATION,
+        purpose: "Stock Reconciliation",
+        company: "Clinic",
+        item_code: "ITEM-1",
+        qty: 3,
+        warehouse: "WH-1",
+        valuation_rate: 5,
+        expense_account: "",
+      }),
+    ).rejects.toMatchObject({ kind: "validation" });
   });
 });

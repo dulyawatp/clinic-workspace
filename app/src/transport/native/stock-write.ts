@@ -17,11 +17,15 @@ export type StockWriteFailure =
   | "forbidden"
   | "unavailable";
 
-/** One pending-write lock per kind: a receive never blocks a transfer. */
-const LOCKS: Record<StockWriteKind, string> = {
+/**
+ * Fenced kinds keep one pending-write lock each: a receive never blocks a
+ * transfer. Reconciliation has no lock (see `adjustNativeStock`).
+ */
+type LockedStockWriteKind = Exclude<StockWriteKind, "stock_adjust">;
+
+const LOCKS: Record<LockedStockWriteKind, string> = {
   stock_receive: "clinic.stock-write.pending.stock_receive",
   stock_transfer: "clinic.stock-write.pending.stock_transfer",
-  stock_adjust: "clinic.stock-write.pending.stock_adjust",
 };
 
 const ACK_TOKEN = /^[0-9a-f]{64}$/;
@@ -33,6 +37,28 @@ export class NativeStockWriteError extends Error {
     super(code);
     this.name = "NativeStockWriteError";
     this.code = code;
+  }
+}
+
+/** Deterministic refusals of a reconciliation: nothing was written. */
+export type StockAdjustFailure =
+  | "auth"
+  | "forbidden"
+  | "validation"
+  | "conflict";
+
+export class StockAdjustRejectedError extends Error {
+  constructor(readonly kind: StockAdjustFailure) {
+    super(kind);
+    this.name = "StockAdjustRejectedError";
+  }
+}
+
+/** A lost or unreadable response: the adjustment may or may not be posted. */
+export class StockAdjustOutcomeUnknownError extends Error {
+  constructor() {
+    super("unknown outcome");
+    this.name = "StockAdjustOutcomeUnknownError";
   }
 }
 
@@ -58,10 +84,13 @@ export interface TransferStockInput {
 
 export interface AdjustStockInput {
   operation_key: string;
+  purpose: string;
+  company: string;
   item_code: string;
-  qty: number;
+  qty: number | null;
   warehouse: string;
-  reason: string;
+  valuation_rate?: number;
+  expense_account?: string;
   batch_id?: string;
 }
 
@@ -117,7 +146,7 @@ function isText(value: unknown): value is string {
 }
 
 /** The browser lock is the only persisted write state: no data is stored. */
-export function stockWriteLocked(kind: StockWriteKind): boolean {
+export function stockWriteLocked(kind: LockedStockWriteKind): boolean {
   try {
     return localStorage.getItem(LOCKS[kind]) !== null;
   } catch {
@@ -130,7 +159,7 @@ export function subscribeStockWriteLock(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-function persistLock(kind: StockWriteKind): void {
+function persistLock(kind: LockedStockWriteKind): void {
   try {
     localStorage.setItem(LOCKS[kind], "1");
     if (localStorage.getItem(LOCKS[kind]) !== "1")
@@ -140,7 +169,7 @@ function persistLock(kind: StockWriteKind): void {
   }
 }
 
-function clearLock(kind: StockWriteKind): void {
+function clearLock(kind: LockedStockWriteKind): void {
   try {
     localStorage.removeItem(LOCKS[kind]);
     if (stockWriteLocked(kind)) throw new NativeStockWriteError("uncertain");
@@ -169,7 +198,7 @@ function failure(status: number, body: unknown): NativeStockWriteError {
   return new NativeStockWriteError("uncertain");
 }
 
-function movementKeys(kind: StockWriteKind): readonly string[] {
+function movementKeys(kind: LockedStockWriteKind): readonly string[] {
   if (kind === "stock_receive")
     return ["kind", "item_code", "warehouse", "qty", "batch"];
   if (kind === "stock_transfer")
@@ -181,10 +210,10 @@ function movementKeys(kind: StockWriteKind): readonly string[] {
       "qty",
       "batch",
     ];
-  return ["kind", "item_code", "warehouse", "qty", "reason"];
+  return [];
 }
 
-function parseMovement(kind: StockWriteKind, value: unknown): StockMovement {
+function parseMovement(kind: LockedStockWriteKind, value: unknown): StockMovement {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, movementKeys(kind)) ||
@@ -208,16 +237,6 @@ function parseMovement(kind: StockWriteKind, value: unknown): StockMovement {
       batch: (value.batch as string | null) ?? null,
     };
   }
-  if (kind === "stock_adjust") {
-    if (!isText(value.reason)) throw new NativeStockWriteError("uncertain");
-    return {
-      kind,
-      item_code: value.item_code,
-      warehouse: value.warehouse,
-      qty: value.qty,
-      reason: value.reason,
-    };
-  }
   if (value.batch !== null && !isText(value.batch))
     throw new NativeStockWriteError("uncertain");
   return {
@@ -230,7 +249,7 @@ function parseMovement(kind: StockWriteKind, value: unknown): StockMovement {
 }
 
 function parseWriteResult(
-  kind: StockWriteKind,
+  kind: LockedStockWriteKind,
   body: unknown,
 ): { result: StockWriteResult; ackToken: string } {
   if (
@@ -257,7 +276,7 @@ function parseWriteResult(
 
 async function acknowledge(
   token: string,
-  kind: StockWriteKind,
+  kind: LockedStockWriteKind,
   operationKey: string,
   ackToken: string,
 ): Promise<void> {
@@ -290,7 +309,7 @@ async function acknowledge(
  * any uncertain outcome keeps it, so a reload shows the stop state again.
  */
 async function submit(
-  kind: StockWriteKind,
+  kind: LockedStockWriteKind,
   input: Record<string, unknown>,
 ): Promise<StockWriteResult> {
   const operationKey = input.operation_key;
@@ -375,15 +394,62 @@ export async function transferNativeStock(
   });
 }
 
+function adjustRejection(status: number, body: unknown): Error {
+  if (status === 401) return new StockAdjustRejectedError("auth");
+  if (status === 403) return new StockAdjustRejectedError("forbidden");
+  if (status === 417 || status === 422)
+    return new StockAdjustRejectedError("validation");
+  if (status === 409 && errorCode(body) === "OPERATION_CONFLICT")
+    return new StockAdjustRejectedError("conflict");
+  return new StockAdjustOutcomeUnknownError();
+}
+
+/** Submit one reconciliation through the native Frappe method. */
 export async function adjustNativeStock(
   input: AdjustStockInput,
-): Promise<StockWriteResult> {
-  return submit("stock_adjust", {
-    operation_key: input.operation_key,
-    item_code: input.item_code,
-    qty: input.qty,
-    warehouse: input.warehouse,
-    reason: input.reason,
-    ...(input.batch_id?.trim() ? { batch_id: input.batch_id.trim() } : {}),
-  });
+): Promise<{ status: "adjusted"; reconciliation: { reconciliation_id: string; docstatus: 1 } }> {
+  const token = nativeCsrfToken();
+  if (!token) throw new StockAdjustRejectedError("auth");
+
+  let response: Response;
+  try {
+    response = await frappeRequest(ENDPOINTS.stock_adjust, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [FRAPPE_CSRF_HEADER]: token,
+      },
+      body: JSON.stringify({
+        operation_key: input.operation_key,
+        purpose: input.purpose,
+        company: input.company,
+        item_code: input.item_code,
+        qty: input.qty,
+        warehouse: input.warehouse,
+        ...(input.valuation_rate !== undefined ? { valuation_rate: input.valuation_rate } : {}),
+        ...(input.expense_account ? { expense_account: input.expense_account } : {}),
+        ...(input.batch_id?.trim() ? { batch_id: input.batch_id.trim() } : {}),
+      }),
+    });
+  } catch {
+    throw new StockAdjustOutcomeUnknownError();
+  }
+
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw adjustRejection(response.status, body);
+  if (
+    !isRecord(body) ||
+    !isRecord(body.message) ||
+    body.message.status !== "adjusted" ||
+    !isRecord(body.message.reconciliation) ||
+    !isText(body.message.reconciliation.reconciliation_id) ||
+    body.message.reconciliation.docstatus !== 1
+  ) throw new StockAdjustOutcomeUnknownError();
+  return {
+    status: "adjusted",
+    reconciliation: {
+      reconciliation_id: body.message.reconciliation.reconciliation_id,
+      docstatus: 1,
+    },
+  };
 }

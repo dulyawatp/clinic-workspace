@@ -156,7 +156,7 @@ it("transfers between two warehouses with one acknowledgement", async () => {
   expect(await screen.findByText("โอนย้ายแล้ว")).toBeTruthy();
 });
 
-it("records the reconciliation reason and refuses a server validation", async () => {
+it("sends native reconciliation fields and shows server validation", async () => {
   const user = userEvent.setup();
   const bodies: Record<string, unknown>[] = [];
   serve(ENABLED_STOCK, "ADM");
@@ -175,12 +175,18 @@ it("records the reconciliation reason and refuses a server validation", async ()
     path: ROUTES.pharmacyMovements,
   });
   const form = await screen.findByRole("region", {
-    name: "กระทบยอดสินค้า (จำกัดสิทธิ์)",
+    name: "กระทบยอดสินค้าบนเซิร์ฟเวอร์",
   });
+  expect(screen.getAllByText(/แบบฟอร์มนี้เก็บข้อมูลตัวอย่างในเบราว์เซอร์เท่านั้น/).length).toBeGreaterThan(0);
+  expect(within(form).getByText(/ส่งรายการกระทบยอดไปยังเซิร์ฟเวอร์และเปลี่ยนสต็อก/)).toBeTruthy();
+  expect(within(form).getByRole("option", { name: "รายการปรับปรุง" })).toBeTruthy();
   await user.type(within(form).getByLabelText("รหัสสินค้า"), "ITEM-1");
   await user.type(within(form).getByLabelText("จำนวนที่นับได้"), "3");
   await user.type(within(form).getByLabelText("คลัง"), "WH-1");
-  await user.type(within(form).getByLabelText("เหตุผล"), "Count discrepancy");
+  await user.selectOptions(within(form).getByLabelText("วัตถุประสงค์"), "Opening Stock");
+  await user.type(within(form).getByLabelText("บริษัท"), "Clinic");
+  await user.type(within(form).getByLabelText("ราคาประเมิน (ไม่บังคับ)"), "5");
+  await user.type(within(form).getByLabelText("บัญชีค่าใช้จ่าย / ส่วนต่าง (ไม่บังคับ)"), "Opening - C");
   await user.click(
     within(form).getByRole("button", { name: "ยืนยันกระทบยอด" }),
   );
@@ -190,13 +196,103 @@ it("records the reconciliation reason and refuses a server validation", async ()
     item_code: "ITEM-1",
     qty: 3,
     warehouse: "WH-1",
-    reason: "Count discrepancy",
+    purpose: "Opening Stock",
+    company: "Clinic",
+    valuation_rate: 5,
+    expense_account: "Opening - C",
   });
+  expect(bodies[0]).not.toHaveProperty("reason");
   expect(
     await screen.findByText(
       /เซิร์ฟเวอร์ปฏิเสธรายการนี้ ตรวจสินค้า ล็อต คลัง จำนวน หรือเอกสารอ้างอิง/,
     ),
   ).toBeTruthy();
+});
+
+it("reconciles with one POST and no acknowledgement or persisted lock", async () => {
+  const user = userEvent.setup();
+  const bodies: Record<string, unknown>[] = [];
+  let acks = 0;
+  serve(ENABLED_STOCK, "ADM");
+  server.use(
+    http.post(ADJUST, async ({ request }) => {
+      bodies.push((await request.json()) as Record<string, unknown>);
+      return HttpResponse.json({
+        message: {
+          status: "adjusted",
+          reconciliation: { reconciliation_id: "SR-1", docstatus: 1 },
+        },
+      });
+    }),
+    http.post(ACK, () => {
+      acks += 1;
+      return ack();
+    }),
+  );
+  renderWithFixtures(<PharmacyMovementsPage />, {
+    role: "ADM",
+    sessionMode: "live",
+    path: ROUTES.pharmacyMovements,
+  });
+  const form = await screen.findByRole("region", {
+    name: "กระทบยอดสินค้าบนเซิร์ฟเวอร์",
+  });
+  await user.selectOptions(within(form).getByLabelText("วัตถุประสงค์"), "Adjustment Entry");
+  await user.type(within(form).getByLabelText("รหัสสินค้า"), "ITEM-1");
+  await user.type(within(form).getByLabelText("จำนวนที่นับได้"), "3");
+  await user.type(within(form).getByLabelText("คลัง"), "WH-1");
+  await user.type(within(form).getByLabelText("บริษัท"), "Clinic");
+  await user.click(
+    within(form).getByRole("button", { name: "ยืนยันกระทบยอด" }),
+  );
+
+  expect(await screen.findByText("กระทบยอดแล้ว · SR-1")).toBeTruthy();
+  expect(bodies).toHaveLength(1);
+  expect(bodies[0]).toMatchObject({ purpose: "Adjustment Entry" });
+  expect(bodies[0]).not.toHaveProperty("valuation_rate");
+  expect(bodies[0]).not.toHaveProperty("expense_account");
+  expect(acks).toBe(0);
+  expect(
+    Object.keys(localStorage).filter((key) =>
+      key.includes("stock-write.pending"),
+    ),
+  ).toEqual([]);
+});
+
+it("shows an unknown outcome for a malformed success without retry or lock", async () => {
+  const user = userEvent.setup();
+  let calls = 0;
+  serve(ENABLED_STOCK, "ADM");
+  server.use(
+    http.post(ADJUST, () => {
+      calls += 1;
+      return HttpResponse.json({ message: { status: "adjusted" } });
+    }),
+  );
+  renderWithFixtures(<PharmacyMovementsPage />, {
+    role: "ADM",
+    sessionMode: "live",
+    path: ROUTES.pharmacyMovements,
+  });
+  const form = await screen.findByRole("region", {
+    name: "กระทบยอดสินค้าบนเซิร์ฟเวอร์",
+  });
+  await user.type(within(form).getByLabelText("รหัสสินค้า"), "ITEM-1");
+  await user.type(within(form).getByLabelText("จำนวนที่นับได้"), "3");
+  await user.type(within(form).getByLabelText("คลัง"), "WH-1");
+  await user.type(within(form).getByLabelText("บริษัท"), "Clinic");
+  await user.type(within(form).getByLabelText("ราคาประเมิน (ไม่บังคับ)"), "5");
+  const submit = within(form).getByRole("button", { name: "ยืนยันกระทบยอด" });
+  await user.click(submit);
+
+  expect(
+    await screen.findByText(
+      /ผลลัพธ์ไม่แน่นอน ตรวจสอบรายการกระทบยอดสินค้าในระบบ Frappe ก่อนลองอีกครั้ง/,
+    ),
+  ).toBeTruthy();
+  expect((submit as HTMLButtonElement).disabled).toBe(false);
+  expect(within(form).queryByText(/กระทบยอดแล้ว/)).toBeNull();
+  expect(calls).toBe(1);
 });
 
 it("keeps the lock on an uncertain outcome and never retries", async () => {

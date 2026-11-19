@@ -85,10 +85,13 @@ def transfer_payload(**overrides):
 def adjust_payload(**overrides):
     values = {
         "operation_key": KEY,
+        "purpose": "Stock Reconciliation",
+        "company": "SIT Synthetic Company USD",
         "item_code": "ITEM-1",
-        "qty": 3.0,
         "warehouse": "WH-1",
-        "reason": "Count discrepancy",
+        "qty": 3.0,
+        "valuation_rate": 12.5,
+        "expense_account": "Temporary Opening - SITCO",
         "batch_id": "BATCH-1",
     }
     values.update(overrides)
@@ -291,18 +294,69 @@ class ValidationTests(unittest.TestCase):
                 with self.assertRaises(stock_contract.StockContractError):
                     stock_contract.validate_transfer(case)
 
-    def test_adjust_requires_a_reason_and_allows_zero(self):
+    def test_adjust_requires_only_the_document_identity_fields(self):
         payload = stock_contract.validate_adjust(adjust_payload(qty=0))
         self.assertEqual(payload["qty"], 0.0)
-        self.assertEqual(payload["reason"], "Count discrepancy")
-        with self.assertRaises(stock_contract.StockContractError):
-            stock_contract.validate_adjust(adjust_payload(reason=""))
-        with self.assertRaises(stock_contract.StockContractError):
-            stock_contract.validate_adjust(adjust_payload(reason="   "))
-        with self.assertRaises(stock_contract.StockContractError):
-            stock_contract.validate_adjust(adjust_payload(qty=-1))
-        with self.assertRaises(stock_contract.StockContractError):
-            stock_contract.validate_adjust(adjust_payload(reason="x" * 281))
+        self.assertEqual(payload["purpose"], "Stock Reconciliation")
+        self.assertEqual(payload["valuation_rate"], 12.5)
+        for missing in ("purpose", "company", "item_code", "warehouse"):
+            with self.subTest(missing=missing):
+                case = {
+                    key: value
+                    for key, value in adjust_payload().items()
+                    if key != missing
+                }
+                with self.assertRaises(stock_contract.StockContractError):
+                    stock_contract.validate_adjust(case)
+
+    def test_adjust_leaves_optional_native_fields_to_frappe(self):
+        body = adjust_payload()
+        for key in ("qty", "valuation_rate", "expense_account", "batch_id"):
+            body.pop(key)
+        payload = stock_contract.validate_adjust(body)
+        self.assertIsNone(payload["qty"])
+        self.assertIsNone(payload["valuation_rate"])
+        self.assertIsNone(payload["expense_account"])
+        self.assertIsNone(payload["batch_id"])
+
+        nulls = stock_contract.validate_adjust(
+            adjust_payload(qty=None, valuation_rate=None, expense_account=None)
+        )
+        self.assertIsNone(nulls["qty"])
+        self.assertIsNone(nulls["valuation_rate"])
+        self.assertIsNone(nulls["expense_account"])
+
+        self.assertIsNone(
+            stock_contract.validate_adjust(
+                adjust_payload(expense_account="")
+            )["expense_account"]
+        )
+
+    def test_adjust_accepts_each_native_purpose(self):
+        for purpose in (
+            "Stock Reconciliation",
+            "Opening Stock",
+            "Adjustment Entry",
+        ):
+            with self.subTest(purpose=purpose):
+                payload = stock_contract.validate_adjust(
+                    adjust_payload(purpose=purpose)
+                )
+                self.assertEqual(payload["purpose"], purpose)
+
+    def test_adjust_rejects_unknown_and_malformed_input(self):
+        for drift in (
+            {"reason": "Count discrepancy"},
+            {"purpose": ""},
+            {"qty": -1},
+            {"valuation_rate": -1},
+            {"qty": "three"},
+            {"valuation_rate": "twelve"},
+            {"company": ""},
+        ):
+            with self.subTest(drift=drift):
+                with self.assertRaises(stock_contract.StockContractError):
+                    stock_contract.validate_adjust(adjust_payload(**drift))
 
 
 class ReceiveProblemTests(unittest.TestCase):
@@ -431,30 +485,6 @@ class TransferProblemTests(unittest.TestCase):
         self.assertIn("expired", texts(problems))
 
 
-class AdjustProblemTests(unittest.TestCase):
-    def test_a_valid_adjust_has_no_problem(self):
-        self.assertEqual(
-            stock_contract.adjust_problems(detail(), adjust_payload()), ()
-        )
-
-    def test_a_company_without_the_adjustment_account_is_refused(self):
-        problems = stock_contract.adjust_problems(
-            detail(stock_adjustment_account=None), adjust_payload()
-        )
-        self.assertIn("stock adjustment account", texts(problems))
-
-    def test_a_batch_item_needs_its_batch(self):
-        problems = stock_contract.adjust_problems(
-            detail(batch=None),
-            {
-                key: value
-                for key, value in adjust_payload().items()
-                if key != "batch_id"
-            },
-        )
-        self.assertIn("batch", texts(problems))
-
-
 class ExpectedSideEffectTests(unittest.TestCase):
     def test_receive_expects_one_entry_and_a_positive_bin_delta(self):
         expected = stock_contract.expected_receive(detail(), receive_payload())
@@ -469,13 +499,6 @@ class ExpectedSideEffectTests(unittest.TestCase):
         self.assertEqual(expected["bin_mode"], "delta")
         self.assertEqual(expected["bins"], {"WH-1": -4.0, "WH-2": 4.0})
         self.assertEqual(expected["gl_rows_max"], 4)
-
-    def test_adjust_sets_the_counted_bin(self):
-        expected = stock_contract.expected_adjust(detail(), adjust_payload())
-        self.assertEqual(expected["sle_rows"], 1)
-        self.assertEqual(expected["bin_mode"], "set")
-        self.assertEqual(expected["bins"], {"WH-1": 3.0})
-        self.assertEqual(expected["gl_rows_max"], 2)
 
     def facts(self, **overrides):
         values = {
@@ -533,21 +556,6 @@ class ExpectedSideEffectTests(unittest.TestCase):
             )
         )
 
-    def test_adjust_compares_the_counted_quantity(self):
-        expected = stock_contract.expected_adjust(detail(), adjust_payload())
-        facts = self.facts(
-            doctype="Stock Reconciliation",
-            sle_rows=1,
-            gl_rows=2,
-            bins={"WH-1": 3.0},
-        )
-        self.assertIsNone(stock_contract.side_effect_problem(facts, expected))
-        self.assertIsNotNone(
-            stock_contract.side_effect_problem(
-                {**facts, "bins": {"WH-1": 4.0}}, expected
-            )
-        )
-
 
 class PreparedBodyTests(unittest.TestCase):
     def prepared_receive(self, **overrides):
@@ -585,28 +593,10 @@ class PreparedBodyTests(unittest.TestCase):
         values.update(overrides)
         return values
 
-    def prepared_adjust(self, **overrides):
-        values = {
-            "item_code": "ITEM-1",
-            "qty": 3.0,
-            "uom": "Unit",
-            "warehouse": "WH-1",
-            "batch_no": "BATCH-1",
-            "create_batch": False,
-            "reason": "Count discrepancy",
-            "expense_account": "Stock Adjustment - SITCO",
-            "posting_date": "2026-11-16",
-            "set_posting_time": True,
-            "company": "SIT Synthetic Company USD",
-        }
-        values.update(overrides)
-        return values
-
     def test_each_prepared_body_pins_the_server_company_and_posting(self):
         for kind, prepared in (
             ("stock_receive", self.prepared_receive()),
             ("stock_transfer", self.prepared_transfer()),
-            ("stock_adjust", self.prepared_adjust()),
         ):
             with self.subTest(kind=kind):
                 self.assertIsNone(
@@ -637,16 +627,6 @@ class PreparedBodyTests(unittest.TestCase):
         )
         self.assertIsNotNone(
             stock_contract.prepared_problem(
-                "stock_adjust", self.prepared_adjust(reason="")
-            )
-        )
-        self.assertIsNotNone(
-            stock_contract.prepared_problem(
-                "stock_adjust", self.prepared_adjust(expense_account=None)
-            )
-        )
-        self.assertIsNotNone(
-            stock_contract.prepared_problem(
                 "stock_receive", self.prepared_receive(supplier="")
             )
         )
@@ -654,12 +634,7 @@ class PreparedBodyTests(unittest.TestCase):
             stock_contract.prepared_problem("stock_receive", None)
         )
 
-    def test_adjust_accepts_zero_but_receive_and_transfer_do_not(self):
-        self.assertIsNone(
-            stock_contract.prepared_problem(
-                "stock_adjust", self.prepared_adjust(qty=0.0)
-            )
-        )
+    def test_receive_and_transfer_do_not_accept_zero(self):
         for kind, prepared in (
             ("stock_receive", self.prepared_receive(qty=0.0)),
             ("stock_transfer", self.prepared_transfer(qty=0.0)),

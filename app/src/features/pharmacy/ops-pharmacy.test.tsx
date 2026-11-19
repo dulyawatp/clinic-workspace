@@ -303,7 +303,7 @@ describe("PHA-06 stock operations", () => {
     await screen.findByText("PHA");
     await user.click(
       screen.getByRole("button", {
-        name: "คำขอกระทบยอด (จำกัดสิทธิ์)",
+        name: "คำขอกระทบยอดตัวอย่าง (ผู้ดูแลเดโม)",
       }),
     );
     await user.selectOptions(
@@ -326,7 +326,7 @@ describe("PHA-06 stock operations", () => {
 
     expect(
       screen.getAllByText(
-        "ต้องมีสิทธิ์กระทบยอดแยก ใช้ผู้ดูแลตัวอย่าง",
+        "คำขอตัวอย่างเท่านั้น: เลือกบทบาทผู้ดูแลเดโม",
       ).length,
     ).toBeGreaterThan(0);
     expect(screen.queryByRole("status")).toBeNull();
@@ -353,7 +353,7 @@ describe("PHA-06 stock operations", () => {
     await screen.findByText("ADM");
     await user.click(
       screen.getByRole("button", {
-        name: "คำขอกระทบยอด (จำกัดสิทธิ์)",
+        name: "คำขอกระทบยอดตัวอย่าง (ผู้ดูแลเดโม)",
       }),
     );
     await user.selectOptions(

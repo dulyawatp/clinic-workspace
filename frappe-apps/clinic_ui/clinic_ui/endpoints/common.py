@@ -175,6 +175,34 @@ def authorize_stock_write(gateway, allowed_codes, csrf_token=None):
     return settings, view, role
 
 
+def authorize_stock_adjust_write(gateway, allowed_codes, csrf_token=None):
+    """Read gate, explicit CSRF, and the converted stock-adjustment gate.
+
+    The converted adjustment lane relies on Frappe/Marley permissions,
+    controller validation and native transactions instead of the historical
+    operation fence, write budget, receipt, acknowledgement barrier and
+    deployment marker. It still requires the authenticated session, a valid
+    same-session CSRF token, the exact approved site configuration, the stock
+    flag and an existing clinic stock role code. The caller's own native Stock
+    Reconciliation create/submit authority is checked per request and is the
+    real permission; nothing is granted and no configuration value is authority
+    on its own.
+
+    The fenced receive/transfer lane deliberately keeps
+    ``authorize_stock_write`` above, including the deployment marker and the
+    fence store.
+    """
+
+    settings, view, role = authorize(gateway, allowed_codes)
+    if view.user == write_fence.LATCH_ACTOR:
+        gateway.deny()
+    if not gateway.csrf_token_valid(csrf_token):
+        gateway.deny()
+    if not settings.stock_write_enabled:
+        gateway.deny()
+    return settings, view, role
+
+
 def authorize_purchase_write(gateway, allowed_codes, csrf_token=None):
     """Read gate, explicit CSRF, and the separate purchasing-write gate.
 
