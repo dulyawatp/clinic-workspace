@@ -27,7 +27,7 @@ describe("operations copy catalogue", () => {
       ).length,
     }).toMatchInlineSnapshot(`
       {
-        "catalogueKeys": 2202,
+        "catalogueKeys": 2204,
         "opsV3Keys": 488,
         "opsVocabKeys": 16,
       }

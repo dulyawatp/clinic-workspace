@@ -3,7 +3,6 @@ import {
   adjustNativeStock,
   receiveNativeStock,
   StockAdjustOutcomeUnknownError,
-  stockWriteLocked,
   transferNativeStock,
 } from "./stock-write";
 
@@ -27,7 +26,7 @@ function acknowledged() {
 
 function transferInput() {
   return {
-    operation_key: OPERATION,
+    company: "Clinic",
     item_code: "ITEM-1",
     qty: 2,
     source_warehouse: "WH-1",
@@ -41,90 +40,30 @@ describe("native stock writes", () => {
     vi.restoreAllMocks();
   });
 
-  it("parses a batch-less transfer as success and acknowledges once", async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        success("transferred", {
-          kind: "stock_transfer",
-          item_code: "ITEM-1",
-          warehouse: "WH-1",
-          target_warehouse: "WH-2",
-          qty: 2,
-          batch: null,
-        }),
-      )
-      .mockResolvedValueOnce(acknowledged());
-
-    await expect(transferNativeStock(transferInput())).resolves.toEqual({
-      status: "transferred",
-      movement: {
-        kind: "stock_transfer",
-        item_code: "ITEM-1",
-        warehouse: "WH-1",
-        target_warehouse: "WH-2",
-        qty: 2,
-        batch: null,
-      },
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(stockWriteLocked("stock_transfer")).toBe(false);
-  });
-
-  it("still parses a batched transfer and a batch-less receipt", async () => {
-    vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        success("transferred", {
-          kind: "stock_transfer",
-          item_code: "ITEM-1",
-          warehouse: "WH-1",
-          target_warehouse: "WH-2",
-          qty: 2,
-          batch: "BATCH-1",
-        }),
-      )
-      .mockResolvedValueOnce(acknowledged())
-      .mockResolvedValueOnce(
-        success("received", {
-          kind: "stock_receive",
-          item_code: "ITEM-2",
-          warehouse: "WH-1",
-          qty: 5,
-          batch: null,
-        }),
-      )
-      .mockResolvedValueOnce(acknowledged());
-
-    await expect(transferNativeStock(transferInput())).resolves.toMatchObject({
-      movement: { batch: "BATCH-1" },
-    });
-    await expect(
-      receiveNativeStock({
-        operation_key: OPERATION,
-        item_code: "ITEM-2",
-        qty: 5,
-        warehouse: "WH-1",
-        supplier: "SUP-1",
-      }),
-    ).resolves.toMatchObject({ movement: { batch: null } });
-  });
-
-  it("rejects a transfer whose batch field is neither text nor null", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      success("transferred", {
-        kind: "stock_transfer",
-        item_code: "ITEM-1",
-        warehouse: "WH-1",
-        target_warehouse: "WH-2",
-        qty: 2,
-        batch: 7,
-      }),
+  it("posts one native transfer without lock or acknowledgement", async () => {
+    localStorage.setItem("clinic.stock-write.pending.stock_transfer", "1");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ message: { status: "transferred", stock_entry: { stock_entry_id: "STE-1", docstatus: 1 } } }), { status: 200 }),
     );
-
-    await expect(transferNativeStock(transferInput())).rejects.toMatchObject({
-      code: "uncertain",
+    await expect(transferNativeStock(transferInput())).resolves.toEqual({
+      status: "transferred", stock_entry: { stock_entry_id: "STE-1", docstatus: 1 },
     });
-    expect(stockWriteLocked("stock_transfer")).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual(transferInput());
+  });
+
+  it("does not retry or lock after an unknown transfer outcome", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("offline"));
+    await expect(transferNativeStock(transferInput())).rejects.toBeInstanceOf(StockAdjustOutcomeUnknownError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(localStorage.length).toBe(0);
+  });
+
+  it("preserves batch-less receipt acknowledgement", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(success("received", {
+      kind: "stock_receive", item_code: "ITEM-2", warehouse: "WH-1", qty: 5, batch: null,
+    })).mockResolvedValueOnce(acknowledged());
+    await expect(receiveNativeStock({ operation_key: OPERATION, item_code: "ITEM-2", qty: 5, warehouse: "WH-1", supplier: "SUP-1" })).resolves.toMatchObject({ movement: { batch: null } });
   });
 
   it("posts one reconciliation with no lock and no acknowledgement", async () => {

@@ -1,6 +1,6 @@
-"""Designed stock receive / transfer writes and the converted adjust lane.
+"""Designed stock receive writes and the converted transfer / adjust lanes.
 
-``receive`` and ``transfer`` are unchanged and stay on the historical fence:
+``receive`` is unchanged and stays on the historical fence:
 
 1. shared read gate plus the explicit same-session CSRF and stock-write
    deployment gates, then the pinned boundary and installed-field preflight;
@@ -22,18 +22,21 @@
    one explicit commit and its append,
 8. the one-shot acknowledgement token.
 
-``adjust`` is the **converted lane**. The client sends the native document
-fields themselves — ``purpose``, ``company``, ``item_code``, ``warehouse``,
-``qty``, ``valuation_rate``, ``expense_account`` and an optional batch — and
-this endpoint inserts and submits exactly one ``Stock Reconciliation`` through
-the installed controller. Frappe/Marley permissions, Select and quantity
-validation, posting-time rules, lifecycle and the transaction do the deciding;
-no value is guessed, substituted or checked again here. It still requires the
-authenticated session, the same-session CSRF token, the exact approved site,
-the stock flag, an existing clinic stock role code, the pinned boundary and the
-caller's own native create and submit authority (which grants nothing). The success envelope returns the native
-identifier and docstatus. A site with no reviewed reason field means the reason
-is simply not part of the payload and nothing claims it was stored.
+``transfer`` and ``adjust`` are the **converted lanes**. The client sends the
+native document fields themselves — ``company``, ``item_code``, ``qty``,
+``source_warehouse``, ``target_warehouse`` and an optional batch for the
+``Material Transfer``; ``purpose``, ``company``, ``item_code``, ``warehouse``,
+``qty``, ``valuation_rate``, ``expense_account`` and an optional batch for the
+``Stock Reconciliation`` — and each endpoint inserts and submits exactly one
+document through the installed controller. Frappe/Marley permissions, Select
+and quantity validation, posting-time rules, lifecycle and the transaction do
+the deciding; no value is guessed, substituted or checked again here. Both
+still require the authenticated session, the same-session CSRF token, the exact
+approved site, the stock flag, an existing clinic stock role code, the pinned
+boundary and the caller's own native create and submit authority (which grants
+nothing). The success envelope returns the native identifier and docstatus. A
+site with no reviewed reason field means the reason is simply not part of the
+payload and nothing claims it was stored.
 
 After a dispatch the endpoint rolls the partial transaction back first. A
 failed rollback raises :class:`RollbackFailed` to Frappe cleanup instead of
@@ -174,22 +177,22 @@ def _shared_gate(gateway, csrf_token, allowed_codes):
 ADJUST_ROLES = STOCK_ROLE_CODES | ADJUST_ROLE_CODES
 
 
-def _adjust_gate(gateway, csrf_token):
-    """Converted adjustment gate: session, CSRF, exact site, flag, stock role.
+def _native_gate(gateway, csrf_token, allowed_codes):
+    """Converted stock-write gate: session, CSRF, exact site, flag, role code.
 
     The clinic gate accepts the existing stock or adjustment role code, so the
     pharmacy Stock Manager reaches the endpoint exactly as Frappe already
-    permits; this grants nothing. The caller's own native Stock Reconciliation
-    create/submit authority is the real permission. No operation fence, write
+    permits; this grants nothing. The caller's own native create and submit
+    authority on the document is the real permission. No operation fence, write
     budget, receipt, acknowledgement token or deployment marker is read. The
-    pinned boundary stays. The fenced receive/transfer lane keeps
-    ``_shared_gate`` unchanged.
+    pinned boundary stays. The fenced receive lane keeps ``_shared_gate``
+    unchanged.
     """
 
-    settings, view, role = common.authorize_stock_adjust_write(
-        gateway, ADJUST_ROLES, csrf_token
+    settings, view, role = common.authorize_native_stock_write(
+        gateway, allowed_codes, csrf_token
     )
-    if role not in ADJUST_ROLES:
+    if role not in allowed_codes:
         gateway.deny()
     if gateway.native_stock_boundary_problem() is not None:
         gateway.deny()
@@ -240,22 +243,6 @@ def _prepare_receive(detail, payload):
         "batch_no": batch_id,
         "batch_expiry": payload.get("batch_expiry"),
         "create_batch": create_batch,
-        "posting_date": detail.get("today"),
-        "set_posting_time": True,
-        "company": detail.get("company"),
-    }
-
-
-def _prepare_transfer(detail, payload):
-    item = detail.get("item") or {}
-    return {
-        "item_code": payload["item_code"],
-        "qty": payload["qty"],
-        "uom": item.get("stock_uom"),
-        "source_warehouse": payload["source_warehouse"],
-        "target_warehouse": payload["target_warehouse"],
-        "batch_no": payload.get("batch_id"),
-        "create_batch": False,
         "posting_date": detail.get("today"),
         "set_posting_time": True,
         "company": detail.get("company"),
@@ -530,23 +517,66 @@ def receive(gateway, body, csrf_token=None):
 
 
 def transfer(gateway, body, csrf_token=None):
-    """Transfer stock between two warehouses as a Material Transfer."""
+    """Create and submit one Material Transfer from the native document fields.
 
-    return _perform(
-        gateway,
-        body,
-        csrf_token,
-        kind=stock_contract.TRANSFER_KIND,
-        allowed_codes=STOCK_ROLE_CODES,
-        validate=stock_contract.validate_transfer,
-        read_detail=lambda gw, payload: gw.native_stock_transfer_detail(payload),
-        problems=stock_contract.transfer_problems,
-        expected=stock_contract.expected_transfer,
-        prepare=_prepare_transfer,
-        mutate=lambda gw, prepared: gw.create_native_stock_transfer(prepared),
-        read_facts=lambda gw, reference, exp, baseline: (
-            gw.native_stock_transfer_facts(reference, exp, baseline)
-        ),
+    The body carries the document's own fields — ``company``, ``item_code``,
+    ``qty``, ``source_warehouse``, ``target_warehouse`` and an optional batch —
+    and this endpoint inserts and submits exactly one ``Stock Entry`` of type
+    ``Material Transfer`` through the installed controller. Frappe/Marley
+    permissions, warehouses, batch validity, available stock, quantities,
+    posting and the submit lifecycle do the deciding; no value is guessed,
+    substituted or checked again here. The historical ``operation_key`` is
+    accepted and ignored so an older caller is not refused. Session, CSRF,
+    exact site, the stock flag, the pinned boundary and the caller's own native
+    create and submit authority stay required; nothing is granted.
+    """
+
+    _native_gate(gateway, csrf_token, STOCK_ROLE_CODES)
+    try:
+        payload = stock_contract.validate_transfer(body)
+    except stock_contract.StockContractError:
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    doctype = stock_contract.STOCK_ENTRY_DOCTYPE
+    if gateway.native_stock_can_create(doctype) is not True:
+        gateway.deny()
+    if gateway.native_stock_can_submit(doctype) is not True:
+        gateway.deny()
+
+    try:
+        created = gateway.create_and_submit_native_stock_transfer(payload)
+        reference = created.get("name") if isinstance(created, dict) else None
+        docstatus = (
+            created.get("docstatus") if isinstance(created, dict) else None
+        )
+        if not isinstance(reference, str) or not reference.strip():
+            raise patient_write.WriteUncertain()
+        if not isinstance(docstatus, int) or isinstance(docstatus, bool):
+            raise patient_write.WriteUncertain()
+        gateway.commit()
+    except Exception as exc:
+        # Roll the partial transaction back first; a rollback failure escapes
+        # (RollbackFailed), so no envelope can be followed by a request-end
+        # commit. Once the rollback succeeded the request holds no partial
+        # write, so an installed refusal may be reported as the definite
+        # outcome it is; anything else stays uncertain and is never retried.
+        _rollback_or_raise(gateway)
+        if gateway.is_native_permission_denial(exc):
+            gateway.deny()
+        if gateway.is_native_validation_error(exc):
+            return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
+
+    gateway.strip_message_channels()
+    return gateway.respond_write(
+        HTTP_OK,
+        {
+            "status": TRANSFERRED_RESULT,
+            "stock_entry": {
+                "stock_entry_id": reference,
+                "docstatus": docstatus,
+            },
+        },
     )
 
 
@@ -558,9 +588,7 @@ def adjust(gateway, body, csrf_token=None):
     values, quantity, posting and the submit lifecycle.
     """
 
-    _settings, _view, role = _adjust_gate(gateway, csrf_token)
-    if role not in ADJUST_ROLES:
-        gateway.deny()
+    _native_gate(gateway, csrf_token, ADJUST_ROLES)
     try:
         payload = stock_contract.validate_adjust(body)
     except stock_contract.StockContractError:

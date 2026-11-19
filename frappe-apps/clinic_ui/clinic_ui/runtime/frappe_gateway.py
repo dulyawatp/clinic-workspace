@@ -5659,27 +5659,6 @@ class Gateway:
         except Exception:
             raise patient_write.StoreUnavailable() from None
 
-    def native_stock_transfer_detail(self, payload):
-        """Read the pre-fence transfer decision fields."""
-
-        try:
-            warehouse = self._stock_warehouse(payload["source_warehouse"])
-            return {
-                "today": self.site_today(),
-                "company": warehouse.get("company"),
-                "item": self._stock_item(payload["item_code"]),
-                "warehouse": warehouse,
-                "target_warehouse": self._stock_warehouse(
-                    payload["target_warehouse"]
-                ),
-                "batch": self._stock_batch(payload.get("batch_id")),
-                "available_qty": self._stock_bin_qty(
-                    payload["item_code"], payload["source_warehouse"]
-                ),
-            }
-        except Exception:
-            raise patient_write.StoreUnavailable() from None
-
     def _stock_document_counts(self):
         vouchers = (
             stock_contract.PURCHASE_RECEIPT_DOCTYPE,
@@ -5869,6 +5848,43 @@ class Gateway:
         return {
             "name": self._text_value(reconciliation.name),
             "docstatus": getattr(reconciliation, "docstatus", None),
+        }
+
+    def create_and_submit_native_stock_transfer(self, payload):
+        """One Material Transfer from the native document fields: insert, submit.
+
+        The body already carries the document's own fields, so this adapter adds
+        only the document type and the native child-row names: ``s_warehouse`` /
+        ``t_warehouse`` and ``batch_no``. Frappe fills the unit, description,
+        expense account and conversion factor on insert, and its controller
+        decides the warehouses, the batch, available stock, the quantity and the
+        submit lifecycle. Native exceptions are deliberately propagated
+        unchanged so the endpoint can tell a refusal from a lost outcome after
+        it rolls the transaction back: Frappe's ``ValidationError`` family and
+        its own ``PermissionError`` keep their type.
+        """
+
+        row = {
+            "item_code": payload["item_code"],
+            "qty": payload["qty"],
+            "s_warehouse": payload["source_warehouse"],
+            "t_warehouse": payload["target_warehouse"],
+        }
+        if payload.get("batch_id"):
+            row["batch_no"] = payload["batch_id"]
+            row["use_serial_batch_fields"] = 1
+        document = {
+            "doctype": stock_contract.STOCK_ENTRY_DOCTYPE,
+            "company": payload["company"],
+            "stock_entry_type": stock_contract.MATERIAL_TRANSFER_TYPE,
+            "items": [row],
+        }
+        entry = self.frappe.get_doc(document)
+        entry.insert()
+        entry.submit()
+        return {
+            "name": self._text_value(entry.name),
+            "docstatus": getattr(entry, "docstatus", None),
         }
 
     def _stock_docstatus(self, reference, expected):

@@ -1,10 +1,11 @@
-"""Endpoint tests for the stock receive/transfer family and the adjust lane.
+"""Endpoint tests for the stock receive family and the converted lanes.
 
-The fake gateway proves gate ordering and the strict bodies for the retained
-fenced receive/transfer lane. For the converted adjustment lane it proves the
-CSRF/role/site gate, native create and submit authority, the native field
-payload (purpose, company, valuation rate, difference account), the uncertain
-outcome path, and that no fence, budget, receipt or acknowledgement is read.
+The fake gateway proves gate ordering and the strict body for the retained
+fenced receive lane. For the converted transfer and adjustment lanes it proves
+the CSRF/role/site gate, native create and submit authority, the native field
+payload (company, warehouses, quantity, batch; purpose, valuation rate,
+difference account), the uncertain outcome path, and that no fence, budget,
+receipt or acknowledgement is read.
 """
 
 import unittest
@@ -98,7 +99,6 @@ def gateway(role="PHA", **overrides):
             setattr(fake, key, value)
     fake.site_today_value = "2026-11-16"
     fake.stock_receive_detail = detail()
-    fake.stock_transfer_detail = detail()
     fake.stock_baseline_value = {
         "stock_ledger_rows": 5,
         "gl_rows": 10,
@@ -122,7 +122,7 @@ def receive_body(**overrides):
 
 def transfer_body(**overrides):
     values = {
-        "operation_key": KEY,
+        "company": "SIT Synthetic Company USD",
         "item_code": "ITEM-1",
         "qty": 4.0,
         "source_warehouse": "WH-1",
@@ -333,67 +333,192 @@ class ReceiveTests(unittest.TestCase):
 
 
 class TransferTests(unittest.TestCase):
-    def test_a_material_transfer_is_submitted_once(self):
+    def test_a_material_transfer_is_created_and_submitted_natively(self):
         fake = gateway()
+
+        payload = stock_write.transfer(fake, transfer_body(), CSRF)
+
+        self.assertEqual(
+            payload,
+            {
+                "status": "transferred",
+                "stock_entry": {
+                    "stock_entry_id": "SE-1",
+                    "docstatus": 1,
+                },
+            },
+        )
+        prepared = fake.stock_transfer_calls[0]
+        self.assertEqual(prepared["company"], "SIT Synthetic Company USD")
+        self.assertEqual(prepared["item_code"], "ITEM-1")
+        self.assertEqual(prepared["qty"], 4.0)
+        self.assertEqual(prepared["source_warehouse"], "WH-1")
+        self.assertEqual(prepared["target_warehouse"], "WH-2")
+        self.assertEqual(prepared["batch_id"], "BATCH-1")
+        self.assertEqual(fake.stock_detail_calls, [])
+        self.assertEqual(fake.stock_fence_calls, [])
+        self.assertEqual(fake.stock_receipt_list_calls, [])
+        self.assertEqual(fake.stock_ack_calls, [])
+        self.assertEqual(fake.commit_calls, 1)
+
+    def test_the_batch_and_the_operation_key_are_optional(self):
+        fake = gateway()
+        body = transfer_body()
+        body.pop("batch_id")
+
+        payload = stock_write.transfer(fake, body, CSRF)
+
+        self.assertEqual(payload["status"], "transferred")
+        self.assertIsNone(fake.stock_transfer_calls[0]["batch_id"])
+
+        fake = gateway()
+        payload = stock_write.transfer(
+            fake, transfer_body(operation_key=KEY), CSRF
+        )
+        self.assertEqual(payload["status"], "transferred")
+
+    def test_native_create_and_submit_authority_decide(self):
+        for authority in ("stock_create_authority", "stock_submit_authority"):
+            with self.subTest(authority=authority):
+                fake = gateway()
+                setattr(fake, authority, {"Stock Entry": False})
+
+                with self.assertRaises(Denied):
+                    stock_write.transfer(fake, transfer_body(), CSRF)
+
+                self.assertEqual(fake.stock_transfer_calls, [])
+                self.assertEqual(fake.commit_calls, 0)
+
+    def test_the_deployment_marker_preflight_and_fence_store_are_not_required(
+        self,
+    ):
+        fake = gateway()
+        fake.deployment_approved = False
+        fake.fence_ready = False
+        fake.stock_install_problem = "installed field drift"
 
         payload = stock_write.transfer(fake, transfer_body(), CSRF)
 
         self.assertEqual(payload["status"], "transferred")
-        self.assertEqual(
-            payload["movement"],
-            {
-                "kind": "stock_transfer",
-                "item_code": "ITEM-1",
-                "warehouse": "WH-1",
-                "target_warehouse": "WH-2",
-                "qty": 4.0,
-                "batch": "BATCH-1",
-            },
-        )
-        self.assertEqual(fake.stock_fence_calls[0][1], "stock_transfer")
-        self.assertEqual(len(fake.stock_transfer_calls), 1)
-        prepared = fake.stock_transfer_calls[0]
-        self.assertEqual(prepared["source_warehouse"], "WH-1")
-        self.assertEqual(prepared["target_warehouse"], "WH-2")
-        self.assertEqual(prepared["batch_no"], "BATCH-1")
-        self.assertEqual(prepared["posting_date"], "2026-11-16")
-        self.assertTrue(prepared["set_posting_time"])
+        self.assertEqual(fake.stock_fence_calls, [])
+        self.assertEqual(fake.stock_detail_calls, [])
 
-    def test_insufficient_stock_names_the_line_and_never_claims(self):
+    def test_the_body_must_carry_the_transfer_identity_fields(self):
+        for missing in (
+            "company",
+            "item_code",
+            "qty",
+            "source_warehouse",
+            "target_warehouse",
+        ):
+            with self.subTest(missing=missing):
+                body = transfer_body()
+                body.pop(missing)
+                fake = gateway()
+                payload = stock_write.transfer(fake, body, CSRF)
+                self.assertEqual(payload, {"code": "VALIDATION"})
+                self.assertEqual(fake.write_responses[-1][0], 422)
+                self.assertEqual(fake.stock_transfer_calls, [])
+
+    def test_the_body_is_strict_and_rejects_a_reason(self):
         fake = gateway()
-        fake.stock_transfer_detail = detail(available_qty=1.0)
+
+        payload = stock_write.transfer(
+            fake, {**transfer_body(), "reason": "Restock the front shelf"}, CSRF
+        )
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.stock_transfer_calls, [])
+
+    def test_an_absent_or_non_positive_quantity_is_validation(self):
+        for drift in ({"qty": None}, {"qty": 0}, {"qty": -1.0}, {"qty": "4"}):
+            with self.subTest(drift=drift):
+                fake = gateway()
+                payload = stock_write.transfer(
+                    fake, transfer_body(**drift), CSRF
+                )
+                self.assertEqual(payload, {"code": "VALIDATION"})
+                self.assertEqual(fake.stock_transfer_calls, [])
+
+    def test_a_post_dispatch_failure_is_uncertain_and_never_claims(self):
+        fake = gateway()
+        fake.stock_mutation_error = patient_write.WriteUncertain()
+
+        payload = stock_write.transfer(fake, transfer_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.write_responses[-1][0], 409)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_native_validation_refusal_is_a_known_validation(self):
+        fake = gateway()
+        fake.stock_mutation_error = NativeValidationError()
 
         payload = stock_write.transfer(fake, transfer_body(), CSRF)
 
         self.assertEqual(payload, {"code": "VALIDATION"})
-        self.assertEqual(fake.write_responses[-1][0], 417)
-        self.assertEqual(fake.stock_fence_calls, [])
-        self.assertEqual(fake.stock_transfer_calls, [])
+        self.assertEqual(fake.write_responses[-1][0], 422)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.commit_calls, 0)
 
-    def test_a_missing_or_equal_target_is_refused(self):
-        for label, body, values in (
-            (
-                "missing",
-                transfer_body(),
-                detail(target_warehouse={"exists": False}),
-            ),
-            ("same", transfer_body(target_warehouse="WH-1"), detail()),
-        ):
-            with self.subTest(label=label):
-                fake = gateway()
-                fake.stock_transfer_detail = values
-                payload = stock_write.transfer(fake, body, CSRF)
-                self.assertEqual(payload, {"code": "VALIDATION"})
-                self.assertEqual(fake.stock_fence_calls, [])
-
-    def test_the_second_transfer_is_refused_by_the_budget(self):
+    def test_a_native_permission_refusal_is_a_denial(self):
         fake = gateway()
-        committed(fake, "stock_transfer", "stock-transfer-key-0000")
+        fake.stock_mutation_error = NativePermissionDenied()
+
+        with self.assertRaises(Denied):
+            stock_write.transfer(fake, transfer_body(), CSRF)
+
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.commit_calls, 0)
+
+    def test_an_unknown_post_dispatch_failure_stays_uncertain(self):
+        fake = gateway()
+        fake.stock_mutation_error = RuntimeError("boom")
 
         payload = stock_write.transfer(fake, transfer_body(), CSRF)
 
-        self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(fake.stock_fence_calls, [])
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.write_responses[-1][0], 409)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_missing_native_identifier_is_uncertain(self):
+        for result in ({"name": "", "docstatus": 1}, {"name": "SE-1"}):
+            with self.subTest(result=result):
+                fake = gateway()
+                fake.stock_transfer_result = result
+
+                payload = stock_write.transfer(fake, transfer_body(), CSRF)
+
+                self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+                self.assertEqual(fake.commit_calls, 0)
+                self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_native_refusal_with_a_failed_rollback_escapes(self):
+        fake = gateway()
+        fake.stock_mutation_error = NativeValidationError()
+
+        def failing_rollback():
+            raise RuntimeError("rollback exploded")
+
+        with mock.patch.object(fake, "rollback", failing_rollback):
+            with self.assertRaises(stock_write.RollbackFailed):
+                stock_write.transfer(fake, transfer_body(), CSRF)
+
+        self.assertEqual(fake.write_responses, [])
+        self.assertEqual(fake.commit_calls, 0)
+
+    def test_the_session_and_csrf_gates_still_decide(self):
+        fake = gateway()
+        with self.assertRaises(Denied):
+            stock_write.transfer(fake, transfer_body(), "wrong-token")
+        self.assertEqual(fake.stock_transfer_calls, [])
+
+        fake = gateway()
+        fake.stock_boundary_problem = "drift"
+        with self.assertRaises(Denied):
+            stock_write.transfer(fake, transfer_body(), CSRF)
+        self.assertEqual(fake.stock_transfer_calls, [])
 
 
 class AdjustTests(unittest.TestCase):
@@ -596,7 +721,7 @@ class AdjustTests(unittest.TestCase):
 
 
 class PreparedBodyTests(unittest.TestCase):
-    def test_each_mutation_carries_the_server_resolved_company(self):
+    def test_the_receive_mutation_carries_the_server_resolved_company(self):
         fake = gateway()
         stock_write.receive(fake, receive_body(), CSRF)
         self.assertEqual(
@@ -604,26 +729,15 @@ class PreparedBodyTests(unittest.TestCase):
             "SIT Synthetic Company USD",
         )
 
-        fake = gateway()
-        stock_write.transfer(fake, transfer_body(), CSRF)
-        self.assertEqual(
-            fake.stock_transfer_calls[0]["company"],
-            "SIT Synthetic Company USD",
-        )
-
     def test_a_detail_without_a_company_is_refused_pre_fence(self):
-        for label, role, operation, body in (
-            ("receive", "PHA", stock_write.receive, receive_body()),
-            ("transfer", "PHA", stock_write.transfer, transfer_body()),
-        ):
-            with self.subTest(label=label):
-                fake = gateway(role=role)
-                fake.stock_receive_detail = detail(company=None)
-                fake.stock_transfer_detail = detail(company=None)
-                payload = operation(fake, body, CSRF)
-                self.assertEqual(payload, {"code": "VALIDATION"})
-                self.assertEqual(fake.write_responses[-1][0], 417)
-                self.assertEqual(fake.stock_fence_calls, [])
+        fake = gateway(role="PHA")
+        fake.stock_receive_detail = detail(company=None)
+
+        payload = stock_write.receive(fake, receive_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.write_responses[-1][0], 417)
+        self.assertEqual(fake.stock_fence_calls, [])
 
 
 class FenceTests(unittest.TestCase):
@@ -901,7 +1015,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(capabilities["write.stock.receive"], "read_only")
         self.assertEqual(capabilities["write.stock.transfer"], "read_only")
 
-    def test_a_broken_shared_preflight_only_blocks_the_legacy_lanes(self):
+    def test_a_broken_shared_preflight_only_blocks_the_legacy_receive(self):
         for role in ("PHA", "ADM"):
             with self.subTest(role=role):
                 fake = gateway(role=role)
@@ -916,8 +1030,29 @@ class BootstrapTests(unittest.TestCase):
                     capabilities["write.stock.receive"], "read_only"
                 )
                 self.assertEqual(
+                    capabilities["write.stock.transfer"],
+                    "enabled" if role == "PHA" else "read_only",
+                )
+
+    def test_transfer_needs_native_create_and_submit(self):
+        for authority in ("stock_create_authority", "stock_submit_authority"):
+            with self.subTest(authority=authority):
+                fake = gateway()
+                setattr(fake, authority, {"Stock Entry": False})
+                capabilities = session.bootstrap(fake)["capabilities"]
+                self.assertEqual(
                     capabilities["write.stock.transfer"], "read_only"
                 )
+
+    def test_the_marker_and_fence_store_no_longer_decide_the_transfer(self):
+        fake = gateway()
+        fake.deployment_approved = False
+        fake.fence_ready = False
+
+        capabilities = session.bootstrap(fake)["capabilities"]
+
+        self.assertEqual(capabilities["write.stock.transfer"], "enabled")
+        self.assertEqual(capabilities["write.stock.receive"], "read_only")
 
     def test_a_closed_gate_publishes_nothing(self):
         fake = gateway(

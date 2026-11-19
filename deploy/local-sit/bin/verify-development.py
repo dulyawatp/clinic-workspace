@@ -20,13 +20,14 @@ caller's own native Sales Invoice create and submit authority, so the synthetic
 CAS bootstrap is required and a missing CAS credential fails this run rather
 than passing the lane unverified. ``write.payment.receive`` stays fenced and
 must remain ``read_only`` while the ledger has unresolved keys. The stock lane
-converted only its adjustment: ``write.stock.adjust`` follows the caller's own
-native ``Stock Reconciliation`` create and submit authority plus the stock flag,
-never the role map or the flag alone, so the run probes that authority and
-asserts PHA and ADM separately from it - a role without the permission stays
-``read_only``, which is the contract ADM identity on this site - while receive
-and transfer stay fenced and ``write.stock.consume`` stays ``read_only``
-whatever the gate says.
+converted its adjustment and its transfer: ``write.stock.adjust`` follows the
+caller's own native ``Stock Reconciliation`` create and submit authority plus
+the stock flag, ``write.stock.transfer`` follows the native ``Stock Entry``
+create and submit authority plus the same flag, never the role map or the flag
+alone, so the run probes those authorities and asserts PHA and ADM separately
+from them - a role without the permission stays ``read_only``, which is the
+contract ADM identity on this site - while receive stays fenced and
+``write.stock.consume`` stays ``read_only`` whatever the gate says.
 The DOC bootstrap covers DOC only; the MGR purchase lane is checked from its own
 bootstrap when the private state already carries that credential, and the run
 reports the gap otherwise. The ADM bootstrap cannot be optional and cannot be
@@ -81,14 +82,13 @@ NEVER_ENABLED = frozenset({"write.stock.consume"})
 # receipt disabled, the admin lane converted only its user write, so
 # ``write.admin.master`` stays fenced the same way, the finance lane converted
 # only its invoice, so ``write.payment.receive`` remains fenced, and the stock
-# lane converted only its adjustment, so receive and transfer stay fenced and
+# lane converted its adjustment and transfer, so only receive stays fenced and
 # ``read_only`` while the ledger is unresolved. None of them is ever counted as
 # converted here.
 FENCED_WRITES = frozenset(
     {
         "write.purchase_order.submit",
         "write.stock.receive",
-        "write.stock.transfer",
         "write.payment.receive",
         "write.admin.master",
     }
@@ -102,6 +102,12 @@ FENCED_WRITES = frozenset(
 # reconciliation permission and must stay ``read_only``.
 ADJUST_CAPABILITY = "write.stock.adjust"
 ADJUST_ROLE_SET = ("PHA", "ADM")
+
+# The stock lane also converted its transfer for PHA only, decided from the
+# caller's own native ``Stock Entry`` create and submit authority plus the stock
+# flag. receive stays fenced.
+TRANSFER_CAPABILITY = "write.stock.transfer"
+TRANSFER_ROLE_SET = ("PHA",)
 
 # The purchase lane converted only its draft, and the bootstrap decides it from
 # the caller's own native Purchase Order create authority plus the purchase
@@ -224,21 +230,29 @@ def pha_credential_problem(credentials):
     return None
 
 
-def expected_converted(gates, role, adjust_authority=None, purchase_authority=None):
+def expected_converted(
+    gates,
+    role,
+    adjust_authority=None,
+    purchase_authority=None,
+    transfer_authority=None,
+):
     """Return the converted writes that must be enabled for ``role``.
 
-    ``adjust_authority`` and ``purchase_authority`` are the probed native rights
-    of that identity: ``write.stock.adjust`` needs ``Stock Reconciliation``
-    create and submit, ``write.purchase_order.draft`` needs ``Purchase Order``
-    create. Each is expected only for a role the lane admits, with its family
-    flag open and that authority actually present. The strict role tuples alone
-    never enable either here.
+    ``adjust_authority``, ``purchase_authority`` and ``transfer_authority`` are
+    the probed native rights of that identity: ``write.stock.adjust`` needs
+    ``Stock Reconciliation`` create and submit, ``write.purchase_order.draft``
+    needs ``Purchase Order`` create, ``write.stock.transfer`` needs ``Stock
+    Entry`` create and submit. Each is expected only for a role the lane admits,
+    with its family flag open and that authority actually present. The strict
+    role tuples alone never enable any of them here.
     """
 
     strict_expected = strict.expected_enabled_writes(gates, role)
     strict_expected = strict_expected - {
         ADJUST_CAPABILITY,
         PURCHASE_DRAFT_CAPABILITY,
+        TRANSFER_CAPABILITY,
     }
     expected = set(CONVERTED) & strict_expected
     if (
@@ -253,10 +267,23 @@ def expected_converted(gates, role, adjust_authority=None, purchase_authority=No
         and purchase_authority is True
     ):
         expected.add(PURCHASE_DRAFT_CAPABILITY)
+    if (
+        role in TRANSFER_ROLE_SET
+        and gate_open(gates.get("stock"))
+        and transfer_authority is True
+    ):
+        expected.add(TRANSFER_CAPABILITY)
     return expected - NEVER_ENABLED - FENCED_WRITES
 
 
-def lane_problems(capabilities, gates, role="DOC", adjust_authority=None, purchase_authority=None):
+def lane_problems(
+    capabilities,
+    gates,
+    role="DOC",
+    adjust_authority=None,
+    purchase_authority=None,
+    transfer_authority=None,
+):
     """Return problems when the converted lanes or the deferral disagree.
 
     The patient and appointment lanes are open here and must stay enabled for
@@ -280,7 +307,9 @@ def lane_problems(capabilities, gates, role="DOC", adjust_authority=None, purcha
     for the roles the lane admits, with the stock flag open and the probed
     native reconciliation authority present: neither the role map nor the flag
     alone enables it, and a role without that authority (the contract ADM
-    identity on this site) must stay ``read_only``.
+    identity on this site) must stay ``read_only``. ``write.stock.transfer``
+    converted for PHA only, on the same flag and its own probed ``Stock Entry``
+    create and submit authority.
     Submit, the receipt, payment receive and ``write.admin.master`` are
     fence-gated and are not asserted here; the deferred clinical lanes are never
     asserted ready.
@@ -292,7 +321,9 @@ def lane_problems(capabilities, gates, role="DOC", adjust_authority=None, purcha
     absent = sorted(set(CONVERTED) - set(capabilities))
     if absent:
         problems.append(f"converted capabilities missing: {absent}")
-    expected = expected_converted(gates, role, adjust_authority, purchase_authority)
+    expected = expected_converted(
+        gates, role, adjust_authority, purchase_authority, transfer_authority
+    )
     admitted = {
 
         name
@@ -375,10 +406,19 @@ def contract_admin_problems(capabilities, unresolved):
     return problems
 
 
-def lane_report(capabilities, gates, role="DOC", adjust_authority=None, purchase_authority=None):
+def lane_report(
+    capabilities,
+    gates,
+    role="DOC",
+    adjust_authority=None,
+    purchase_authority=None,
+    transfer_authority=None,
+):
     """Return each converted lane's expected and observed capability states."""
 
-    expected = expected_converted(gates, role, adjust_authority, purchase_authority)
+    expected = expected_converted(
+        gates, role, adjust_authority, purchase_authority, transfer_authority
+    )
     return {
         family: {
             name: {"expected": name in expected, "observed": capabilities.get(name)}
@@ -407,6 +447,7 @@ def native_authority_probe_script(emails):
         f"emails = {sorted(set(emails))!r}\n"
         "wanted = {\n"
         "    'stock_reconciliation': ('Stock Reconciliation', ('create', 'submit')),\n"
+        "    'stock_entry': ('Stock Entry', ('create', 'submit')),\n"
         "    'purchase_order': ('Purchase Order', ('create',)),\n"
         "}\n"
         "out = {}\n"
@@ -463,6 +504,19 @@ def purchase_draft_authority(observed, email):
     """
 
     return native_right(observed, email, "purchase_order", "create")
+
+
+def stock_transfer_authority(observed, email):
+    """Return one identity's probed ``Stock Entry`` create+submit, or ``None``.
+
+    ``None`` means the probe did not report both rights, which is never a pass.
+    """
+
+    create = native_right(observed, email, "stock_entry", "create")
+    submit = native_right(observed, email, "stock_entry", "submit")
+    if create is None or submit is None:
+        return None
+    return create and submit
 
 
 def purchase_draft_problems(capabilities, gates, role, authority):
@@ -523,6 +577,36 @@ def adjust_lane_problems(capabilities, gates, role, authority):
     if observed != expected:
         return [
             f"{ADJUST_CAPABILITY} is {observed!r} for {role}, expected "
+            f"{expected!r} (native authority {authority!r}, stock gate "
+            f"{gates.get('stock')!r})"
+        ]
+    return []
+
+
+def transfer_lane_problems(capabilities, gates, role, authority):
+    """Return problems for the converted stock transfer of one identity.
+
+    ``authority`` is that identity's probed native ``Stock Entry`` create and
+    submit authority. The lane is expected enabled for PHA only, with the stock
+    flag open and the authority present; every other combination must read
+    ``read_only``. An unreadable probe is a problem, never a pass.
+    """
+
+    if not isinstance(capabilities, dict):
+        return ["capabilities are not a map"]
+    if authority is None:
+        return ["native Stock Entry authority unreadable"]
+    expected = (
+        "enabled"
+        if role in TRANSFER_ROLE_SET
+        and gate_open(gates.get("stock"))
+        and authority is True
+        else "read_only"
+    )
+    observed = capabilities.get(TRANSFER_CAPABILITY)
+    if observed != expected:
+        return [
+            f"{TRANSFER_CAPABILITY} is {observed!r} for {role}, expected "
             f"{expected!r} (native authority {authority!r}, stock gate "
             f"{gates.get('stock')!r})"
         ]
@@ -1003,6 +1087,7 @@ def main(argv=None):
 
     if adm_capabilities is not None:
         adm_authority = stock_adjust_authority(native_rights, adm["email"])
+        adm_transfer_authority = stock_transfer_authority(native_rights, adm["email"])
         problems = lane_problems(
             adm_capabilities, gates, role="ADM", adjust_authority=adm_authority
         )
@@ -1013,6 +1098,8 @@ def main(argv=None):
             {
                 "role": "ADM",
                 "identity": "adm_bootstrap",
+                "stock_transfer": adm_capabilities.get(TRANSFER_CAPABILITY),
+                "native_transfer_authority": adm_transfer_authority,
                 "lanes": lane_report(
                     adm_capabilities, gates, role="ADM", adjust_authority=adm_authority
                 ),
@@ -1045,6 +1132,7 @@ def main(argv=None):
 
     if pha_capabilities is not None:
         pha_authority = stock_adjust_authority(native_rights, pha["email"])
+        pha_transfer_authority = stock_transfer_authority(native_rights, pha["email"])
         pha_purchase_authority = purchase_draft_authority(
             native_rights, pha["email"]
         )
@@ -1054,20 +1142,27 @@ def main(argv=None):
             role="PHA",
             adjust_authority=pha_authority,
             purchase_authority=pha_purchase_authority,
+            transfer_authority=pha_transfer_authority,
         )
         problems += adjust_lane_problems(pha_capabilities, gates, "PHA", pha_authority)
+        problems += transfer_lane_problems(
+            pha_capabilities, gates, "PHA", pha_transfer_authority
+        )
         problems += purchase_draft_problems(
             pha_capabilities, gates, "PHA", pha_purchase_authority
         )
         problems += fenced_write_problems(pha_capabilities, ledger.get("unresolved"))
         record(
-            "PHA stock adjust and purchase draft lanes and fenced writes",
+            "PHA stock adjust, stock transfer and purchase draft lanes and "
+            "fenced writes",
             not problems,
             {
                 "role": "PHA",
                 "stock_adjust": pha_capabilities.get(ADJUST_CAPABILITY),
+                "stock_transfer": pha_capabilities.get(TRANSFER_CAPABILITY),
                 "purchase_draft": pha_capabilities.get(PURCHASE_DRAFT_CAPABILITY),
                 "native_stock_authority": pha_authority,
+                "native_transfer_authority": pha_transfer_authority,
                 "native_purchase_create_authority": pha_purchase_authority,
                 "native_rights": native_rights.get(pha["email"]),
                 "gates": {
@@ -1080,6 +1175,7 @@ def main(argv=None):
                     role="PHA",
                     adjust_authority=pha_authority,
                     purchase_authority=pha_purchase_authority,
+                    transfer_authority=pha_transfer_authority,
                 ),
                 "fenced": {
                     name: pha_capabilities.get(name)
@@ -1096,6 +1192,9 @@ def main(argv=None):
         contract_adm_purchase_authority = purchase_draft_authority(
             native_rights, contract_adm["email"]
         )
+        contract_adm_transfer_authority = stock_transfer_authority(
+            native_rights, contract_adm["email"]
+        )
         problems = contract_admin_problems(
             contract_adm_capabilities, ledger.get("unresolved")
         )
@@ -1105,13 +1204,17 @@ def main(argv=None):
         draft_problems = purchase_draft_problems(
             contract_adm_capabilities, gates, "ADM", contract_adm_purchase_authority
         )
+        transfer_problems = transfer_lane_problems(
+            contract_adm_capabilities, gates, "ADM", contract_adm_transfer_authority
+        )
         record(
             "contract ADM identity does not advertise the admin writes and its "
-            "stock adjust and purchase draft track its authority",
+            "stock adjust, stock transfer and purchase draft track its authority",
             contract_adm_roles == ["ADM"]
             and not problems
             and not adjust_problems
-            and not draft_problems,
+            and not draft_problems
+            and not transfer_problems,
             {
                 "role": contract_adm_roles,
                 "admin_user": contract_adm_capabilities.get("write.admin.user"),
@@ -1120,10 +1223,14 @@ def main(argv=None):
                 "purchase_draft": contract_adm_capabilities.get(
                     PURCHASE_DRAFT_CAPABILITY
                 ),
+                "stock_transfer": contract_adm_capabilities.get(TRANSFER_CAPABILITY),
                 "native_authority": contract_adm_authority,
                 "native_purchase_create_authority": contract_adm_purchase_authority,
+                "native_transfer_authority": contract_adm_transfer_authority,
                 "native_rights": native_rights.get(contract_adm["email"]),
-                "problems": problems + adjust_problems + draft_problems,
+                "problems": (
+                    problems + adjust_problems + draft_problems + transfer_problems
+                ),
             },
         )
 

@@ -7,8 +7,10 @@ Design rulings encoded here (they are not re-decided):
   the receipt submit are ONE receive operation (one fence claim, budget
   ``stock_receive`` 1). A purchase-order reference is optional and, when given,
   the receipt may not exceed its pending quantity,
-* transfer submits a ``Stock Entry`` of type ``Material Transfer`` with per-row
-  ``s_warehouse``/``t_warehouse`` and the batch on batch-managed items,
+* transfer is CONVERTED: the body carries the native ``Stock Entry`` fields of a
+  ``Material Transfer`` and the installed controller decides permissions,
+  warehouses, the batch, available stock, the quantity, posting and the submit
+  lifecycle. Only the document identity fields are shaped here,
 * adjust is a RESTRICTED ``Stock Reconciliation`` (ADM only) with a required
   reason; the reason and the approver identity live in the fence receipt, not
   in a DocType field,
@@ -16,14 +18,16 @@ Design rulings encoded here (they are not re-decided):
   movement goes through the installed submittable document,
 * the closed-world re-read EXPECTS a count-based side-effect list: one Stock
   Ledger Entry per posted row, the Bin movement at each named warehouse and the
-  reviewed GL row count (0 or two per entry),
-* every designed refusal is a pre-fence decision. Insufficient stock and
-  insufficient batch stock use the installed validation's own titles
-  (``Insufficient Stock`` / ``Insufficient Stock for Batch``) with the named
-  line; negative stock policy (D-09) and FEFO (D-10) stay open and unwired.
+  reviewed GL row count (0 or two per entry). The converted lanes have no
+  re-read: the native identifier and docstatus are the result,
+* every designed receive refusal is a pre-fence decision. Insufficient batch
+  stock uses the installed validation's own title (``Insufficient Stock for
+  Batch``) with the named line; negative stock policy (D-09) and FEFO (D-10)
+  stay open and unwired. The converted transfer and adjustment lanes have no
+  pre-fence refusal beyond the body shape.
 
 Installed field names are resolved from the site's own metadata; a missing
-DocType or field refuses the write pre-fence (design ruling 8).
+DocType or field refuses the fenced receive write pre-fence (design ruling 8).
 """
 
 from __future__ import annotations
@@ -149,7 +153,6 @@ SCHEDULER_STOCK_TOKENS = (
     "stock_reconciliation",
 )
 
-INSUFFICIENT_STOCK_MESSAGE = "Insufficient Stock"
 INSUFFICIENT_BATCH_MESSAGE = "Insufficient Stock for Batch"
 OVERRECEIPT_MESSAGE = (
     "Over-receipt: quantity exceeds the purchase order pending quantity"
@@ -280,6 +283,7 @@ RECEIVE_KEYS = frozenset(
 TRANSFER_KEYS = frozenset(
     {
         "operation_key",
+        "company",
         "item_code",
         "qty",
         "source_warehouse",
@@ -536,9 +540,19 @@ def validate_receive(body):
 
 
 def validate_transfer(body):
+    """Shape of the native Material Transfer body.
+
+    Only the document identity fields are required: ``company``, ``item_code``,
+    ``qty``, ``source_warehouse`` and ``target_warehouse``. ``batch_id`` may be
+    absent, null or empty so a non-batch item needs nothing, and the historical
+    ``operation_key`` is accepted but no longer required — the converted lane has
+    no fence key to bind. Quantities, stock availability, the source/target
+    distinction and batch validity are the installed controller's decisions.
+    """
+
     body = _require_body(body, TRANSFER_KEYS)
     for required in (
-        "operation_key",
+        "company",
         "item_code",
         "qty",
         "source_warehouse",
@@ -546,9 +560,15 @@ def validate_transfer(body):
     ):
         if required not in body:
             raise StockContractError(f"missing field {required}")
+    operation_key = body.get("operation_key")
     return {
         "kind": TRANSFER_KIND,
-        "operation_key": require_operation_key(body["operation_key"]),
+        "operation_key": (
+            None
+            if operation_key is None
+            else require_operation_key(operation_key)
+        ),
+        "company": _require_text(body["company"], "company"),
         "item_code": _require_text(body["item_code"], "item_code"),
         "qty": _require_qty(body["qty"], positive=True),
         "source_warehouse": _require_text(
@@ -557,7 +577,7 @@ def validate_transfer(body):
         "target_warehouse": _require_text(
             body["target_warehouse"], "target_warehouse"
         ),
-        "batch_id": _optional_text(body.get("batch_id"), "batch_id"),
+        "batch_id": _optional_native_text(body.get("batch_id"), "batch_id"),
     }
 
 
@@ -747,47 +767,6 @@ def receive_problems(detail, payload):
     return tuple(problems)
 
 
-def transfer_problems(detail, payload):
-    """Every pre-fence transfer decision, in operator order."""
-
-    if not isinstance(detail, dict):
-        return ((HTTP_REFUSED, "detail", "target state is unreadable"),)
-    problems = list(_item_problems(detail, payload))
-    if problems:
-        return tuple(problems)
-    source_problem = _warehouse_problem(
-        detail, "warehouse", payload["source_warehouse"]
-    )
-    if source_problem:
-        problems.append(source_problem)
-    target_problem = _warehouse_problem(
-        detail, "target_warehouse", payload["target_warehouse"]
-    )
-    if target_problem:
-        problems.append(target_problem)
-    if payload["source_warehouse"] == payload["target_warehouse"]:
-        problems.append(
-            (
-                HTTP_REFUSED,
-                "target_warehouse",
-                "target warehouse must differ from the source warehouse",
-            )
-        )
-    problems.extend(
-        _batch_problems(detail, payload, allow_create=False, require_stock=True)
-    )
-    if not _at_least(detail.get("available_qty"), payload["qty"]):
-        problems.append(
-            (
-                HTTP_REFUSED,
-                "qty",
-                f"{INSUFFICIENT_STOCK_MESSAGE}: {payload['item_code']} at "
-                f"{payload['source_warehouse']}",
-            )
-        )
-    return tuple(problems)
-
-
 # -- EXPECTED side effects -------------------------------------------------
 
 
@@ -800,21 +779,6 @@ def expected_receive(detail, payload):
         "bin_mode": "delta",
         "bins": {payload["warehouse"]: float(payload["qty"])},
         "gl_rows_max": GL_ROWS_PER_ENTRY,
-    }
-
-
-def expected_transfer(detail, payload):
-    return {
-        "doctype": STOCK_ENTRY_DOCTYPE,
-        "kind": TRANSFER_KIND,
-        "item_code": payload["item_code"],
-        "sle_rows": 2,
-        "bin_mode": "delta",
-        "bins": {
-            payload["source_warehouse"]: -float(payload["qty"]),
-            payload["target_warehouse"]: float(payload["qty"]),
-        },
-        "gl_rows_max": GL_ROWS_PER_ENTRY * 2,
     }
 
 

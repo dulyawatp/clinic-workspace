@@ -71,7 +71,7 @@ def receive_payload(**overrides):
 
 def transfer_payload(**overrides):
     values = {
-        "operation_key": KEY,
+        "company": "SIT Synthetic Company USD",
         "item_code": "ITEM-1",
         "qty": 4.0,
         "source_warehouse": "WH-1",
@@ -279,20 +279,70 @@ class ValidationTests(unittest.TestCase):
                 with self.assertRaises(stock_contract.StockContractError):
                     stock_contract.validate_receive(case)
 
-    def test_transfer_requires_a_distinct_named_target(self):
+    def test_transfer_carries_the_native_material_transfer_fields(self):
+        payload = stock_contract.validate_transfer(transfer_payload())
+
         self.assertEqual(
-            stock_contract.validate_transfer(transfer_payload())[
-                "target_warehouse"
-            ],
-            "WH-2",
+            payload,
+            {
+                "kind": "stock_transfer",
+                "operation_key": None,
+                "company": "SIT Synthetic Company USD",
+                "item_code": "ITEM-1",
+                "qty": 4.0,
+                "source_warehouse": "WH-1",
+                "target_warehouse": "WH-2",
+                "batch_id": "BATCH-1",
+            },
         )
-        for case in (
-            {k: v for k, v in transfer_payload().items() if k != "target_warehouse"},
-            {**transfer_payload(), "target_warehouse": ""},
+
+    def test_transfer_requires_the_document_identity_fields(self):
+        for missing in (
+            "company",
+            "item_code",
+            "qty",
+            "source_warehouse",
+            "target_warehouse",
         ):
-            with self.subTest(case=case):
+            with self.subTest(missing=missing):
+                case = {
+                    key: value
+                    for key, value in transfer_payload().items()
+                    if key != missing
+                }
                 with self.assertRaises(stock_contract.StockContractError):
                     stock_contract.validate_transfer(case)
+
+    def test_transfer_leaves_the_batch_and_the_operation_key_optional(self):
+        body = transfer_payload()
+        for key in ("batch_id",):
+            body.pop(key)
+        payload = stock_contract.validate_transfer(body)
+        self.assertIsNone(payload["batch_id"])
+        self.assertIsNone(payload["operation_key"])
+
+        blank = stock_contract.validate_transfer(transfer_payload(batch_id=""))
+        self.assertIsNone(blank["batch_id"])
+
+        with_key = stock_contract.validate_transfer(
+            transfer_payload(operation_key=KEY)
+        )
+        self.assertEqual(with_key["operation_key"], KEY)
+
+    def test_transfer_rejects_unknown_and_malformed_input(self):
+        for drift in (
+            {"reason": "Restock the front shelf"},
+            {"operation_key": "short"},
+            {"target_warehouse": ""},
+            {"source_warehouse": " "},
+            {"company": ""},
+            {"qty": 0},
+            {"qty": -1},
+            {"qty": "4"},
+        ):
+            with self.subTest(drift=drift):
+                with self.assertRaises(stock_contract.StockContractError):
+                    stock_contract.validate_transfer(transfer_payload(**drift))
 
     def test_adjust_requires_only_the_document_identity_fields(self):
         payload = stock_contract.validate_adjust(adjust_payload(qty=0))
@@ -442,49 +492,6 @@ class ReceiveProblemTests(unittest.TestCase):
         )
 
 
-class TransferProblemTests(unittest.TestCase):
-    def test_a_valid_transfer_has_no_problem(self):
-        self.assertEqual(
-            stock_contract.transfer_problems(detail(), transfer_payload()), ()
-        )
-
-    def test_insufficient_stock_names_the_line(self):
-        problems = stock_contract.transfer_problems(
-            detail(available_qty=1.0), transfer_payload()
-        )
-        self.assertIn(stock_contract.INSUFFICIENT_STOCK_MESSAGE, texts(problems))
-        self.assertIn("ITEM-1", texts(problems))
-        self.assertIn("WH-1", texts(problems))
-
-    def test_insufficient_batch_stock_uses_the_batch_message(self):
-        problems = stock_contract.transfer_problems(
-            detail(batch={**detail()["batch"], "batch_qty": 1.0}),
-            transfer_payload(),
-        )
-        self.assertIn(
-            stock_contract.INSUFFICIENT_BATCH_MESSAGE, texts(problems)
-        )
-        self.assertIn("BATCH-1", texts(problems))
-
-    def test_a_missing_or_equal_target_is_refused(self):
-        missing = stock_contract.transfer_problems(
-            detail(target_warehouse={"exists": False}), transfer_payload()
-        )
-        self.assertIn("WH-2", texts(missing))
-
-        same = stock_contract.transfer_problems(
-            detail(), transfer_payload(target_warehouse="WH-1")
-        )
-        self.assertIn("differ", texts(same))
-
-    def test_an_expired_batch_never_transfers(self):
-        problems = stock_contract.transfer_problems(
-            detail(batch={**detail()["batch"], "expiry_date": "2026-01-01"}),
-            transfer_payload(),
-        )
-        self.assertIn("expired", texts(problems))
-
-
 class ExpectedSideEffectTests(unittest.TestCase):
     def test_receive_expects_one_entry_and_a_positive_bin_delta(self):
         expected = stock_contract.expected_receive(detail(), receive_payload())
@@ -492,13 +499,6 @@ class ExpectedSideEffectTests(unittest.TestCase):
         self.assertEqual(expected["bin_mode"], "delta")
         self.assertEqual(expected["bins"], {"WH-1": 4.0})
         self.assertEqual(expected["gl_rows_max"], 2)
-
-    def test_transfer_expects_two_entries_and_mirrored_bin_deltas(self):
-        expected = stock_contract.expected_transfer(detail(), transfer_payload())
-        self.assertEqual(expected["sle_rows"], 2)
-        self.assertEqual(expected["bin_mode"], "delta")
-        self.assertEqual(expected["bins"], {"WH-1": -4.0, "WH-2": 4.0})
-        self.assertEqual(expected["gl_rows_max"], 4)
 
     def facts(self, **overrides):
         values = {
@@ -541,21 +541,6 @@ class ExpectedSideEffectTests(unittest.TestCase):
                     )
                 )
 
-    def test_transfer_checks_both_sides(self):
-        expected = stock_contract.expected_transfer(detail(), transfer_payload())
-        facts = self.facts(
-            doctype="Stock Entry",
-            sle_rows=2,
-            gl_rows=0,
-            bins={"WH-1": -4.0, "WH-2": 4.0},
-        )
-        self.assertIsNone(stock_contract.side_effect_problem(facts, expected))
-        self.assertIsNotNone(
-            stock_contract.side_effect_problem(
-                {**facts, "bins": {"WH-1": -4.0, "WH-2": 1.0}}, expected
-            )
-        )
-
 
 class PreparedBodyTests(unittest.TestCase):
     def prepared_receive(self, **overrides):
@@ -577,31 +562,10 @@ class PreparedBodyTests(unittest.TestCase):
         values.update(overrides)
         return values
 
-    def prepared_transfer(self, **overrides):
-        values = {
-            "item_code": "ITEM-1",
-            "qty": 4.0,
-            "uom": "Unit",
-            "source_warehouse": "WH-1",
-            "target_warehouse": "WH-2",
-            "batch_no": "BATCH-1",
-            "create_batch": False,
-            "posting_date": "2026-11-16",
-            "set_posting_time": True,
-            "company": "SIT Synthetic Company USD",
-        }
-        values.update(overrides)
-        return values
-
-    def test_each_prepared_body_pins_the_server_company_and_posting(self):
-        for kind, prepared in (
-            ("stock_receive", self.prepared_receive()),
-            ("stock_transfer", self.prepared_transfer()),
-        ):
-            with self.subTest(kind=kind):
-                self.assertIsNone(
-                    stock_contract.prepared_problem(kind, prepared)
-                )
+    def test_the_prepared_receive_body_pins_the_server_company_and_posting(self):
+        self.assertIsNone(
+            stock_contract.prepared_problem("stock_receive", self.prepared_receive())
+        )
 
     def test_a_missing_company_or_unpinned_posting_is_a_problem(self):
         for drift in (
@@ -618,13 +582,7 @@ class PreparedBodyTests(unittest.TestCase):
                     )
                 )
 
-    def test_each_kind_checks_its_own_route(self):
-        self.assertIsNotNone(
-            stock_contract.prepared_problem(
-                "stock_transfer",
-                self.prepared_transfer(target_warehouse="WH-1"),
-            )
-        )
+    def test_the_prepared_body_checks_its_own_route(self):
         self.assertIsNotNone(
             stock_contract.prepared_problem(
                 "stock_receive", self.prepared_receive(supplier="")
@@ -634,15 +592,12 @@ class PreparedBodyTests(unittest.TestCase):
             stock_contract.prepared_problem("stock_receive", None)
         )
 
-    def test_receive_and_transfer_do_not_accept_zero(self):
-        for kind, prepared in (
-            ("stock_receive", self.prepared_receive(qty=0.0)),
-            ("stock_transfer", self.prepared_transfer(qty=0.0)),
-        ):
-            with self.subTest(kind=kind):
-                self.assertIsNotNone(
-                    stock_contract.prepared_problem(kind, prepared)
-                )
+    def test_the_prepared_body_does_not_accept_zero(self):
+        self.assertIsNotNone(
+            stock_contract.prepared_problem(
+                "stock_receive", self.prepared_receive(qty=0.0)
+            )
+        )
 
 
 class ReceiptTests(unittest.TestCase):

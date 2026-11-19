@@ -198,14 +198,14 @@ def _stock_write_flags(gateway, settings, role):
 
     Independent of every other write flag: exact approved site and boundary for
     all three, the stock flag, and the caller's own native authority on the
-    document it would submit. Receive and transfer stay on the historical fence,
-    so they still need the shared installed-field preflight, the deployment
-    marker and a ready fence store. The converted adjustment lane uses the same
-    boundary check as its endpoint but not that legacy preflight (its endpoint
-    deliberately relies on the controller instead), so only native create and
-    submit authority decide whether it is advertised. Masters, quantities,
-    purpose and every other native document field are decided per request;
-    these flags only advertise that the surface exists.
+    document it would submit. Receive stays on the historical fence, so it still
+    needs the shared installed-field preflight, the deployment marker and a
+    ready fence store. The converted adjustment and transfer lanes use the same
+    boundary check as their endpoints but not that legacy preflight (their
+    endpoints deliberately rely on the controller instead), so only native
+    create and submit authority decide whether they are advertised. Masters,
+    quantities, warehouses, batch and every other native document field are
+    decided per request; these flags only advertise that the surface exists.
     """
 
     disabled = (False, False, False)
@@ -226,9 +226,9 @@ def _stock_write_flags(gateway, settings, role):
             and gateway.native_stock_can_create("Purchase Receipt") is True
         )
         transfer_ok = (
-            legacy_ready
-            and role in STOCK_ROLE_CODES
+            role in STOCK_ROLE_CODES
             and gateway.native_stock_can_create("Stock Entry") is True
+            and gateway.native_stock_can_submit("Stock Entry") is True
         )
         adjust_ok = (
             role in (STOCK_ROLE_CODES | ADJUST_ROLE_CODES)

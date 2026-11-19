@@ -447,7 +447,6 @@ class FakeGateway:
         self.stock_install_problem = None
         self.stock_create_authority = {}
         self.stock_receive_detail = None
-        self.stock_transfer_detail = None
         self.stock_detail_calls = []
         self.stock_detail_sequence = []
         self.stock_baseline_value = {
@@ -458,6 +457,7 @@ class FakeGateway:
         self.stock_baseline_calls = []
         self.stock_receipt_id = "PR-1"
         self.stock_transfer_id = "SE-1"
+        self.stock_transfer_result = None
         self.stock_reconciliation_id = "SR-1"
         self.stock_receipt_calls = []
         self.stock_transfer_calls = []
@@ -1689,9 +1689,6 @@ class FakeGateway:
     def native_stock_receive_detail(self, payload):
         return self._stock_detail(self.stock_receive_detail, payload)
 
-    def native_stock_transfer_detail(self, payload):
-        return self._stock_detail(self.stock_transfer_detail, payload)
-
     def native_stock_baseline(self, kind, warehouses, item_code):
         self.stock_baseline_calls.append((kind, tuple(warehouses), item_code))
         return dict(self.stock_baseline_value)
@@ -1753,6 +1750,16 @@ class FakeGateway:
             raise self.stock_mutation_error
         self.stock_reconciliation_calls.append(dict(prepared))
         return {"name": self.stock_reconciliation_id, "docstatus": 1}
+
+    def create_and_submit_native_stock_transfer(self, prepared):
+        """Converted transfer lane: record and return the native identifier."""
+
+        if self.stock_mutation_error is not None:
+            raise self.stock_mutation_error
+        self.stock_transfer_calls.append(dict(prepared))
+        if self.stock_transfer_result is not None:
+            return dict(self.stock_transfer_result)
+        return {"name": self.stock_transfer_id, "docstatus": 1}
 
     def _stock_side_effect_facts(
         self, reference, expected, baseline, doctype

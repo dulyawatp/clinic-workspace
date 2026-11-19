@@ -261,46 +261,37 @@ export function TransferStockForm() {
   const { get } = useCapabilities();
   const id = useId();
   const [item, setItem] = useState("");
+  const [company, setCompany] = useState("");
   const [qty, setQty] = useState("");
   const [source, setSource] = useState("");
   const [target, setTarget] = useState("");
   const [batch, setBatch] = useState("");
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
+  const [stockEntryId, setStockEntryId] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   if (get("write.stock.transfer") !== "enabled") return null;
 
   async function submit() {
     if (saving) return;
-    const amount = Number(qty);
-    if (
-      !item.trim() ||
-      !source.trim() ||
-      !target.trim() ||
-      source.trim() === target.trim() ||
-      !Number.isFinite(amount) ||
-      amount <= 0
-    ) {
-      setError(t("stockWrite.invalid"));
-      return;
-    }
     setError(null);
     setDone(false);
     setSaving(true);
     try {
-      await transferNativeStock({
-        operation_key: newOperationKey(),
+      const result = await transferNativeStock({
+        company: company.trim(),
         item_code: item.trim(),
-        qty: amount,
+        qty: qty === "" ? null : Number(qty),
         source_warehouse: source.trim(),
         target_warehouse: target.trim(),
         batch_id: batch.trim() || undefined,
       });
+      setStockEntryId(result.stock_entry.stock_entry_id);
       setDone(true);
       setQty("");
     } catch (failure) {
-      setError(t(failureKey(failure)));
+      setError(t(failure instanceof StockAdjustOutcomeUnknownError ? "stockWrite.transferUncertain" : failureKey(failure)));
     } finally {
       setSaving(false);
     }
@@ -314,9 +305,11 @@ export function TransferStockForm() {
       doneKey="stockWrite.transferDone"
       onSubmit={submit}
       done={done}
+      doneText={t("stockWrite.transferDoneId", { id: stockEntryId })}
       error={error}
       saving={saving}
     >
+      <Field id={`${id}-company`} label={t("stockWrite.company")} value={company} required onChange={setCompany} />
       <Field
         id={`${id}-item`}
         label={t("stockWrite.item")}

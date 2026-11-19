@@ -40,6 +40,7 @@ CONVERTED = {
     "write.purchase_order.draft",
     "write.invoice.submit",
     "write.stock.adjust",
+    "write.stock.transfer",
     "write.admin.user",
 }
 
@@ -55,15 +56,14 @@ PURCHASE = {"write.purchase_order.draft"}
 FENCED = {
     "write.purchase_order.submit",
     "write.stock.receive",
-    "write.stock.transfer",
     "write.payment.receive",
     "write.admin.master",
 }
 
-# The stock lane converted only its adjustment. Receive and transfer stay
-# fenced, and consumption is never consuming-ready here.
-STOCK = {"write.stock.adjust"}
-STOCK_FENCED = {"write.stock.receive", "write.stock.transfer"}
+# The stock lane converted its adjustment and its transfer for PHA. Receive
+# stays fenced, and consumption is never consuming-ready here.
+STOCK = {"write.stock.adjust", "write.stock.transfer"}
+STOCK_FENCED = {"write.stock.receive"}
 
 # The finance lane converted only its invoice. Payment receive stays fenced and
 # read_only while the ledger carries unresolved keys.
@@ -89,7 +89,6 @@ CONSUMING = {"write.stock.consume"}
 # must never claim them as ready, whatever their observed state.
 UNRELATED = {
     "write.stock.receive",
-    "write.stock.transfer",
     "write.purchase_order.draft",
     "write.purchase_order.submit",
     "write.payment.receive",
@@ -103,20 +102,27 @@ def _gates(**opened):
     return gates
 
 
-def _capabilities(gates, role="DOC", adjust_authority=None, purchase_authority=None):
+def _capabilities(
+    gates,
+    role="DOC",
+    adjust_authority=None,
+    purchase_authority=None,
+    transfer_authority=None,
+):
     """Model the site bootstrap: expected writes minus the never-ready set.
 
     The fence-gated writes are modelled as disabled, which is the state an
-    unresolved ledger produces. ``write.stock.adjust`` and
-    ``write.purchase_order.draft`` follow the backend rule rather than the
-    strict role map: an admitted role, the family flag and the caller's own
-    probed native document authority.
+    unresolved ledger produces. ``write.stock.adjust``,
+    ``write.stock.transfer`` and ``write.purchase_order.draft`` follow the
+    backend rule rather than the strict role map: an admitted role, the family
+    flag and the caller's own probed native document authority.
     """
 
     capabilities = {name: "read_only" for name in strict.WRITE_CAPABILITY_GATES}
     expected = strict.expected_enabled_writes(gates, role) - {
         development.ADJUST_CAPABILITY,
         development.PURCHASE_DRAFT_CAPABILITY,
+        development.TRANSFER_CAPABILITY,
     }
     if (
         role in development.ADJUST_ROLE_SET
@@ -130,6 +136,12 @@ def _capabilities(gates, role="DOC", adjust_authority=None, purchase_authority=N
         and purchase_authority is True
     ):
         expected.add(development.PURCHASE_DRAFT_CAPABILITY)
+    if (
+        role in development.TRANSFER_ROLE_SET
+        and gates.get("stock") in (1, True, "1")
+        and transfer_authority is True
+    ):
+        expected.add(development.TRANSFER_CAPABILITY)
     expected = expected - development.NEVER_ENABLED - development.FENCED_WRITES
     for name in expected:
         capabilities[name] = "enabled"
@@ -897,7 +909,7 @@ class AdminLaneTests(unittest.TestCase):
 
 
 class StockLaneTests(unittest.TestCase):
-    def test_adjust_is_the_only_converted_stock_write(self):
+    def test_adjust_and_transfer_are_the_converted_stock_writes(self):
         stock = {
             name
             for name, (family, _roles) in strict.WRITE_CAPABILITY_GATES.items()
@@ -906,6 +918,11 @@ class StockLaneTests(unittest.TestCase):
 
         self.assertEqual(stock & set(development.CONVERTED), STOCK)
         self.assertEqual(stock - set(development.CONVERTED), STOCK_FENCED)
+        self.assertEqual(development.TRANSFER_CAPABILITY, "write.stock.transfer")
+        self.assertEqual(tuple(development.TRANSFER_ROLE_SET), ("PHA",))
+        # receive stays on the historical fence; transfer no longer does.
+        self.assertIn("write.stock.receive", development.FENCED_WRITES)
+        self.assertNotIn("write.stock.transfer", development.FENCED_WRITES)
         self.assertTrue(STOCK_FENCED <= set(development.FENCED_WRITES))
         self.assertEqual(development.ADJUST_CAPABILITY, "write.stock.adjust")
         self.assertEqual(tuple(development.ADJUST_ROLE_SET), ("PHA", "ADM"))
@@ -1048,10 +1065,13 @@ class StockLaneTests(unittest.TestCase):
     def test_stock_lane_report_covers_the_stock_family(self):
         gates = _gates(stock=1)
         report = development.lane_report(
-            _capabilities(gates, role="PHA", adjust_authority=True),
+            _capabilities(
+                gates, role="PHA", adjust_authority=True, transfer_authority=True
+            ),
             gates,
             role="PHA",
             adjust_authority=True,
+            transfer_authority=True,
         )
 
         self.assertIn("stock", report)
@@ -1059,10 +1079,118 @@ class StockLaneTests(unittest.TestCase):
             report["stock"]["write.stock.adjust"],
             {"expected": True, "observed": "enabled"},
         )
+        self.assertEqual(
+            report["stock"]["write.stock.transfer"],
+            {"expected": True, "observed": "enabled"},
+        )
         for name in sorted(STOCK_FENCED):
             self.assertEqual(
                 report["stock"][name], {"expected": False, "observed": "read_only"}
             )
+
+
+    def test_expected_transfer_requires_the_native_stock_entry_authority(self):
+        gates = _gates(stock=1)
+
+        self.assertIn(
+            "write.stock.transfer",
+            development.expected_converted(gates, "PHA", transfer_authority=True),
+        )
+        self.assertNotIn(
+            "write.stock.transfer",
+            development.expected_converted(gates, "PHA", transfer_authority=False),
+        )
+        self.assertNotIn(
+            "write.stock.transfer",
+            development.expected_converted(gates, "PHA", transfer_authority=None),
+        )
+
+    def test_expected_transfer_requires_the_open_stock_gate(self):
+        gates = _gates(patient=1, appointment=1)
+
+        self.assertNotIn(
+            "write.stock.transfer",
+            development.expected_converted(gates, "PHA", transfer_authority=True),
+        )
+
+    def test_expected_transfer_is_pha_only(self):
+        gates = _gates(stock=1)
+
+        self.assertNotIn(
+            "write.stock.transfer",
+            development.expected_converted(gates, "ADM", transfer_authority=True),
+        )
+        self.assertNotIn(
+            "write.stock.transfer",
+            development.expected_converted(gates, "MGR", transfer_authority=True),
+        )
+
+    def test_pha_transfer_enabled_with_authority_and_gate_is_accepted(self):
+        gates = _gates(stock=1)
+        capabilities = _capabilities(gates, role="PHA", transfer_authority=True)
+
+        self.assertEqual(capabilities["write.stock.transfer"], "enabled")
+        self.assertEqual(
+            development.transfer_lane_problems(capabilities, gates, "PHA", True), []
+        )
+        self.assertEqual(
+            development.lane_problems(
+                capabilities, gates, role="PHA", transfer_authority=True
+            ),
+            [],
+        )
+
+    def test_pha_transfer_enabled_without_authority_is_reported(self):
+        gates = _gates(stock=1)
+        capabilities = dict(
+            _capabilities(gates, role="PHA", transfer_authority=False),
+            **{"write.stock.transfer": "enabled"},
+        )
+
+        problems = development.transfer_lane_problems(capabilities, gates, "PHA", False)
+        self.assertTrue(any("write.stock.transfer" in p for p in problems), problems)
+        self.assertTrue(
+            any(
+                "enabled while closed" in p and "write.stock.transfer" in p
+                for p in development.lane_problems(
+                    capabilities, gates, role="PHA", transfer_authority=False
+                )
+            )
+        )
+
+    def test_pha_transfer_read_only_with_authority_and_gate_open_is_reported(self):
+        gates = _gates(stock=1)
+        capabilities = _capabilities(gates, role="PHA", transfer_authority=True)
+        capabilities["write.stock.transfer"] = "read_only"
+
+        problems = development.transfer_lane_problems(capabilities, gates, "PHA", True)
+        self.assertTrue(any("expected 'enabled'" in p for p in problems), problems)
+
+    def test_unreadable_transfer_authority_is_a_problem_not_a_pass(self):
+        gates = _gates(stock=1)
+        capabilities = _capabilities(gates, role="PHA")
+
+        self.assertEqual(
+            development.transfer_lane_problems(capabilities, gates, "PHA", None),
+            ["native Stock Entry authority unreadable"],
+        )
+
+    def test_adm_transfer_stays_read_only(self):
+        # Transfer converted for PHA only: ADM never expects it even with the
+        # flag open and native Stock Entry rights of its own.
+        gates = _gates(stock=1)
+        capabilities = _capabilities(gates, role="ADM", transfer_authority=True)
+        capabilities["write.stock.transfer"] = "read_only"
+
+        self.assertEqual(
+            development.transfer_lane_problems(capabilities, gates, "ADM", True), []
+        )
+        self.assertEqual(
+            development.lane_problems(
+                capabilities, gates, role="ADM", transfer_authority=True
+            ),
+            [],
+        )
 
 
 class NativeAuthorityProbeTests(unittest.TestCase):
@@ -1072,6 +1200,7 @@ class NativeAuthorityProbeTests(unittest.TestCase):
         )
 
         self.assertIn("'Stock Reconciliation'", script)
+        self.assertIn("'Stock Entry'", script)
         self.assertIn("'Purchase Order'", script)
         self.assertIn("('create', 'submit')", script)
         self.assertIn("('create',)", script)
@@ -1113,6 +1242,39 @@ class NativeAuthorityProbeTests(unittest.TestCase):
             False,
         )
 
+    def test_stock_transfer_authority_requires_both_rights(self):
+        observed = {
+            "both@example.invalid": {
+                "stock_entry": {"create": True, "submit": True}
+            },
+            "create@example.invalid": {
+                "stock_entry": {"create": True, "submit": False}
+            },
+            "submit@example.invalid": {
+                "stock_entry": {"create": False, "submit": True}
+            },
+            "none@example.invalid": {
+                "stock_entry": {"create": False, "submit": False}
+            },
+        }
+
+        self.assertIs(
+            development.stock_transfer_authority(observed, "both@example.invalid"),
+            True,
+        )
+        self.assertIs(
+            development.stock_transfer_authority(observed, "create@example.invalid"),
+            False,
+        )
+        self.assertIs(
+            development.stock_transfer_authority(observed, "submit@example.invalid"),
+            False,
+        )
+        self.assertIs(
+            development.stock_transfer_authority(observed, "none@example.invalid"),
+            False,
+        )
+
     def test_purchase_draft_authority_reads_the_create_right_only(self):
         observed = {
             "create@example.invalid": {"purchase_order": {"create": True}},
@@ -1142,6 +1304,8 @@ class NativeAuthorityProbeTests(unittest.TestCase):
             {"bad@example.invalid": {"purchase_order": {}}},
             {"bad@example.invalid": {"purchase_order": {"create": "yes"}}},
             {"bad@example.invalid": {"purchase_order": None}},
+            {"bad@example.invalid": {"stock_entry": {"create": True}}},
+            {"bad@example.invalid": {"stock_entry": {"create": 1, "submit": 1}}},
         ):
             with self.subTest(observed=observed):
                 self.assertIsNone(
@@ -1151,6 +1315,11 @@ class NativeAuthorityProbeTests(unittest.TestCase):
                 )
                 self.assertIsNone(
                     development.purchase_draft_authority(
+                        observed, "bad@example.invalid"
+                    )
+                )
+                self.assertIsNone(
+                    development.stock_transfer_authority(
                         observed, "bad@example.invalid"
                     )
                 )

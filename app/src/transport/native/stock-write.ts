@@ -74,9 +74,9 @@ export interface ReceiveStockInput {
 }
 
 export interface TransferStockInput {
-  operation_key: string;
+  company: string;
   item_code: string;
-  qty: number;
+  qty: number | null;
   source_warehouse: string;
   target_warehouse: string;
   batch_id?: string;
@@ -383,15 +383,26 @@ export async function receiveNativeStock(
 
 export async function transferNativeStock(
   input: TransferStockInput,
-): Promise<StockWriteResult> {
-  return submit("stock_transfer", {
-    operation_key: input.operation_key,
-    item_code: input.item_code,
-    qty: input.qty,
-    source_warehouse: input.source_warehouse,
-    target_warehouse: input.target_warehouse,
-    ...(input.batch_id?.trim() ? { batch_id: input.batch_id.trim() } : {}),
-  });
+): Promise<{ status: "transferred"; stock_entry: { stock_entry_id: string; docstatus: 1 } }> {
+  const token = nativeCsrfToken();
+  if (!token) throw new StockAdjustRejectedError("auth");
+  let response: Response;
+  try {
+    response = await frappeRequest(ENDPOINTS.stock_transfer, {
+      method: "POST",
+      headers: { "content-type": "application/json", [FRAPPE_CSRF_HEADER]: token },
+      body: JSON.stringify(input),
+    });
+  } catch {
+    throw new StockAdjustOutcomeUnknownError();
+  }
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw adjustRejection(response.status, body);
+  if (!isRecord(body) || !isRecord(body.message) ||
+      body.message.status !== "transferred" || !isRecord(body.message.stock_entry) ||
+      !isText(body.message.stock_entry.stock_entry_id) || body.message.stock_entry.docstatus !== 1)
+    throw new StockAdjustOutcomeUnknownError();
+  return { status: "transferred", stock_entry: { stock_entry_id: body.message.stock_entry.stock_entry_id, docstatus: 1 } };
 }
 
 function adjustRejection(status: number, body: unknown): Error {

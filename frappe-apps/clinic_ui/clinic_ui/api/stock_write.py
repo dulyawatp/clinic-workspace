@@ -1,12 +1,13 @@
-"""Designed stock receive/transfer POST methods and the converted adjust lane.
+"""Designed stock receive POST method and the converted transfer / adjust lanes.
 
-``POST /api/method/clinic_ui.api.stock_write.receive`` and ``.../transfer`` are
-the fenced stock family, with ``.../ack`` for the one-shot barrier.
-``POST .../adjust`` is the converted adjustment lane: it inserts and submits one
-``Stock Reconciliation`` through the installed controller from the native
-document fields and relies on native permissions, controller validation,
-lifecycle and transactions instead of the historical fence, budget, deployment
-marker, receipt and acknowledgement barrier.
+``POST /api/method/clinic_ui.api.stock_write.receive`` stays the fenced stock
+lane, with ``.../ack`` for its one-shot barrier. ``POST .../transfer`` and
+``.../adjust`` are the converted lanes: they insert and submit one
+``Stock Entry`` of type ``Material Transfer`` or one ``Stock Reconciliation``
+through the installed controller from the native document fields and rely on
+native permissions, controller validation, lifecycle and transactions instead
+of the historical fence, budget, deployment marker, receipt and acknowledgement
+barrier.
 
 Frappe performs the POST CSRF check before any method runs, and the endpoint
 repeats an explicit same-session token check that does not honour

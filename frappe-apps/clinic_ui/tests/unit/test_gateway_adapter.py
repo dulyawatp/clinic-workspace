@@ -6852,5 +6852,99 @@ class PurchaseDraftAndReadTests(GatewayTestCase):
                 self.assertEqual(stub.get_list_calls, [])
 
 
+class StockEntryDocument:
+    """Stand-in for the installed Stock Entry controller during one transfer."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.name = None
+        self.docstatus = 0
+        self.inserted = False
+        self.submitted = False
+
+    def insert(self):
+        self.inserted = True
+        self.name = "MAT-STE-2026-00001"
+
+    def submit(self):
+        self.submitted = True
+        self.docstatus = 1
+
+
+class StockTransferStub(types.SimpleNamespace):
+    """Fake Frappe module for the converted material transfer path."""
+
+    def __init__(self, error=None):
+        super().__init__()
+        self.error = error
+        self.created = []
+
+    def get_doc(self, document):
+        if self.error is not None:
+            raise self.error
+        entry = StockEntryDocument(document)
+        self.created.append(entry)
+        return entry
+
+
+class NativeStockTransferAdapterTests(GatewayTestCase):
+    def transfer(self, **overrides):
+        values = {
+            "company": "SITCO",
+            "item_code": "ITEM-1",
+            "qty": 4.0,
+            "source_warehouse": "WH-1",
+            "target_warehouse": "WH-2",
+            "batch_id": "BATCH-1",
+        }
+        values.update(overrides)
+        return values
+
+    def test_one_material_transfer_is_inserted_and_submitted(self):
+        stub = StockTransferStub()
+
+        created = self.gateway(
+            stub
+        ).create_and_submit_native_stock_transfer(self.transfer())
+
+        self.assertEqual(
+            created, {"name": "MAT-STE-2026-00001", "docstatus": 1}
+        )
+        (entry,) = stub.created
+        self.assertTrue(entry.inserted)
+        self.assertTrue(entry.submitted)
+        self.assertEqual(entry.payload["doctype"], "Stock Entry")
+        self.assertEqual(entry.payload["stock_entry_type"], "Material Transfer")
+        self.assertEqual(entry.payload["company"], "SITCO")
+        self.assertNotIn("docstatus", entry.payload)
+        self.assertNotIn("purpose", entry.payload)
+        (row,) = entry.payload["items"]
+        self.assertEqual(row["s_warehouse"], "WH-1")
+        self.assertEqual(row["t_warehouse"], "WH-2")
+        self.assertEqual(row["qty"], 4.0)
+        self.assertEqual(row["batch_no"], "BATCH-1")
+        self.assertEqual(row["use_serial_batch_fields"], 1)
+        self.assertNotIn("uom", row)
+
+    def test_a_non_batch_transfer_sends_no_batch_row(self):
+        stub = StockTransferStub()
+
+        self.gateway(stub).create_and_submit_native_stock_transfer(
+            self.transfer(batch_id=None)
+        )
+
+        (row,) = stub.created[0].payload["items"]
+        self.assertNotIn("batch_no", row)
+        self.assertNotIn("use_serial_batch_fields", row)
+
+    def test_a_native_refusal_propagates_unchanged(self):
+        error = TypeError("LinkValidationError: target warehouse")
+
+        with self.assertRaises(TypeError):
+            self.gateway(
+                StockTransferStub(error)
+            ).create_and_submit_native_stock_transfer(self.transfer())
+
+
 if __name__ == "__main__":
     unittest.main()

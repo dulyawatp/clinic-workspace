@@ -104,7 +104,7 @@ it("receives one line, acks once, and hides the native reference", async () => {
   expect(within(form).queryByText(/PR-/)).toBeNull();
 });
 
-it("transfers between two warehouses with one acknowledgement", async () => {
+it("transfers between two warehouses and shows the native reference", async () => {
   const user = userEvent.setup();
   const bodies: Record<string, unknown>[] = [];
   serve(ENABLED_STOCK);
@@ -114,15 +114,7 @@ it("transfers between two warehouses with one acknowledgement", async () => {
       return HttpResponse.json({
         message: {
           status: "transferred",
-          movement: {
-            kind: "stock_transfer",
-            item_code: "ITEM-1",
-            warehouse: "WH-1",
-            target_warehouse: "WH-2",
-            qty: 2,
-            batch: "BATCH-1",
-          },
-          ackToken: TOKEN,
+          stock_entry: { stock_entry_id: "STE-1", docstatus: 1 },
         },
       });
     }),
@@ -136,6 +128,7 @@ it("transfers between two warehouses with one acknowledgement", async () => {
   const form = await screen.findByRole("region", {
     name: "โอนย้ายสินค้าระหว่างคลัง",
   });
+  await user.type(within(form).getByLabelText("บริษัท"), "Clinic");
   await user.type(within(form).getByLabelText("รหัสสินค้า"), "ITEM-1");
   await user.type(within(form).getByLabelText("จำนวน"), "2");
   await user.type(within(form).getByLabelText("คลังต้นทาง"), "WH-1");
@@ -147,13 +140,14 @@ it("transfers between two warehouses with one acknowledgement", async () => {
 
   await waitFor(() => expect(bodies).toHaveLength(1));
   expect(bodies[0]).toMatchObject({
+    company: "Clinic",
     item_code: "ITEM-1",
     qty: 2,
     source_warehouse: "WH-1",
     target_warehouse: "WH-2",
     batch_id: "BATCH-1",
   });
-  expect(await screen.findByText("โอนย้ายแล้ว")).toBeTruthy();
+  expect(await screen.findByText("โอนย้ายแล้ว: STE-1")).toBeTruthy();
 });
 
 it("sends native reconciliation fields and shows server validation", async () => {
