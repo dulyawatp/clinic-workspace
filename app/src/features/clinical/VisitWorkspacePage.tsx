@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ROUTES } from "../../app/routes";
+import { useSession } from "../../app/SessionProvider";
 import {
   isValidVisitContext,
   type VisitContext,
@@ -11,6 +12,7 @@ import { coreData } from "../../fixtures/data";
 import { useReadQuery } from "../../transport/read/query";
 import { PageHeader } from "../../ui/PageHeader";
 import { StatePanel } from "../../ui/StatePanel";
+import { ApprovedVisitWorkspace } from "./ApprovedVisitWorkspace";
 import { AuthoredVisitWorkspace } from "./AuthoredVisitWorkspace";
 import { DiagnosesSection } from "./DiagnosesSection";
 import { ExamSection } from "./ExamSection";
@@ -129,8 +131,15 @@ function NativeVisitDetail({ id }: { id: string }) {
 }
 
 function VisitDetail({ id }: { id: string }) {
-  const authored = coreData.visitById(id);
-  if (authored) return <AuthoredVisitWorkspace visit={authored} />;
+  const { t } = useTranslation();
+  const { session, status } = useSession();
+  if (id.startsWith("DC-VIS-")) {
+    if (status === "loading") return <StatePanel kind="loading" title={t("common.loading")} />;
+    const authored = session && session.mode !== "live" ? coreData.visitById(id) : null;
+    return authored
+      ? <ApprovedVisitWorkspace visit={authored} />
+      : <StatePanel kind="empty" title={t("clinical.notFound")} />;
+  }
   if (id.startsWith("ENC-")) return <NativeVisitDetail id={id} />;
   return <ReadVisitDetail id={id} />;
 }

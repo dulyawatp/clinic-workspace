@@ -538,6 +538,7 @@ export function AuthoredVisitWorkspace({
         </div>
       ) : section === "note" ? (
         <div className="pc-stack">
+          {native && <p className="clinical-notice">{t("workspace.nativeNoteUnavailable")}</p>}
           <p className="pc-note">{t("visit.noteNotice")}</p>
           {textArea("assessment", "clinical.assessment", true)}
           {textArea("plan", "clinical.plan", true)}
@@ -582,10 +583,14 @@ export function AuthoredVisitWorkspace({
           </label>
         </div>
       ) : section === "photos" ? (
-        <PhotosSection patientId={native?.patientId ?? visit?.patientId ?? ""} />
+        <>
+          {native && <p className="clinical-notice">{t("workspace.nativePhotosUnavailable")}</p>}
+          <PhotosSection patientId={native?.patientId ?? visit?.patientId ?? ""} />
+        </>
       ) : section === "lab" ? (
         native ? (
           <div className="pc-stack">
+            <p className="clinical-notice">{t("workspace.nativeLabUnavailable")}</p>
             <NativeRows
               id="native-lab"
               labelKey="encounterWrite.labTestCode"

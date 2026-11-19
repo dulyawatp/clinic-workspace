@@ -3,7 +3,7 @@ import access from "@clinic/contracts/fixtures/access.json" with {
 };
 import { type KeyboardEvent, type ReactNode, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { RequireSession } from "../../app/guards";
 import { useSession } from "../../app/SessionProvider";
 import type { AppointmentSummary } from "../../domain/appointment";
@@ -23,6 +23,7 @@ import {
   type TimelineKind,
 } from "../../domain/patient";
 import { mapQueueStatus } from "../../domain/queue";
+import { coreData } from "../../fixtures/data";
 import { formatDate, formatDateTime, formatMoney } from "../../i18n/format";
 import { useLocale } from "../../i18n/LocaleProvider";
 import { nativeTransportEnabled } from "../../transport/native/flag";
@@ -39,6 +40,7 @@ import { RedactionNotice } from "./RedactionNotice";
 import { SummaryCard } from "./SummaryCard";
 import { PatientWriteForm } from "./PatientWriteForm";
 import { Timeline } from "./Timeline";
+import { VisitTimeline } from "./VisitTimeline";
 import { VitalsSummary } from "./VitalsSummary";
 
 const PROFILE_LIMIT = 20;
@@ -537,6 +539,7 @@ function NativePatientProfileContent({
   workspacePatientId: string;
 }) {
   const { t } = useTranslation();
+  const [params] = useSearchParams();
   const { locale } = useLocale();
   const { refresh, session } = useSession();
   const { caps } = useCapabilities();
@@ -668,6 +671,9 @@ function NativePatientProfileContent({
           </div>
         </header>
         <RedactionNotice roles={session?.user.roles ?? []} />
+        {params.get("view") === "history" && (
+          <p role="status">{t("workspace.nativeHistoryUnavailable")}</p>
+        )}
         {getCapability(caps, "write.patient.update") === "enabled" && detail.editable === true && <PatientWriteForm patient={detail} />}
         {getCapability(caps, "write.patient.update") === "enabled" && detail.editable === false && <p role="status">{t("patientWrite.notEditable")}</p>}
       </div>
@@ -679,7 +685,9 @@ function NativePatientProfileContent({
 function AddressedProfile() {
   const { t } = useTranslation();
   const params = useParams();
+  const [search] = useSearchParams();
   const { session } = useSession();
+  const { caps } = useCapabilities();
   const patientId = params.id;
 
   if (patientId === undefined)
@@ -696,6 +704,23 @@ function AddressedProfile() {
   // fixture and legacy proxy profiles stay exactly as they were.
   if (nativeTransportEnabled() && session?.mode === "live")
     return <NativePatientProfile workspacePatientId={patientId} />;
+
+  // Explicit authored history; never use sample data as a fallback for a
+  // failed patient read. Reuse the existing Visits tab audience.
+  const patientRead = getCapability(caps, "read.patient");
+  if (search.get("view") === "history" && session && session.mode !== "live" &&
+      TABS.some((tab) => tab.id === "visits" && tab.roles.some((role) => session.user.roles.includes(role))) &&
+      (patientRead === "enabled" || patientRead === "read_only") &&
+      coreData.visitsFor(patientId).length > 0) {
+    return (
+      <>
+        <PageHeader title={t("workspace.history")} />
+        <div className="shell-page-body">
+          <VisitTimeline patientId={patientId} encounterId={search.get("visit")} />
+        </div>
+      </>
+    );
+  }
 
   return <ProfileBody patientId={patientId} />;
 }
