@@ -465,6 +465,7 @@ class FakeGateway:
         # -- purchasing (PO draft/submit + receipt) surface -----------------
         self.purchase_boundary_problem = None
         self.purchase_install_problem = None
+        self.purchase_draft_install_problem = None
         self.purchase_create_authority = {}
         self.purchase_draft_detail = None
         self.purchase_submit_detail = None
@@ -496,6 +497,12 @@ class FakeGateway:
         self.purchase_fence_calls = []
         self.purchase_fence_claim = FakeClaim()
         self.purchase_fence_error = None
+        self.purchase_order_view_value = None
+        self.purchase_order_view_missing = False
+        self.purchase_order_view_calls = []
+        self.purchase_draft_names = []
+        self.purchase_order_drafts_calls = []
+        self.purchase_order_drafts_error = None
 
         # -- finance (invoice submit + payment receive) surface ------------
         self.finance_boundary_problem = None
@@ -1749,6 +1756,9 @@ class FakeGateway:
     def native_purchase_install_problem(self):
         return self.purchase_install_problem
 
+    def native_purchase_draft_install_problem(self):
+        return self.purchase_draft_install_problem
+
     def native_purchase_can_create(self, doctype):
         return self.purchase_create_authority.get(doctype, True)
 
@@ -1760,6 +1770,27 @@ class FakeGateway:
 
     def native_purchase_order_draft_detail(self, payload):
         return self._purchase_detail(self.purchase_draft_detail, payload)
+
+    def native_purchase_order_view(self, purchase_order_id):
+        self.purchase_order_view_calls.append(purchase_order_id)
+        if self.purchase_order_view_missing:
+            return None
+        if self.purchase_order_view_value is not None:
+            return dict(self.purchase_order_view_value)
+        return {
+            "purchase_order_id": purchase_order_id,
+            "status": "Draft",
+            "docstatus": 0,
+        }
+
+    def native_purchase_order_drafts(self, supplier, limit):
+        self.purchase_order_drafts_calls.append((supplier, limit))
+        if self.purchase_order_drafts_error is not None:
+            raise self.purchase_order_drafts_error
+        if self.purchase_draft_names is None:
+            return None
+        return list(self.purchase_draft_names)
+
 
     def native_purchase_order_submit_detail(self, payload):
         return self._purchase_detail(self.purchase_submit_detail, payload)

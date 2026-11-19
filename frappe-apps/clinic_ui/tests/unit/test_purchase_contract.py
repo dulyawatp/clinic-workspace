@@ -717,6 +717,72 @@ class BoundaryAndInstallTests(unittest.TestCase):
             purchase_contract.install_problem(broken),
         )
 
+    def test_the_draft_preflight_ignores_receipt_only_fields(self):
+        # ERPNext 16.52.1: Purchase Order Item has no purchase_order and no
+        # received_qty column; a healthy install must still open the draft.
+        meta = {
+            doctype: {candidates[0] for candidates in fields.values()}
+            for doctype, fields in purchase_contract.INSTALLED_CANDIDATES.items()
+        }
+        for doctype, fields in (
+            purchase_contract.DRAFT_INSTALLED_CANDIDATES.items()
+        ):
+            meta.setdefault(doctype, set())
+            meta[doctype] |= {
+                candidates[0] for candidates in fields.values()
+            }
+        meta[purchase_contract.PURCHASE_ORDER_ITEM_DOCTYPE] = {
+            candidates[0]
+            for candidates in (
+                purchase_contract.DRAFT_INSTALLED_CANDIDATES[
+                    purchase_contract.PURCHASE_ORDER_ITEM_DOCTYPE
+                ].values()
+            )
+        }
+
+        self.assertEqual(
+            purchase_contract.install_problem(meta),
+            "missing field Purchase Order Item.received_qty",
+        )
+        self.assertIsNone(purchase_contract.draft_install_problem(meta))
+
+        only_order = dict(meta)
+        only_order[purchase_contract.PURCHASE_ORDER_ITEM_DOCTYPE] = (
+            meta[purchase_contract.PURCHASE_ORDER_ITEM_DOCTYPE]
+            | {"received_qty"}
+        )
+        self.assertEqual(
+            purchase_contract.install_problem(only_order),
+            "missing field Purchase Order Item.purchase_order",
+        )
+
+    def test_the_draft_preflight_still_names_a_missing_needed_field(self):
+        meta = {
+            doctype: {candidates[0] for candidates in fields.values()}
+            for doctype, fields in (
+                purchase_contract.DRAFT_INSTALLED_CANDIDATES.items()
+            )
+        }
+        self.assertIsNone(purchase_contract.draft_install_problem(meta))
+
+        meta[purchase_contract.PURCHASE_ORDER_ITEM_DOCTYPE].discard("rate")
+        self.assertEqual(
+            purchase_contract.draft_install_problem(meta),
+            "missing field Purchase Order Item.rate",
+        )
+
+        missing = {
+            doctype: {candidates[0] for candidates in fields.values()}
+            for doctype, fields in (
+                purchase_contract.DRAFT_INSTALLED_CANDIDATES.items()
+            )
+        }
+        missing.pop("Company")
+        self.assertEqual(
+            purchase_contract.draft_install_problem(missing),
+            "missing DocType Company",
+        )
+
     def test_the_boundary_pin_covers_the_purchase_order_controller(self):
         self.assertEqual(
             purchase_contract.REVIEWED_SOURCE_SHA256["purchase_order"],

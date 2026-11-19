@@ -125,6 +125,15 @@ PATIENT_VIEW_FIELDS = PATIENT_DOCFIELD_FIELDS + PATIENT_STANDARD_FIELDS
 PROCEDURE_STATUS_FIELD = "status"
 PROCEDURE_STANDARD_NAME_FIELD = "name"
 PROCEDURE_DOCSTATUS_VALUES = (0, 1, 2)
+# The only Purchase Order values a converted draft result or read surface may
+# return. ``status`` and ``supplier`` are DocFields with a permlevel and can be
+# masked; ``name`` and ``docstatus`` are standard columns without a permlevel or
+# mask entry, read only after the document and field-level checks. No item,
+# quantity or amount is fetched here.
+PURCHASE_ORDER_STATUS_FIELD = "status"
+PURCHASE_ORDER_SUPPLIER_FIELD = "supplier"
+PURCHASE_STANDARD_NAME_FIELD = "name"
+PURCHASE_DOCSTATUS_VALUES = (0, 1, 2)
 APPOINTMENT_TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
 # The site timestamp recorded verbatim in an appended cancel/no-show note,
 # exactly as ``frappe.utils.now()`` returns it: whole seconds, or the seconds
@@ -5837,7 +5846,16 @@ class Gateway:
     # -- purchasing (PO draft/submit + receipt) surface -------------------
 
     def _purchase_meta_fields(self):
-        """Resolve the installed field names through the metadata cache."""
+        """Resolve the installed field names through the metadata cache.
+
+        Meta fieldnames, not ``get_valid_columns()``: the latter excludes Table
+        fields in frappe 16.54.0, and ``Purchase Order.items`` is one. The
+        installed ``default_fields`` (``name``, ``owner``, ``creation``,
+        ``modified``, ``modified_by``, ``docstatus``, ``idx``) are ordinary
+        columns, not ``DocField`` rows, so they are unioned in explicitly. The
+        closed-world check stays strict for every other field: only frappe's own
+        default columns are admitted by name.
+        """
 
         cached = getattr(self, "_purchase_fields_cache", None)
         if cached is not None:
@@ -5847,8 +5865,19 @@ class Gateway:
         if not callable(get_meta):
             get_meta = frappe.get_meta
         fields = {}
-        for doctype in purchase_contract.INSTALLED_CANDIDATES:
-            fields[doctype] = set(get_meta(doctype).get_valid_columns())
+        for doctype in dict.fromkeys(
+            (
+                *purchase_contract.INSTALLED_CANDIDATES,
+                *purchase_contract.DRAFT_INSTALLED_CANDIDATES,
+            )
+        ):
+            meta = get_meta(doctype)
+            default_fields = getattr(meta, "default_fields", None) or ()
+            fields[doctype] = {
+                field.fieldname for field in meta.fields
+            } | {
+                name for name in default_fields if isinstance(name, str)
+            }
         self._purchase_fields_cache = fields
         return fields
 
@@ -5857,6 +5886,22 @@ class Gateway:
 
         try:
             return purchase_contract.install_problem(self._purchase_meta_fields())
+        except Exception:
+            return "installed metadata unreadable"
+
+    def native_purchase_draft_install_problem(self):
+        """Preflight only the fields the converted draft lane reads or writes.
+
+        The fenced submit/receipt preflight stays unchanged and remains the
+        gate for that lane; this narrower check exists because a healthy
+        ERPNext 16.52.1 install has no ``Purchase Order Item.purchase_order``
+        column, which would otherwise disable the draft for no reason.
+        """
+
+        try:
+            return purchase_contract.draft_install_problem(
+                self._purchase_meta_fields()
+            )
         except Exception:
             return "installed metadata unreadable"
 
@@ -6023,6 +6068,31 @@ class Gateway:
         except Exception:
             return ""
 
+    def _purchase_draft_company_currency(self):
+        """The company Frappe's own default resolution returns; no extra guess.
+
+        ``frappe.defaults.get_user_default("Company")`` is the framework's
+        documented resolution: it merges the user's defaults with the
+        ``__default`` site/global values Frappe itself stores, so it is not a
+        purely per-user lookup. This lane accepts exactly that resolved value and
+        adds no fallback of its own — in particular it never reads a
+        ``Global Defaults`` single value directly. When the framework resolves
+        nothing, the empty company is reported and the draft is refused rather
+        than guessed.
+        """
+
+        company = None
+        try:
+            get_default = getattr(self.frappe.defaults, "get_user_default", None)
+            if callable(get_default):
+                company = get_default("Company")
+        except Exception:
+            company = None
+        company = self._text_value(company)
+        if not company:
+            return "", ""
+        return company, self._purchase_currency(company)
+
     def _purchase_order_line(self, purchase_order, item_code):
         """Read the order state and its matching line (pending quantity)."""
 
@@ -6094,27 +6164,224 @@ class Gateway:
     def _purchase_received(self, purchase_order, item_code):
         return self._purchase_order_line(purchase_order, item_code)["received"]
 
+    def _purchase_readable_item(self, item_code):
+        """Item fields only under the caller's own native Item read authority.
+
+        A denied Item reports ``denied`` and loads no field, so an unauthorized
+        caller cannot infer stock/batch flags from the preflight. A missing Item
+        still reaches the designed "does not exist" refusal.
+        """
+
+        readable = (
+            self.native_doctype_can_read(
+                purchase_contract.ITEM_DOCTYPE, item_code
+            )
+            is True
+        )
+        if not readable:
+            exists = False
+            try:
+                exists = bool(
+                    self.frappe.db.exists(
+                        purchase_contract.ITEM_DOCTYPE, item_code
+                    )
+                )
+            except Exception:
+                exists = False
+            return {"exists": False, "readable": False, "denied": exists}
+        return {**self._stock_item(item_code), "readable": True, "denied": False}
+
     def native_purchase_order_draft_detail(self, payload):
-        """Read the pre-fence draft decision fields under native authority."""
+        """Read the converted draft decision fields under native authority.
+
+        The company and its currency come from Frappe's own
+        ``get_user_default("Company")`` resolution (which already includes the
+        framework's ``__default`` values); this lane adds no fallback of its own
+        and never reads a single default value directly. The supplier, every
+        item and every target warehouse are read only through the current
+        user's own native read permission; a denied master is reported as
+        denied without loading its fields. A warehouse also reports its own
+        company and disabled flag so a cross-company or disabled target is
+        refused before any mutation. The converted lane never reads the fence or
+        a committed receipt.
+        """
 
         try:
-            company, currency = self._purchase_company_currency()
+            company, currency = self._purchase_draft_company_currency()
+            supplier = payload["supplier"]
+            supplier_not_readable = (
+                self.native_doctype_can_read(
+                    purchase_contract.SUPPLIER_DOCTYPE, supplier
+                )
+                is not True
+            )
+            supplier_exists = False
+            try:
+                supplier_exists = bool(
+                    self.frappe.db.exists(
+                        purchase_contract.SUPPLIER_DOCTYPE, supplier
+                    )
+                )
+            except Exception:
+                supplier_exists = False
             items = {}
             for line in payload["items"]:
                 code = line["item_code"]
                 if code not in items:
-                    items[code] = self._stock_item(code)
+                    items[code] = self._purchase_readable_item(code)
             return {
                 "today": self.site_today(),
                 "company": company,
                 "currency": currency,
-                "supplier_exists": bool(
-                    self.frappe.db.exists("Supplier", payload["supplier"])
-                ),
+                "supplier_readable": not supplier_not_readable,
+                "supplier_denied": supplier_exists and supplier_not_readable,
+                "supplier_exists": supplier_exists
+                and not supplier_not_readable,
                 "items": items,
             }
         except Exception:
             raise patient_write.StoreUnavailable() from None
+
+    def _purchase_field_readable(self, fieldname):
+        """True when one Purchase Order DocField is readable and unmasked."""
+
+        meta = self.frappe.get_meta(purchase_contract.PURCHASE_ORDER_DOCTYPE)
+        accessible_permlevels = meta.get_permlevel_access(
+            "read", user=self.frappe.session.user
+        )
+        field_definition = meta.get_field(fieldname)
+        if (
+            field_definition is None
+            or field_definition.permlevel not in accessible_permlevels
+        ):
+            return False
+        masked_fields = meta.get_masked_fields() or ()
+        return not any(
+            getattr(masked, "fieldname", None) == fieldname
+            for masked in masked_fields
+        )
+
+    def native_purchase_order_view(self, native_purchase_order_id):
+        """Three-field purchase order read under document and field rights.
+
+        The document read permission is checked first. ``status`` must then
+        exist at a readable permlevel and must not be masked for the current
+        user; ``name`` and ``docstatus`` are standard columns read only after
+        that check. No supplier, item, quantity or amount is fetched here.
+        ``None`` covers a denied document, a restricted or masked status, a
+        malformed row and any adapter failure.
+        """
+
+        if (
+            not isinstance(native_purchase_order_id, str)
+            or not native_purchase_order_id.strip()
+        ):
+            return None
+        try:
+            frappe = self.frappe
+            user = frappe.session.user
+            if not frappe.has_permission(
+                purchase_contract.PURCHASE_ORDER_DOCTYPE,
+                ptype="read",
+                doc=native_purchase_order_id,
+                user=user,
+            ):
+                return None
+            if not self._purchase_field_readable(PURCHASE_ORDER_STATUS_FIELD):
+                return None
+            row = frappe.db.get_value(
+                purchase_contract.PURCHASE_ORDER_DOCTYPE,
+                native_purchase_order_id,
+                [
+                    PURCHASE_STANDARD_NAME_FIELD,
+                    PURCHASE_ORDER_STATUS_FIELD,
+                    "docstatus",
+                ],
+                as_dict=True,
+            )
+        except Exception:
+            return None
+        if row is None:
+            return None
+        get = (
+            row.get
+            if hasattr(row, "get")
+            else (lambda key, default=None: default)
+        )
+        name = self._text_value(get(PURCHASE_STANDARD_NAME_FIELD))
+        status = self._text_value(get(PURCHASE_ORDER_STATUS_FIELD))
+        docstatus = get("docstatus")
+        if not name or not status:
+            return None
+        if (
+            not isinstance(docstatus, int)
+            or isinstance(docstatus, bool)
+            or docstatus not in PURCHASE_DOCSTATUS_VALUES
+        ):
+            return None
+        return {
+            "purchase_order_id": name,
+            "status": status,
+            "docstatus": docstatus,
+        }
+
+    def native_purchase_order_drafts(self, supplier, limit):
+        """Bounded, permission-aware draft names for one readable supplier.
+
+        ``frappe.get_list`` applies the framework's own permission filtering and
+        permission-query conditions for the session user; ``get_all`` and raw
+        SQL are deliberately never used on this discovery path. The supplier
+        filter and ``status`` are DocFields that can carry a permlevel or a
+        mask, so both pass the current user's own field-level read check before
+        the query is built. One row beyond the bound is requested, so an
+        over-full page is reported as ``None`` rather than silently truncated.
+        The caller still applies the document and field-level checks per record.
+        """
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit < 1
+            or limit > 1000
+        ):
+            return None
+        if not isinstance(supplier, str) or not supplier.strip():
+            return None
+        try:
+            if not self._purchase_field_readable(PURCHASE_ORDER_STATUS_FIELD):
+                return None
+            if not self._purchase_field_readable(
+                PURCHASE_ORDER_SUPPLIER_FIELD
+            ):
+                return None
+            rows = self.frappe.get_list(
+                purchase_contract.PURCHASE_ORDER_DOCTYPE,
+                filters={
+                    PURCHASE_ORDER_SUPPLIER_FIELD: supplier,
+                    "docstatus": purchase_contract.DRAFT_DOCSTATUS,
+                },
+                fields=[PURCHASE_STANDARD_NAME_FIELD],
+                order_by="modified desc, name asc",
+                limit_page_length=limit + 1,
+            )
+        except Exception:
+            return None
+        if not isinstance(rows, (list, tuple)):
+            return None
+        if len(rows) > limit:
+            return None
+        names = []
+        for row in rows:
+            name = (
+                row.get(PURCHASE_STANDARD_NAME_FIELD)
+                if hasattr(row, "get")
+                else getattr(row, PURCHASE_STANDARD_NAME_FIELD, None)
+            )
+            name = self._text_value(name)
+            if not name:
+                return None
+            names.append(name)
+        return names
 
     def native_purchase_order_submit_detail(self, payload):
         """Read the pre-fence submit decision fields."""
@@ -6223,7 +6490,17 @@ class Gateway:
             raise patient_write.WriteUncertain() from None
 
     def create_native_purchase_order_draft(self, prepared):
-        """One draft purchase order: inserted, never submitted."""
+        """One draft purchase order: inserted, never submitted.
+
+        The installed controller resolves the values the client never sends:
+        ``insert`` runs the full controller lifecycle, whose
+        ``set_missing_values(for_validate=True)`` fills ``item_name`` from the
+        Item master and the target ``warehouse`` from the company's default
+        warehouse. This lane therefore sends only the item, quantity, rate and
+        the server-resolved unit/date; it does not derive those values itself
+        and never guesses a warehouse. Permission and validation remain the
+        installed controller's.
+        """
 
         try:
             rows = []

@@ -197,6 +197,32 @@ def authorize_purchase_write(gateway, allowed_codes, csrf_token=None):
     return settings, view, role
 
 
+def authorize_purchase_draft_write(gateway, allowed_codes, csrf_token=None):
+    """Read gate, explicit CSRF, and the converted purchase-draft gate.
+
+    The converted draft lane relies on Frappe/Marley permissions, validation,
+    controller lifecycle and native transactions instead of the historical
+    operation fence, write budget, deployment marker and acknowledgement
+    barrier. It still requires the authenticated session, a valid same-session
+    CSRF token, the exact approved site configuration, the purchasing flag and
+    the clinic role code. The native Purchase Order create permission and every
+    Supplier/Item read are checked per request; no configuration value is
+    authority on its own.
+
+    Submit and the PO-referenced receipt deliberately keep the historical gate
+    above, including the deployment marker and the fence store.
+    """
+
+    settings, view, role = authorize(gateway, allowed_codes)
+    if view.user == write_fence.LATCH_ACTOR:
+        gateway.deny()
+    if not gateway.csrf_token_valid(csrf_token):
+        gateway.deny()
+    if not settings.purchase_write_enabled:
+        gateway.deny()
+    return settings, view, role
+
+
 def authorize_finance_write(gateway, allowed_codes, csrf_token=None):
     """Read gate, explicit CSRF, and the separate finance-write gate.
 

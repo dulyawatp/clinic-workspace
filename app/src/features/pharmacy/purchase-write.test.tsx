@@ -52,22 +52,52 @@ it("hides every purchasing form while the capabilities are read_only", async () 
   expect(screen.queryByTestId("purchase-write-form")).toBeNull();
 });
 
+it("allows manual recovery when draft writes are disabled, with server permission authoritative", async () => {
+  const user = userEvent.setup();
+  serve({ "read.patient": "enabled" });
+  let reads = 0;
+  server.use(http.get("/api/method/clinic_ui.api.purchase_write.drafts", ({ request }) => {
+    expect(new URL(request.url).searchParams.get("supplier")).toBe("SUP-1");
+    reads += 1;
+    return reads === 1
+      ? HttpResponse.json({ message: { items: [{ purchase_order_id: "PO-1", status: "Draft", docstatus: 0 }] } })
+      : new HttpResponse(null, { status: 403 });
+  }));
+  renderWithFixtures(<PharmacyPurchasingPage />, {
+    role: "PHA",
+    sessionMode: "live",
+    path: ROUTES.pharmacyPurchasing,
+  });
+  const recovery = await screen.findByRole("region", { name: "ตรวจสอบใบสั่งซื้อ" });
+  expect(screen.queryByTestId("purchase-write-form")).toBeNull();
+  await user.type(within(recovery).getByLabelText("ผู้จำหน่าย"), "SUP-1");
+  await user.click(within(recovery).getByRole("button", { name: "ค้นหาฉบับร่างของผู้จำหน่าย" }));
+  expect(await within(recovery).findByText(/PO-1.*Draft/)).toBeTruthy();
+  await user.click(within(recovery).getByRole("button", { name: "ค้นหาฉบับร่างของผู้จำหน่าย" }));
+  expect(await within(recovery).findByRole("alert")).toHaveTextContent("โหลดใบสั่งซื้อไม่ได้");
+  expect(within(recovery).queryByText(/PO-1.*Draft/)).toBeNull();
+});
+
 it("drafts one purchase order with itemized lines and no docstatus", async () => {
   const user = userEvent.setup();
   const bodies: Record<string, unknown>[] = [];
   serve(ENABLED);
+  // No acknowledgement handler is registered: any second request would fail
+  // the suite through the unhandled-frame guard.
   server.use(
     http.post(DRAFT, async ({ request }) => {
       bodies.push((await request.json()) as Record<string, unknown>);
       return HttpResponse.json({
         message: {
-          status: "drafted",
-          purchase_order: "PO-1",
-          ackToken: TOKEN,
+          status: "created",
+          purchase_order: {
+            purchase_order_id: "PO-DRAFT-0001",
+            status: "Draft",
+            docstatus: 0,
+          },
         },
       });
     }),
-    http.post(ACK, ack),
   );
   renderWithFixtures(<PharmacyPurchasingPage />, {
     role: "PHA",
@@ -90,7 +120,101 @@ it("drafts one purchase order with itemized lines and no docstatus", async () =>
   });
   expect(typeof bodies[0]?.operation_key).toBe("string");
   expect(bodies[0]).not.toHaveProperty("docstatus");
-  expect(await screen.findByText("สร้างใบสั่งซื้อแล้ว")).toBeTruthy();
+  expect(
+    await screen.findByText("สร้างใบสั่งซื้อแล้ว · เลขที่ PO-DRAFT-0001"),
+  ).toBeTruthy();
+  expect(bodies).toHaveLength(1);
+  expect(localStorage.length).toBe(0);
+});
+
+it("shows inspect-records guidance for an uncertain draft and never acknowledges", async () => {
+  const user = userEvent.setup();
+  const bodies: Record<string, unknown>[] = [];
+  let acknowledgements = 0;
+  serve(ENABLED);
+  server.use(
+    http.post(ACK, () => {
+      acknowledgements += 1;
+      return ack();
+    }),
+    http.post(DRAFT, async ({ request }) => {
+      bodies.push((await request.json()) as Record<string, unknown>);
+      return HttpResponse.json(
+        { message: { code: "UPSTREAM" } },
+        { status: 503 },
+      );
+    }),
+    http.get("/api/method/clinic_ui.api.purchase_write.drafts", ({ request }) => {
+      expect(new URL(request.url).searchParams.get("supplier")).toBe("SUP-1");
+      return HttpResponse.json({ message: { items: [{ purchase_order_id: "PO-OLD", status: "Draft", docstatus: 0 }] } });
+    }),
+    http.get("/api/method/clinic_ui.api.purchase_write.view", ({ request }) => {
+      expect(new URL(request.url).searchParams.get("purchase_order_id")).toBe("PO-OLD");
+      return HttpResponse.json({ message: { purchase_order: { purchase_order_id: "PO-OLD", status: "Draft", docstatus: 0 } } });
+    }),
+  );
+  renderWithFixtures(<PharmacyPurchasingPage />, {
+    role: "PHA",
+    sessionMode: "live",
+    path: ROUTES.pharmacyPurchasing,
+  });
+  const form = await screen.findByTestId("purchase-write-form");
+  await user.type(within(form).getByLabelText("ผู้จำหน่าย"), "SUP-1");
+  await user.type(within(form).getByLabelText("รหัสสินค้า"), "ITEM-1");
+  await user.type(within(form).getByLabelText("จำนวน"), "5");
+  await user.type(within(form).getByLabelText("ราคาต่อหน่วย"), "2.5");
+  await user.click(
+    within(form).getByRole("button", { name: "ยืนยันสร้างใบสั่งซื้อ" }),
+  );
+
+  expect(
+    await screen.findByText(/ตรวจสอบรายการใบสั่งซื้อในระบบก่อนสร้างใหม่/),
+  ).toBeTruthy();
+  const submit = within(form).getByRole("button", { name: "ยืนยันสร้างใบสั่งซื้อ" });
+  expect(submit).toBeDisabled();
+  await user.click(submit);
+  await user.click(screen.getByRole("button", { name: "ค้นหาฉบับร่างของผู้จำหน่าย" }));
+  expect(await screen.findByText(/PO-OLD.*Draft/)).toBeTruthy();
+  await user.type(screen.getByLabelText("รหัสใบสั่งซื้อ"), "PO-OLD");
+  await user.click(screen.getByRole("button", { name: "ดูสถานะใบสั่งซื้อ" }));
+  expect(await screen.findByText(/PO-OLD.*Draft/)).toBeTruthy();
+  expect(bodies).toHaveLength(1);
+  expect(acknowledgements).toBe(0);
+  expect(localStorage.length).toBe(0);
+});
+
+it("shows a known refusal for a rejected draft instead of the uncertain copy", async () => {
+  const user = userEvent.setup();
+  const bodies: Record<string, unknown>[] = [];
+  serve(ENABLED);
+  server.use(
+    http.post(DRAFT, async ({ request }) => {
+      bodies.push((await request.json()) as Record<string, unknown>);
+      return HttpResponse.json(
+        { message: { code: "VALIDATION" } },
+        { status: 422 },
+      );
+    }),
+  );
+  renderWithFixtures(<PharmacyPurchasingPage />, {
+    role: "PHA",
+    sessionMode: "live",
+    path: ROUTES.pharmacyPurchasing,
+  });
+  const form = await screen.findByTestId("purchase-write-form");
+  await user.type(within(form).getByLabelText("ผู้จำหน่าย"), "SUP-1");
+  await user.type(within(form).getByLabelText("รหัสสินค้า"), "ITEM-1");
+  await user.type(within(form).getByLabelText("จำนวน"), "5");
+  await user.type(within(form).getByLabelText("ราคาต่อหน่วย"), "2.5");
+  await user.click(
+    within(form).getByRole("button", { name: "ยืนยันสร้างใบสั่งซื้อ" }),
+  );
+
+  expect(
+    await screen.findByText(/เซิร์ฟเวอร์ปฏิเสธรายการนี้/),
+  ).toBeTruthy();
+  expect(screen.queryByText(/ตรวจสอบรายการใบสั่งซื้อ/)).toBeNull();
+  expect(bodies).toHaveLength(1);
 });
 
 it("submits an existing draft and shows the server status", async () => {

@@ -25,6 +25,7 @@ from clinic_ui.core import (
     fence_store,
     patient_write,
     procedure_contract,
+    purchase_contract,
     write_fence,
 )
 from clinic_ui.runtime import frappe_gateway
@@ -6013,6 +6014,558 @@ class NativeProcedureListAdapterTests(GatewayTestCase):
                 self.assertIsNone(
                     self.gateway(stub).native_procedures_for_service_request(
                         self.REQUEST, limit
+                    )
+                )
+                self.assertEqual(stub.get_list_calls, [])
+
+
+class PurchaseMetaField:
+    def __init__(self, fieldname, permlevel=0):
+        self.fieldname = fieldname
+        self.permlevel = permlevel
+
+
+class PurchaseMeta:
+    """Installed Meta stand-in: Table fields exist but are not DB columns.
+
+    frappe 16.54.0 ``Meta.get_valid_columns()`` omits Table fields, which is why
+    the legacy purchase preflight reported ``missing field Purchase
+    Order.items`` on a healthy install. ``fields`` carries the real DocFields.
+    """
+
+    def __init__(self, fieldnames, table_fields=(), default_fields=()):
+        self.fields = [PurchaseMetaField(name) for name in fieldnames]
+        self.table_fields = set(table_fields)
+        self.default_fields = list(default_fields)
+        self.accessible = [0]
+        self.masked = []
+
+    def get_valid_columns(self):
+        return [
+            field.fieldname
+            for field in self.fields
+            if field.fieldname not in self.table_fields
+        ] + list(self.default_fields)
+
+    def get_permlevel_access(
+        self, permission_type="read", parenttype=None, *, user=None
+    ):
+        return list(self.accessible)
+
+    def get_field(self, fieldname):
+        for field in self.fields:
+            if field.fieldname == fieldname:
+                return field
+        return None
+
+    def get_masked_fields(self, parenttype=None):
+        return [PurchaseMetaField(name) for name in self.masked]
+
+
+class PurchaseDocument:
+    """Controller-like stand-in for the installed Purchase Order insert.
+
+    Models the verified 16.52.1 lifecycle: ``insert`` runs the controller
+    validation, whose ``set_missing_values(for_validate=True)`` resolves the
+    line values the client never sends (``item_name`` from the Item master and
+    the default target ``warehouse`` from the company default) before the
+    mandatory checks.
+    """
+
+    def __init__(self, doctype, name=None, stub=None):
+        self.doctype = doctype
+        self.name = name
+        self.inserted = False
+        self.submitted = False
+        self.docstatus = 0
+        self.payload = {}
+        self.stub = stub
+
+    def insert(self):
+        items = self.payload.get("items") or []
+        if not items:
+            raise RuntimeError("MandatoryError: items")
+        for row in items:
+            if self.stub is not None:
+                if not row.get("item_name"):
+                    row["item_name"] = self.stub.item_names.get(
+                        row.get("item_code")
+                    )
+                if not row.get("warehouse"):
+                    row["warehouse"] = self.stub.default_warehouse
+            if not row.get("item_name"):
+                raise RuntimeError("MandatoryError: item_name")
+            if not row.get("warehouse"):
+                raise RuntimeError("MandatoryError: warehouse")
+        self.inserted = True
+        if self.name is None:
+            self.name = "PO-NEW"
+
+    def submit(self):
+        self.submitted = True
+        self.docstatus = 1
+
+
+class PurchaseDB:
+    def __init__(self):
+        self.values = {}
+        self.existing = set()
+        self.commits = 0
+        self.rollbacks = 0
+
+    def get_value(self, doctype, name, fieldname=None, as_dict=False, **kwargs):
+        if isinstance(fieldname, (list, tuple)):
+            row = {
+                field: self.values.get((doctype, name, field))
+                for field in fieldname
+            }
+            return row if as_dict else tuple(row[field] for field in fieldname)
+        return self.values.get((doctype, name, fieldname))
+
+    def get_single_value(self, doctype, fieldname):
+        return self.values.get((doctype, "__single__", fieldname))
+
+    def exists(self, doctype, name):
+        return (doctype, name) in self.existing
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+class PurchaseStub(types.SimpleNamespace):
+    """Fake Frappe module for the converted purchase draft/read paths."""
+
+    def __init__(self, *, user="purchasing@example.test"):
+        super().__init__()
+        self.session = types.SimpleNamespace(user=user, sid="sid-purchase")
+        self.local = types.SimpleNamespace(
+            site="marley.test",
+            session={},
+            response={},
+            response_headers={},
+            flags=types.SimpleNamespace(),
+        )
+        self.db = PurchaseDB()
+        self.defaults = types.SimpleNamespace(get_user_default=lambda key: None)
+        self.utils = types.SimpleNamespace(nowdate=lambda: "2026-11-19")
+        self.permissions = {}
+        self.metas = {}
+        for doctype in dict.fromkeys(
+            (
+                *purchase_contract.INSTALLED_CANDIDATES,
+                *purchase_contract.DRAFT_INSTALLED_CANDIDATES,
+            )
+        ):
+            names = sorted(
+                {
+                    candidates[0]
+                    for mapping in (
+                        purchase_contract.INSTALLED_CANDIDATES,
+                        purchase_contract.DRAFT_INSTALLED_CANDIDATES,
+                    )
+                    for candidates in (mapping.get(doctype) or {}).values()
+                }
+            )
+            self.metas[doctype] = PurchaseMeta(
+                names,
+                table_fields=("items",),
+                default_fields=(
+                    "name",
+                    "owner",
+                    "creation",
+                    "modified",
+                    "modified_by",
+                    "docstatus",
+                    "idx",
+                ),
+            )
+        self.get_list_calls = []
+        self.get_list_rows = []
+        self.created_docs = []
+        self.item_names = {"ITEM-1": "Synthetic Item"}
+        self.default_warehouse = "WH-1"
+
+    def get_meta(self, doctype):
+        return self.metas[doctype]
+
+    def get_doc(self, doctype, name=None, **kwargs):
+        document = PurchaseDocument(
+            doctype if isinstance(doctype, str) else doctype["doctype"],
+            stub=self,
+        )
+        document.payload = dict(doctype) if isinstance(doctype, dict) else {}
+        self.created_docs.append(document)
+        return document
+
+    def has_permission(self, doctype, ptype="read", doc=None, user=None):
+        key = getattr(doc, "name", doc)
+        return bool(
+            self.permissions.get(
+                (doctype, ptype, key),
+                self.permissions.get((doctype, ptype), False),
+            )
+        )
+
+    def get_list(
+        self,
+        doctype,
+        fields=None,
+        order_by=None,
+        limit_page_length=None,
+        **kwargs,
+    ):
+        self.get_list_calls.append(
+            (
+                doctype,
+                list(fields or ()),
+                order_by,
+                limit_page_length,
+                kwargs,
+            )
+        )
+        return list(self.get_list_rows)
+
+
+class PurchaseDraftAndReadTests(GatewayTestCase):
+    def stub(self):
+        stub = PurchaseStub()
+        stub.db.values[("Company", "SITCO", "default_currency")] = "USD"
+        stub.db.existing.add(("Supplier", "SUP-1"))
+        stub.db.existing.add(("Item", "ITEM-1"))
+        stub.db.values[("Item", "ITEM-1", "has_batch_no")] = 0
+        stub.db.values[("Item", "ITEM-1", "has_expiry_date")] = 0
+        stub.db.values[("Item", "ITEM-1", "is_stock_item")] = 1
+        stub.db.values[("Item", "ITEM-1", "stock_uom")] = "Unit"
+        stub.db.values[("Item", "ITEM-1", "item_name")] = "Synthetic Item"
+        stub.permissions[("Supplier", "read", "SUP-1")] = True
+        stub.permissions[("Item", "read", "ITEM-1")] = True
+        return stub
+
+    def draft(self, stub):
+        return {
+            "supplier": "SUP-1",
+            "items": [{"item_code": "ITEM-1", "qty": 5.0, "rate": 2.5}],
+        }
+
+    def test_items_table_field_resolves_from_meta_not_valid_columns(self):
+        stub = self.stub()
+        gateway = self.gateway(stub)
+
+        self.assertNotIn(
+            "items",
+            set(stub.get_meta("Purchase Order").get_valid_columns()),
+        )
+        self.assertIn(
+            "items", gateway._purchase_meta_fields()["Purchase Order"]
+        )
+        self.assertIsNone(gateway.native_purchase_install_problem())
+
+    def test_a_genuinely_missing_field_is_still_refused(self):
+        stub = self.stub()
+        stub.metas["Purchase Order"].fields = [
+            field
+            for field in stub.metas["Purchase Order"].fields
+            if field.fieldname != "currency"
+        ]
+
+        self.assertEqual(
+            self.gateway(stub).native_purchase_install_problem(),
+            "missing field Purchase Order.currency",
+        )
+
+    def test_the_draft_company_uses_the_framework_default_resolution(self):
+        # frappe.defaults.get_user_default already merges the framework's
+        # __default values; this lane adds no fallback and reads no single
+        # value of its own, so the resolved company is used verbatim.
+        stub = self.stub()
+        stub.defaults = types.SimpleNamespace(
+            get_user_default=lambda key: "SITCO"
+        )
+        stub.db.values[
+            ("Global Defaults", "__single__", "default_company")
+        ] = "OTHER"
+
+        detail = self.gateway(stub).native_purchase_order_draft_detail(
+            self.draft(stub)
+        )
+
+        self.assertEqual(detail["company"], "SITCO")
+        self.assertEqual(detail["currency"], "USD")
+
+    def test_an_empty_framework_company_default_is_refused_not_invented(self):
+        stub = self.stub()
+        stub.defaults = types.SimpleNamespace(
+            get_user_default=lambda key: None
+        )
+        stub.db.values[
+            ("Global Defaults", "__single__", "default_company")
+        ] = "OTHER"
+
+        detail = self.gateway(stub).native_purchase_order_draft_detail(
+            self.draft(stub)
+        )
+
+        self.assertEqual(detail["company"], "")
+        self.assertEqual(detail["currency"], "")
+
+    def test_a_real_erpnext_16_shape_passes_the_draft_preflight_only(self):
+        stub = self.stub()
+        # Installed ERPNext 16.52.1 has no Purchase Order Item.purchase_order
+        # and no Purchase Order Item.received_qty: both live elsewhere.
+        order_item = stub.metas["Purchase Order Item"]
+        order_item.fields = [
+            field
+            for field in order_item.fields
+            if field.fieldname not in ("purchase_order", "received_qty")
+        ]
+        gateway = self.gateway(stub)
+
+        self.assertIsNone(gateway.native_purchase_draft_install_problem())
+        self.assertEqual(
+            gateway.native_purchase_install_problem(),
+            "missing field Purchase Order Item.received_qty",
+        )
+
+        only_order = self.stub()
+        order_item = only_order.metas["Purchase Order Item"]
+        order_item.fields = [
+            field
+            for field in order_item.fields
+            if field.fieldname != "purchase_order"
+        ]
+        self.assertEqual(
+            self.gateway(only_order).native_purchase_install_problem(),
+            "missing field Purchase Order Item.purchase_order",
+        )
+        self.assertIsNone(
+            self.gateway(only_order).native_purchase_draft_install_problem()
+        )
+
+    def test_a_missing_field_the_draft_needs_is_refused(self):
+        for doctype, fieldname, message in (
+            (
+                "Purchase Order Item",
+                "rate",
+                "missing field Purchase Order Item.rate",
+            ),
+            (
+                "Purchase Order",
+                "currency",
+                "missing field Purchase Order.currency",
+            ),
+            ("Item", "stock_uom", "missing field Item.stock_uom"),
+            (
+                "Company",
+                "default_currency",
+                "missing field Company.default_currency",
+            ),
+        ):
+            with self.subTest(doctype=doctype, fieldname=fieldname):
+                stub = self.stub()
+                meta = stub.metas[doctype]
+                meta.fields = [
+                    field
+                    for field in meta.fields
+                    if field.fieldname != fieldname
+                ]
+                self.assertEqual(
+                    self.gateway(stub).native_purchase_draft_install_problem(),
+                    message,
+                )
+
+    def test_the_draft_create_inserts_once_without_submitting(self):
+        stub = self.stub()
+        gateway = self.gateway(stub)
+        prepared = {
+            "supplier": "SUP-1",
+            "company": "SITCO",
+            "currency": "USD",
+            "conversion_rate": 1.0,
+            "transaction_date": "2026-11-19",
+            "items": [
+                {
+                    "item_code": "ITEM-1",
+                    "qty": 5.0,
+                    "rate": 2.5,
+                    "uom": "Unit",
+                    "stock_uom": "Unit",
+                    "conversion_factor": 1.0,
+                    "schedule_date": "2026-11-19",
+                }
+            ],
+        }
+
+        name = gateway.create_native_purchase_order_draft(prepared)
+
+        self.assertEqual(name, "PO-NEW")
+        (document,) = stub.created_docs
+        self.assertTrue(document.inserted)
+        self.assertFalse(document.submitted)
+        self.assertEqual(document.docstatus, 0)
+        self.assertEqual(document.payload["doctype"], "Purchase Order")
+        self.assertNotIn("docstatus", document.payload)
+        self.assertNotIn("ignore_permissions", document.payload)
+
+    def prepared(self):
+        return {
+            "supplier": "SUP-1",
+            "company": "SITCO",
+            "currency": "USD",
+            "conversion_rate": 1.0,
+            "transaction_date": "2026-11-19",
+            "items": [
+                {
+                    "item_code": "ITEM-1",
+                    "qty": 5.0,
+                    "rate": 2.5,
+                    "uom": "Unit",
+                    "stock_uom": "Unit",
+                    "conversion_factor": 1.0,
+                    "schedule_date": "2026-11-19",
+                }
+            ],
+        }
+
+    def test_the_native_controller_fills_item_name_and_default_warehouse(self):
+        stub = self.stub()
+        gateway = self.gateway(stub)
+
+        name = gateway.create_native_purchase_order_draft(self.prepared())
+
+        self.assertEqual(name, "PO-NEW")
+        (document,) = stub.created_docs
+        self.assertTrue(document.inserted)
+        row = document.payload["items"][0]
+        self.assertEqual(row["item_name"], "Synthetic Item")
+        self.assertEqual(row["warehouse"], "WH-1")
+
+    def test_the_insert_fails_when_the_controller_has_no_default_warehouse(self):
+        stub = self.stub()
+        stub.default_warehouse = ""
+
+        with self.assertRaises(patient_write.WriteUncertain):
+            self.gateway(stub).create_native_purchase_order_draft(
+                self.prepared()
+            )
+        self.assertFalse(stub.created_docs[0].inserted)
+
+    def test_the_draft_detail_reads_masters_under_native_permission(self):
+        stub = self.stub()
+
+        detail = self.gateway(stub).native_purchase_order_draft_detail(
+            self.draft(stub)
+        )
+
+        self.assertTrue(detail["supplier_readable"])
+        self.assertTrue(detail["supplier_exists"])
+        self.assertFalse(detail["supplier_denied"])
+        entry = detail["items"]["ITEM-1"]
+        self.assertTrue(entry["readable"])
+        self.assertEqual(entry["stock_uom"], "Unit")
+
+    def test_a_denied_item_loads_no_field_and_reports_denied(self):
+        stub = self.stub()
+        stub.permissions[("Item", "read", "ITEM-1")] = False
+
+        entry = self.gateway(stub).native_purchase_order_draft_detail(
+            self.draft(stub)
+        )["items"]["ITEM-1"]
+
+        self.assertTrue(entry["denied"])
+        self.assertFalse(entry["readable"])
+        self.assertFalse(entry["exists"])
+        self.assertNotIn("stock_uom", entry)
+
+    def test_a_denied_supplier_reports_denied(self):
+        stub = self.stub()
+        stub.permissions[("Supplier", "read", "SUP-1")] = False
+
+        detail = self.gateway(stub).native_purchase_order_draft_detail(
+            self.draft(stub)
+        )
+
+        self.assertTrue(detail["supplier_denied"])
+        self.assertFalse(detail["supplier_exists"])
+
+    def order_row(self, stub, name):
+        stub.db.values[("Purchase Order", name, "name")] = name
+        stub.db.values[("Purchase Order", name, "status")] = "Draft"
+        stub.db.values[("Purchase Order", name, "docstatus")] = 0
+        stub.permissions[("Purchase Order", "read", name)] = True
+
+    def test_the_view_returns_three_fields_under_native_read(self):
+        stub = self.stub()
+        self.order_row(stub, "PO-1")
+
+        self.assertEqual(
+            self.gateway(stub).native_purchase_order_view("PO-1"),
+            {
+                "purchase_order_id": "PO-1",
+                "status": "Draft",
+                "docstatus": 0,
+            },
+        )
+
+    def test_the_view_refuses_a_denied_masked_or_restricted_status(self):
+        denied = self.stub()
+        self.order_row(denied, "PO-1")
+        denied.permissions[("Purchase Order", "read", "PO-1")] = False
+        self.assertIsNone(
+            self.gateway(denied).native_purchase_order_view("PO-1")
+        )
+
+        masked = self.stub()
+        self.order_row(masked, "PO-1")
+        masked.metas["Purchase Order"].masked = ["status"]
+        self.assertIsNone(
+            self.gateway(masked).native_purchase_order_view("PO-1")
+        )
+
+        restricted = self.stub()
+        self.order_row(restricted, "PO-1")
+        restricted.metas["Purchase Order"].accessible = []
+        self.assertIsNone(
+            self.gateway(restricted).native_purchase_order_view("PO-1")
+        )
+
+    def test_drafts_are_bounded_and_permission_filtered(self):
+        stub = self.stub()
+        stub.get_list_rows = [{"name": "PO-1"}, {"name": "PO-2"}]
+
+        names = self.gateway(stub).native_purchase_order_drafts("SUP-1", 2)
+
+        self.assertEqual(names, ["PO-1", "PO-2"])
+        doctype, fields, order_by, limit, kwargs = stub.get_list_calls[0]
+        self.assertEqual(doctype, "Purchase Order")
+        self.assertEqual(fields, ["name"])
+        self.assertEqual(limit, 3)
+        self.assertEqual(kwargs.get("filters"), {
+            "supplier": "SUP-1",
+            "docstatus": 0,
+        })
+
+    def test_an_over_full_or_unreadable_discovery_page_is_refused(self):
+        over_full = self.stub()
+        over_full.get_list_rows = [{"name": "PO-1"}, {"name": "PO-2"}]
+        self.assertIsNone(
+            self.gateway(over_full).native_purchase_order_drafts("SUP-1", 1)
+        )
+
+        masked = self.stub()
+        masked.metas["Purchase Order"].masked = ["supplier"]
+        self.assertIsNone(
+            self.gateway(masked).native_purchase_order_drafts("SUP-1", 2)
+        )
+
+        for limit in (0, -1, 1001, True, "2"):
+            with self.subTest(limit=limit):
+                stub = self.stub()
+                self.assertIsNone(
+                    self.gateway(stub).native_purchase_order_drafts(
+                        "SUP-1", limit
                     )
                 )
                 self.assertEqual(stub.get_list_calls, [])

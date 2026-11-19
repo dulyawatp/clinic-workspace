@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  draftPurchaseOrder,
   purchaseWriteLocked,
   receivePurchaseOrder,
   submitPurchaseOrder,
@@ -38,28 +37,6 @@ describe("native purchase writes", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.restoreAllMocks();
-  });
-
-  it("drafts one purchase order and acknowledges once", async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        json({ status: "drafted", purchase_order: "PO-1", ackToken: TOKEN }),
-      )
-      .mockResolvedValueOnce(acknowledged());
-
-    await expect(
-      draftPurchaseOrder({
-        operation_key: OPERATION,
-        supplier: "SUP-1",
-        items: [{ item_code: "ITEM-1", qty: 5, rate: 2.5 }],
-      }),
-    ).resolves.toEqual({ status: "drafted", purchase_order: "PO-1" });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
-      "clinic_ui.api.purchase_write.save_po_draft",
-    );
-    expect(purchaseWriteLocked("purchase_order_draft")).toBe(false);
   });
 
   it("submits an existing draft without any submit flag in the body", async () => {

@@ -233,16 +233,20 @@ def _stock_write_flags(gateway, settings, role):
 
 
 def _purchase_write_flags(gateway, settings, role):
-    """Return ``(draft, submit, receipt)`` when purchasing is open.
+    """Return ``(draft, submit, receipt)`` for the purchasing surfaces.
 
-    Independent of the stock and clinical flags: exact approved site, boundary
-    and installed-field preflight, the purchasing flag, the deployment marker, a
-    ready fence store and the caller's own native authority on the document it
-    would create, submit or receive. Masters, the purchase-order target and the
-    quantities are decided per request; these flags only advertise that the
-    surface exists.
+    The converted draft lane is advertised by the exact approved site, the
+    purchasing flag, the draft-specific installed-field preflight and the
+    caller's own native Purchase Order create permission; it no longer reads the
+    deployment marker or the fence store. Submit and the PO-referenced receipt
+    stay on the historical fence: they are advertised only while the strict
+    fenced-family preflight, the deployment marker and a ready fence store all
+    hold (no latch, no unresolved key or barrier), so an unresolved ledger keeps
+    both surfaces disabled.
 
-    The PO-referenced receipt is part of the purchase family, so its session
+    Masters, the purchase-order target and the quantities are decided per
+    request; these flags only advertise that the surface exists. The
+    PO-referenced receipt is part of the purchase family, so its session
     authorization uses the purchase role set rather than the inventory one; its
     capability id stays ``write.stock.receive`` because there is one receipt
     write.
@@ -254,20 +258,21 @@ def _purchase_write_flags(gateway, settings, role):
     try:
         if gateway.native_purchase_boundary_problem() is not None:
             return disabled
-        if gateway.native_purchase_install_problem() is not None:
-            return disabled
         if not settings.purchase_write_enabled:
             return disabled
-        if gateway.write_deployment_approved() is not True:
-            return disabled
-        if gateway.write_fence_ready() is not True:
-            return disabled
         draft_ok = (
-            gateway.native_purchase_can_create("Purchase Order") is True
+            gateway.native_purchase_draft_install_problem() is None
+            and gateway.native_purchase_can_create("Purchase Order") is True
         )
-        submit_ok = draft_ok
+        fenced_ok = (
+            gateway.native_purchase_install_problem() is None
+            and gateway.write_deployment_approved() is True
+            and gateway.write_fence_ready() is True
+        )
+        submit_ok = draft_ok and fenced_ok
         receipt_ok = (
-            gateway.native_purchase_can_create("Purchase Receipt") is True
+            fenced_ok
+            and gateway.native_purchase_can_create("Purchase Receipt") is True
         )
         return draft_ok, submit_ok, receipt_ok
     except Exception:

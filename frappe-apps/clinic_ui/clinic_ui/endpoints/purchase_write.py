@@ -1,7 +1,24 @@
 """Designed purchasing (PO draft/submit + PO-referenced receipt) writes.
 
-Order is fixed and test-asserted for all three operations, exactly like the
-stock family:
+The family now spans two lanes:
+
+- the **converted draft lane** (``save_po_draft``) relies on Frappe/Marley
+  document permissions, controller validation and native transactions instead
+  of the historical operation fence, write budget, deployment marker and
+  acknowledgement barrier. It inserts one draft purchase order, never submits
+  it, posts no stock or ledger row, and reads the committed row back under the
+  current user's own native read authority. The installed controller resolves
+  the line-facing values the client never sends (``item_name`` and the default
+  warehouse) during its own insert lifecycle. ``view`` and ``drafts`` are its
+  bounded, permission-aware read/discovery surface for an unknown outcome;
+- the **fenced submit/receipt lane** is unchanged and stays closed: submit and
+  the PO-referenced receipt still need the pinned boundary, the deployment
+  marker, a ready fence store, the durable budget, the shared fence and the
+  one-shot acknowledgement. An unresolved ledger entry keeps both surfaces
+  disabled and blocks every fenced operation on the site.
+
+Fenced order is fixed and test-asserted for both remaining operations, exactly
+like the stock family:
 
 1. shared read gate plus the explicit same-session CSRF and purchasing-write
    deployment gates, then the pinned boundary and installed-field preflight;
@@ -42,7 +59,8 @@ returning a normal error.
 
 from clinic_ui.core import patient_write, purchase_contract
 from clinic_ui.core.policy import PO_ROLE_CODES
-from clinic_ui.endpoints import common
+from clinic_ui.core.text import is_valid_text
+from clinic_ui.endpoints import aliases, common
 
 HTTP_OK = 200
 HTTP_REFUSED = purchase_contract.HTTP_REFUSED
@@ -52,10 +70,16 @@ HTTP_CONFLICT = 409
 VALIDATION_CODE = "VALIDATION"
 LOCKED_CODE = "WRITE_LOCKED"
 CONFLICT_CODE = "OPERATION_CONFLICT"
+UNCERTAIN_CODE = "WRITE_UNCERTAIN"
 
+CREATED_RESULT = "created"
 DRAFTED_RESULT = "drafted"
 SUBMITTED_RESULT = "submitted"
 RECEIVED_RESULT = "received"
+
+# Discovery is bounded, and a page over the bound refuses rather than truncates.
+MAX_NATIVE_PURCHASE_ORDERS = 50
+MAX_PURCHASE_STATUS_LENGTH = 64
 
 
 class SuccessUncertain(Exception):
@@ -156,8 +180,31 @@ def _shared_gate(gateway, csrf_token, allowed_codes):
     return settings, view, role
 
 
+def _draft_gate(gateway, csrf_token):
+    """Converted draft gate: session, CSRF, exact site, flag, role, preflight.
+
+    No operation fence, write budget, receipt, acknowledgement or deployment
+    marker is read. The pinned boundary stays, and the installed-field preflight
+    is the draft-specific one: the draft is inserted through the installed
+    Purchase Order controller and reads only the header, line, Item and Company
+    currency fields it actually uses. The fenced submit/receipt preflight is
+    untouched and remains strict. The native create permission and every
+    Supplier/Item read are checked per request.
+    """
+
+    settings, view, role = common.authorize_purchase_draft_write(
+        gateway, PO_ROLE_CODES, csrf_token
+    )
+    if role not in PO_ROLE_CODES:
+        gateway.deny()
+    if gateway.native_purchase_boundary_problem() is not None:
+        gateway.deny()
+    if gateway.native_purchase_draft_install_problem() is not None:
+        gateway.deny()
+    return settings, view, role
+
+
 DOCUMENTS = {
-    purchase_contract.DRAFT_KIND: purchase_contract.PURCHASE_ORDER_DOCTYPE,
     purchase_contract.SUBMIT_KIND: purchase_contract.PURCHASE_ORDER_DOCTYPE,
     purchase_contract.RECEIPT_KIND: purchase_contract.PURCHASE_RECEIPT_DOCTYPE,
 }
@@ -352,6 +399,69 @@ def _success(gateway, payload, reference, ack_token):
         raise SuccessUncertain() from exc
 
 
+def _draft_success(gateway, native_purchase_order_id):
+    """Read the committed draft back under the caller's native read authority.
+
+    Only the native docname, the native status and ``docstatus`` are returned.
+    A read-back that is missing, masked, names another document or shows a
+    submitted row is an uncertain outcome, never a claimed success.
+    """
+
+    try:
+        detail = gateway.native_purchase_order_view(native_purchase_order_id)
+        if not isinstance(detail, dict):
+            raise ValueError("native detail is missing after commit")
+        if detail.get("purchase_order_id") != native_purchase_order_id:
+            raise ValueError("native detail names another document")
+        status = detail.get("status")
+        if (
+            not isinstance(status, str)
+            or not is_valid_text(status, MAX_PURCHASE_STATUS_LENGTH)
+            or status != status.strip()
+        ):
+            raise ValueError("native status is unreadable after commit")
+        if detail.get("docstatus") != purchase_contract.DRAFT_DOCSTATUS:
+            raise ValueError("native draft is not unsubmitted after commit")
+        body = {
+            "status": CREATED_RESULT,
+            "purchase_order": {
+                "purchase_order_id": native_purchase_order_id,
+                "status": status,
+                "docstatus": purchase_contract.DRAFT_DOCSTATUS,
+            },
+        }
+    except Exception:
+        # The native insert already committed; its outcome is not established.
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
+
+    gateway.strip_message_channels()
+    return gateway.respond_write(HTTP_OK, body)
+
+
+def _deny_unreadable_masters(gateway, detail, payload):
+    """Refuse a master the caller's own native read permission does not cover.
+
+    The gateway reports ``supplier_denied``/``denied`` only for a document that
+    exists but is not readable, and loads no field in that case. The refusal is
+    a permission denial (403), never a validation message that would disclose
+    batch, stock or price state.
+    """
+
+    if not isinstance(detail, dict):
+        gateway.deny()
+    if detail.get("supplier_denied") is True:
+        gateway.deny()
+    items = detail.get("items")
+    if not isinstance(items, dict):
+        gateway.deny()
+    for line in payload["items"]:
+        entry = items.get(line["item_code"])
+        if not isinstance(entry, dict):
+            gateway.deny()
+        if entry.get("denied") is True:
+            gateway.deny()
+
+
 def _perform(
     gateway,
     body,
@@ -518,28 +628,76 @@ def _perform(
 
 
 def save_po_draft(gateway, body, csrf_token=None):
-    """Insert one draft purchase order (never submits it)."""
+    """Insert one draft purchase order and read its native state back.
 
-    return _perform(
-        gateway,
-        body,
-        csrf_token,
-        kind=purchase_contract.DRAFT_KIND,
-        allowed_codes=PO_ROLE_CODES,
-        validate=purchase_contract.validate_draft,
-        read_detail=lambda gw, payload: gw.native_purchase_order_draft_detail(
-            payload
-        ),
-        problems=purchase_contract.draft_problems,
-        expected=purchase_contract.expected_draft,
-        prepare=_prepare_draft,
-        mutate=lambda gw, prepared: gw.create_native_purchase_order_draft(
-            prepared
-        ),
-        read_facts=lambda gw, reference, exp, baseline: (
-            gw.native_purchase_order_facts(reference, exp, baseline)
-        ),
+    Converted lane: no operation fence, write budget, receipt, acknowledgement
+    token or deployment marker. The insert never submits; the closed-world
+    re-read proves the draft posted no Stock Ledger or GL row and the final
+    permission-aware read-back proves ``docstatus`` is still 0.
+    """
+
+    _settings, _view, role = _draft_gate(gateway, csrf_token)
+    if role not in PO_ROLE_CODES:
+        gateway.deny()
+    try:
+        payload = purchase_contract.validate_draft(body)
+    except purchase_contract.PurchaseContractError:
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    if gateway.native_purchase_can_create(
+        purchase_contract.PURCHASE_ORDER_DOCTYPE
+    ) is not True:
+        gateway.deny()
+
+    try:
+        detail = gateway.native_purchase_order_draft_detail(payload)
+    except Exception:
+        # Nothing has been dispatched yet; an unreadable target is a refusal.
+        gateway.deny()
+    _deny_unreadable_masters(gateway, detail, payload)
+
+    prepared = _prepare_draft(detail, payload)
+    refused = _refusal(
+        gateway, purchase_contract.draft_problems(detail, payload)
     )
+    if refused is not None:
+        return refused
+    if purchase_contract.prepared_problem(
+        purchase_contract.DRAFT_KIND, prepared
+    ) is not None:
+        return _respond_error(gateway, HTTP_REFUSED, VALIDATION_CODE)
+
+    expected_effects = purchase_contract.expected_draft(detail, payload)
+    try:
+        baseline = gateway.native_purchase_baseline(
+            purchase_contract.DRAFT_KIND,
+            _baseline_warehouses(payload),
+            _baseline_item(payload),
+            payload.get("purchase_order"),
+        )
+    except Exception:
+        # Still before any mutation: without a baseline the "no stock effect"
+        # claim is unverifiable, so nothing is dispatched.
+        gateway.deny()
+
+    try:
+        reference = gateway.create_native_purchase_order_draft(prepared)
+        facts = gateway.native_purchase_order_facts(
+            reference, expected_effects, baseline
+        )
+        if (
+            purchase_contract.side_effect_problem(facts, expected_effects)
+            is not None
+        ):
+            raise patient_write.WriteUncertain()
+        gateway.commit()
+    except Exception:
+        # The insert may have reached the installed controller; never claim
+        # that nothing changed.
+        _rollback_or_raise(gateway)
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
+
+    return _draft_success(gateway, reference)
 
 
 def submit_po(gateway, body, csrf_token=None):
@@ -614,3 +772,132 @@ def acknowledge(gateway, body, csrf_token=None):
     if status != "acked":
         return _respond_error(gateway, HTTP_CONFLICT, CONFLICT_CODE)
     return gateway.respond_write(HTTP_OK, {"acknowledged": True})
+
+
+# -- read surface ----------------------------------------------------------
+#
+# Converted-workflow inspection only. Nothing here resolves write authority,
+# reads a supplier/item/quantity/amount value or dispatches a native mutation.
+# The read lane is independent of the purchasing write flag: turning writes off
+# must not hide a purchase order that already exists.
+
+
+def _strict_text(value, max_length):
+    """Bounded, control-free text without surrounding whitespace, else ``None``."""
+
+    if not is_valid_text(value, max_length) or value != value.strip():
+        return None
+    return value
+
+
+def _read_gate(gateway):
+    """Authenticated/no-store gate for the purchase-order read surface.
+
+    It requires the authenticated session, a purchasing clinic role and the
+    exact approved development site. Every record read afterwards still needs
+    the current user's own native Purchase Order read permission.
+    """
+
+    settings, view, _role = common.authorize(gateway, PO_ROLE_CODES)
+    if aliases.native_read_scope_enabled(gateway) is not True:
+        gateway.deny()
+    return settings, view
+
+
+def _purchase_order_item(gateway, native_purchase_order_id):
+    """Return the three-field item for one readable order, or ``None``."""
+
+    try:
+        detail = gateway.native_purchase_order_view(native_purchase_order_id)
+    except Exception:
+        return None
+    if not isinstance(detail, dict):
+        return None
+    purchase_order_id = detail.get("purchase_order_id")
+    status = detail.get("status")
+    docstatus = detail.get("docstatus")
+    if purchase_order_id is None or status is None:
+        return None
+    if (
+        _strict_text(purchase_order_id, purchase_contract.MAX_NAME_LENGTH)
+        is None
+    ):
+        return None
+    if purchase_order_id != native_purchase_order_id:
+        return None
+    if _strict_text(status, MAX_PURCHASE_STATUS_LENGTH) is None:
+        return None
+    if (
+        not isinstance(docstatus, int)
+        or isinstance(docstatus, bool)
+        or docstatus not in (0, 1, 2)
+    ):
+        return None
+    return {
+        "purchase_order_id": purchase_order_id,
+        "status": status,
+        "docstatus": docstatus,
+    }
+
+
+def view(gateway, purchase_order_id=None):
+    """Return one readable purchase order's native id, status and docstatus.
+
+    The caller supplies a native docname; only the identifier it supplied is
+    echoed back. No supplier, item, quantity or amount is returned. A
+    malformed, unknown or unreadable value is a 403.
+    """
+
+    _read_gate(gateway)
+    if (
+        _strict_text(purchase_order_id, purchase_contract.MAX_NAME_LENGTH)
+        is None
+    ):
+        gateway.deny()
+    item = _purchase_order_item(gateway, purchase_order_id)
+    if item is None:
+        gateway.deny()
+    return {"purchase_order": item}
+
+
+def drafts(gateway, supplier=None):
+    """Return the readable draft purchase orders for one Supplier.
+
+    Discovery is bounded and permission-filtered: the caller's own native
+    Supplier read authority is required before the query, the list is read
+    through the framework's permission-filtered ``get_list``, each row is
+    re-checked under the caller's own native Purchase Order read authority, and
+    an over-full, malformed or duplicated page refuses the whole read rather
+    than returning a partial list. This is enough to inspect an unknown draft
+    outcome without a fence receipt.
+    """
+
+    _read_gate(gateway)
+    if _strict_text(supplier, purchase_contract.MAX_TEXT_LENGTH) is None:
+        gateway.deny()
+    if gateway.native_doctype_can_read(
+        purchase_contract.SUPPLIER_DOCTYPE, supplier
+    ) is not True:
+        gateway.deny()
+    try:
+        names = gateway.native_purchase_order_drafts(
+            supplier, MAX_NATIVE_PURCHASE_ORDERS
+        )
+    except Exception:
+        gateway.deny()
+    if not isinstance(names, (list, tuple)):
+        gateway.deny()
+
+    items = []
+    seen = set()
+    for name in names:
+        if _strict_text(name, purchase_contract.MAX_NAME_LENGTH) is None:
+            gateway.deny()
+        if name in seen:
+            gateway.deny()
+        seen.add(name)
+        item = _purchase_order_item(gateway, name)
+        if item is None:
+            gateway.deny()
+        items.append(item)
+    return {"items": items}

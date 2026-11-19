@@ -210,6 +210,45 @@ INSTALLED_CANDIDATES = {
     },
 }
 
+# The converted draft lane installs and reads only this subset. It never
+# submits, never touches a receipt or batch and never reads the purchase-order
+# line back for received quantities, so it must not be blocked by the receipt
+# family or by fields ERPNext only places on other doctypes. Verified against
+# the installed 16.52.1 shape: ``Purchase Order Item`` has no
+# ``purchase_order`` and no ``received_qty`` column (those live on
+# ``Purchase Receipt Item`` and on the order header respectively), while the
+# installed metadata does carry the Table field ``Purchase Order.items``.
+DRAFT_INSTALLED_CANDIDATES = {
+    PURCHASE_ORDER_DOCTYPE: {
+        "supplier": ("supplier",),
+        "company": ("company",),
+        "currency": ("currency",),
+        "conversion_rate": ("conversion_rate",),
+        "transaction_date": ("transaction_date",),
+        "items": ("items",),
+        "status": ("status",),
+    },
+    PURCHASE_ORDER_ITEM_DOCTYPE: {
+        "item_code": ("item_code",),
+        "qty": ("qty",),
+        "rate": ("rate",),
+        "uom": ("uom",),
+        "stock_uom": ("stock_uom",),
+        "conversion_factor": ("conversion_factor",),
+        "schedule_date": ("schedule_date",),
+    },
+    ITEM_DOCTYPE: {
+        "item_code": ("item_code",),
+        "has_batch_no": ("has_batch_no",),
+        "has_expiry_date": ("has_expiry_date",),
+        "is_stock_item": ("is_stock_item",),
+        "stock_uom": ("stock_uom",),
+    },
+    "Company": {
+        "default_currency": ("default_currency",),
+    },
+}
+
 OPERATION_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 RESERVED_OPERATION_KEY_PREFIXES = (
     "clinic-ui-",
@@ -295,20 +334,42 @@ def budget(kind):
     return write_budgets.budget_for(require_kind(kind))
 
 
-def install_problem(meta_fields):
-    """Return the first missing installed field, or ``None`` when complete."""
-
+def _installed_problem(meta_fields, candidates):
     if not isinstance(meta_fields, dict):
         return "installed metadata unreadable"
-    for doctype, fields in INSTALLED_CANDIDATES.items():
+    for doctype, fields in candidates.items():
         installed = meta_fields.get(doctype)
         if not isinstance(installed, (set, frozenset, tuple, list)):
             return f"missing DocType {doctype}"
         installed = set(installed)
-        for logical, candidates in fields.items():
-            if not any(candidate in installed for candidate in candidates):
+        for logical, candidates_for_field in fields.items():
+            if not any(
+                candidate in installed for candidate in candidates_for_field
+            ):
                 return f"missing field {doctype}.{logical}"
     return None
+
+
+def install_problem(meta_fields):
+    """Return the first missing fenced-family field, or ``None`` when complete.
+
+    This is the submit/receipt preflight and stays strict: it keeps every
+    receipt, batch, Bin and purchase-order-line field the fenced lane drives.
+    """
+
+    return _installed_problem(meta_fields, INSTALLED_CANDIDATES)
+
+
+def draft_install_problem(meta_fields):
+    """Return the first missing field the converted draft lane needs, or ``None``.
+
+    Only the draft subset is required: the Purchase Order header, the itemized
+    line, the Item master fields the preflight reads and the Company currency.
+    A receipt-only field that a healthy ERPNext install does not place on
+    ``Purchase Order Item`` must not disable the draft.
+    """
+
+    return _installed_problem(meta_fields, DRAFT_INSTALLED_CANDIDATES)
 
 
 def resolve_field(meta_fields, doctype, logical, candidates=None):

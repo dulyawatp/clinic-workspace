@@ -37,6 +37,7 @@ CONVERTED = {
     "write.procedure.complete",
     "write.procedure.create",
     "write.stock.consume",
+    "write.purchase_order.draft",
 }
 
 PROCEDURE = {
@@ -44,6 +45,11 @@ PROCEDURE = {
     "write.procedure.create",
     "write.stock.consume",
 }
+
+# The purchase lane converted only its draft. Submit and the PO-referenced
+# receipt stay on the historical fence: an unresolved ledger keeps them off.
+PURCHASE = {"write.purchase_order.draft"}
+FENCED = {"write.purchase_order.submit", "write.stock.receive"}
 
 # The procedure lane completes and creates without consuming stock. Stock
 # consumption keeps its own review and stays read_only even when the procedure
@@ -77,20 +83,33 @@ def _gates(**opened):
 
 
 def _capabilities(gates, role="DOC"):
-    """Model the site bootstrap: expected writes minus the non-consuming lane."""
+    """Model the site bootstrap: expected writes minus the never-ready set.
+
+    The fence-gated purchase writes are modelled as disabled, which is the
+    state an unresolved ledger produces.
+    """
 
     capabilities = {name: "read_only" for name in strict.WRITE_CAPABILITY_GATES}
-    expected = strict.expected_enabled_writes(gates, role) - development.NEVER_ENABLED
+    expected = (
+        strict.expected_enabled_writes(gates, role)
+        - development.NEVER_ENABLED
+        - development.FENCED_WRITES
+    )
     for name in expected:
         capabilities[name] = "enabled"
     return capabilities
 
 
 class LaneTests(unittest.TestCase):
-    def test_converted_set_is_the_patient_appointment_and_procedure_lanes(self):
+    def test_converted_set_is_the_patient_appointment_procedure_and_purchase_lanes(self):
         self.assertEqual(set(development.CONVERTED), CONVERTED)
         self.assertFalse(CONVERTED & strict.DEFERRED_WRITE_CAPABILITIES)
-        self.assertEqual(development.CONVERTED_FAMILIES, ("patient", "appointment", "procedure"))
+        self.assertEqual(
+            development.CONVERTED_FAMILIES,
+            ("patient", "appointment", "procedure", "purchase"),
+        )
+        self.assertEqual(set(development.FENCED_WRITES), FENCED)
+        self.assertFalse(CONVERTED & FENCED)
 
     def test_procedure_family_classification_does_not_open_stock_consume(self):
         # The strict verifier still classifies write.stock.consume under the
@@ -249,7 +268,9 @@ class LaneTests(unittest.TestCase):
         capabilities = _capabilities(gates)
         report = development.lane_report(capabilities, gates)
 
-        self.assertEqual(tuple(report), ("patient", "appointment", "procedure"))
+        self.assertEqual(
+            tuple(report), ("patient", "appointment", "procedure", "purchase")
+        )
         for name in PROCEDURE:
             self.assertEqual(
                 report["procedure"][name], {"expected": False, "observed": "read_only"}
@@ -268,6 +289,177 @@ class LaneTests(unittest.TestCase):
             report["procedure"]["write.stock.consume"],
             {"expected": False, "observed": "read_only"},
         )
+
+
+class PurchaseLaneTests(unittest.TestCase):
+    def test_draft_is_the_only_converted_purchase_write(self):
+        purchase = {
+            name
+            for name, (family, _roles) in strict.WRITE_CAPABILITY_GATES.items()
+            if family == "purchase"
+        }
+
+        self.assertEqual(purchase & set(development.CONVERTED), PURCHASE)
+        self.assertEqual(
+            purchase - set(development.CONVERTED), {"write.purchase_order.submit"}
+        )
+        self.assertTrue(FENCED <= set(strict.WRITE_CAPABILITY_GATES))
+
+    def test_mgr_draft_enabled_when_the_purchase_gate_is_on(self):
+        gates = _gates(patient=1, appointment=1, procedure=1, purchase=1)
+        capabilities = _capabilities(gates, role="MGR")
+
+        self.assertEqual(capabilities["write.purchase_order.draft"], "enabled")
+        self.assertEqual(capabilities["write.purchase_order.submit"], "read_only")
+        self.assertEqual(capabilities["write.stock.receive"], "read_only")
+        self.assertEqual(capabilities["write.stock.consume"], "read_only")
+        self.assertEqual(
+            development.lane_problems(capabilities, gates, role="MGR"), []
+        )
+
+    def test_mgr_draft_must_stay_disabled_when_the_purchase_gate_is_off(self):
+        gates = _gates(patient=1, appointment=1, procedure=1)
+        capabilities = _capabilities(gates, role="MGR")
+
+        self.assertEqual(capabilities["write.purchase_order.draft"], "read_only")
+        self.assertEqual(
+            development.lane_problems(capabilities, gates, role="MGR"), []
+        )
+
+    def test_mgr_draft_enabled_while_the_purchase_gate_is_off_is_reported(self):
+        gates = _gates(patient=1, appointment=1, procedure=1)
+        capabilities = dict(
+            _capabilities(gates, role="MGR"),
+            **{"write.purchase_order.draft": "enabled"},
+        )
+        problems = development.lane_problems(capabilities, gates, role="MGR")
+
+        self.assertTrue(
+            any(
+                "enabled while closed" in p and "write.purchase_order.draft" in p
+                for p in problems
+            ),
+            problems,
+        )
+
+    def test_mgr_does_not_inherit_the_patient_or_appointment_lanes(self):
+        # MGR is not admitted by the patient or appointment policy sets; a
+        # closed-family complaint here would be a false claim about this role.
+        gates = _gates(purchase=1)
+        capabilities = _capabilities(gates, role="MGR")
+        problems = development.lane_problems(capabilities, gates, role="MGR")
+
+        self.assertFalse(
+            any("do not open converted lanes" in p for p in problems), problems
+        )
+
+    def test_doc_bootstrap_does_not_expect_the_purchase_draft(self):
+        gates = _gates(patient=1, appointment=1, procedure=1, purchase=1)
+        capabilities = _capabilities(gates)
+
+        self.assertEqual(capabilities["write.purchase_order.draft"], "read_only")
+        self.assertEqual(development.lane_problems(capabilities, gates), [])
+
+    def test_doc_purchase_draft_enabled_is_reported(self):
+        gates = _gates(patient=1, appointment=1, procedure=1, purchase=1)
+        capabilities = dict(
+            _capabilities(gates), **{"write.purchase_order.draft": "enabled"}
+        )
+        problems = development.lane_problems(capabilities, gates)
+
+        self.assertTrue(
+            any(
+                "enabled while closed" in p and "write.purchase_order.draft" in p
+                for p in problems
+            ),
+            problems,
+        )
+
+    def test_mgr_lane_report_covers_the_purchase_family(self):
+        gates = _gates(patient=1, appointment=1, procedure=1, purchase=1)
+        report = development.lane_report(_capabilities(gates, role="MGR"), gates, role="MGR")
+
+        self.assertIn("purchase", report)
+        self.assertEqual(
+            report["purchase"]["write.purchase_order.draft"],
+            {"expected": True, "observed": "enabled"},
+        )
+        self.assertEqual(
+            report["purchase"]["write.purchase_order.submit"],
+            {"expected": False, "observed": "read_only"},
+        )
+
+
+class FencedWriteTests(unittest.TestCase):
+    def test_unresolved_ledger_keeps_submit_and_receipt_disabled(self):
+        gates = _gates(patient=1, appointment=1, procedure=1, purchase=1)
+        capabilities = _capabilities(gates, role="MGR")
+
+        self.assertEqual(development.fenced_write_problems(capabilities, 2), [])
+
+    def test_enabled_submit_with_an_unresolved_ledger_is_reported(self):
+        gates = _gates(purchase=1)
+        capabilities = dict(
+            _capabilities(gates, role="MGR"),
+            **{"write.purchase_order.submit": "enabled"},
+        )
+        problems = development.fenced_write_problems(capabilities, 2)
+
+        self.assertTrue(
+            any("write.purchase_order.submit" in p for p in problems), problems
+        )
+
+    def test_enabled_receipt_with_an_unresolved_ledger_is_reported(self):
+        gates = _gates(purchase=1)
+        capabilities = dict(
+            _capabilities(gates, role="MGR"),
+            **{"write.stock.receive": "enabled"},
+        )
+        problems = development.fenced_write_problems(capabilities, 2)
+
+        self.assertTrue(
+            any("write.stock.receive" in p for p in problems), problems
+        )
+
+    def test_resolved_ledger_makes_no_readiness_claim(self):
+        gates = _gates(purchase=1)
+        capabilities = dict(
+            _capabilities(gates, role="MGR"),
+            **{
+                "write.purchase_order.submit": "enabled",
+                "write.stock.receive": "enabled",
+            },
+        )
+
+        self.assertEqual(development.fenced_write_problems(capabilities, 0), [])
+
+    def test_unreadable_unresolved_count_is_reported(self):
+        self.assertEqual(
+            development.fenced_write_problems({}, None),
+            ["historical fence unresolved count unreadable"],
+        )
+
+
+class CredentialTests(unittest.TestCase):
+    def test_absent_mgr_credential_reports_inability(self):
+        credentials = {
+            "users": [
+                {"clinic_code": "DOC", "email": "doc@example.invalid", "password": "x"},
+                {"clinic_code": "MGR", "email": "mgr@example.invalid"},
+            ]
+        }
+
+        self.assertIsNone(development.credential_for(credentials, "MGR"))
+
+    def test_complete_mgr_credential_is_returned(self):
+        mgr = {
+            "clinic_code": "MGR",
+            "email": "mgr@example.invalid",
+            "password": "x",
+        }
+        credentials = {"users": [{"clinic_code": "DOC"}, mgr]}
+
+        self.assertIs(development.credential_for(credentials, "MGR"), mgr)
 
 
 class FenceTests(unittest.TestCase):

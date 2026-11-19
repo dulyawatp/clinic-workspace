@@ -36,18 +36,6 @@ export class NativePurchaseWriteError extends Error {
   }
 }
 
-export interface PurchaseOrderLineInput {
-  item_code: string;
-  qty: number;
-  rate: number;
-}
-
-export interface DraftPurchaseOrderInput {
-  operation_key: string;
-  supplier: string;
-  items: PurchaseOrderLineInput[];
-}
-
 export interface SubmitPurchaseOrderInput {
   operation_key: string;
   purchase_order: string;
@@ -318,20 +306,6 @@ async function submit(
 
   clearLock(kind);
   return parsed.result;
-}
-
-export async function draftPurchaseOrder(
-  input: DraftPurchaseOrderInput,
-): Promise<PurchaseWriteResult> {
-  return submit("purchase_order_draft", {
-    operation_key: input.operation_key,
-    supplier: input.supplier,
-    items: input.items.map((line) => ({
-      item_code: line.item_code,
-      qty: line.qty,
-      rate: line.rate,
-    })),
-  });
 }
 
 export async function submitPurchaseOrder(

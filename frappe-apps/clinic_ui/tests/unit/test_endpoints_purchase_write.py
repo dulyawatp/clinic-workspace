@@ -58,6 +58,8 @@ def item(**overrides):
         "has_expiry_date": True,
         "is_stock_item": True,
         "stock_uom": "Unit",
+        "readable": True,
+        "denied": False,
     }
     values.update(overrides)
     return values
@@ -69,6 +71,8 @@ def draft_detail(**overrides):
         "company": "SIT Synthetic Company USD",
         "currency": "USD",
         "supplier_exists": True,
+        "supplier_readable": True,
+        "supplier_denied": False,
         "items": {"ITEM-1": item()},
     }
     values.update(overrides)
@@ -213,19 +217,29 @@ def committed(fake, kind="purchase_receipt", key=KEY):
 
 
 class DraftTests(unittest.TestCase):
-    def test_a_draft_is_inserted_without_submitting(self):
+    def test_a_draft_is_inserted_and_read_back_without_a_fence(self):
         fake = gateway()
 
         payload = purchase_write.save_po_draft(fake, draft_body(), CSRF)
 
-        self.assertEqual(payload["status"], "drafted")
-        self.assertEqual(payload["purchase_order"], "PO-DRAFT-1")
-        self.assertRegex(payload["ackToken"], r"^[0-9a-f]{64}$")
-        self.assertEqual(fake.purchase_fence_calls[0][1], "purchase_order_draft")
+        self.assertEqual(
+            payload,
+            {
+                "status": "created",
+                "purchase_order": {
+                    "purchase_order_id": "PO-DRAFT-1",
+                    "status": "Draft",
+                    "docstatus": 0,
+                },
+            },
+        )
+        self.assertEqual(fake.purchase_fence_calls, [])
+        self.assertEqual(fake.purchase_receipt_list_calls, [])
         self.assertEqual(len(fake.purchase_draft_calls), 1)
         self.assertEqual(fake.purchase_submit_order_calls, [])
         self.assertEqual(fake.commit_calls, 1)
         self.assertEqual(fake.purchase_ack_calls, [])
+        self.assertEqual(fake.purchase_order_view_calls, ["PO-DRAFT-1"])
 
     def test_the_prepared_draft_carries_server_money_and_units(self):
         fake = gateway()
@@ -244,7 +258,7 @@ class DraftTests(unittest.TestCase):
         self.assertEqual(line["rate"], 2.5)
         self.assertEqual(line["schedule_date"], "2026-11-16")
 
-    def test_the_baseline_is_read_before_the_fence(self):
+    def test_the_baseline_and_facts_prove_no_stock_effect(self):
         fake = gateway()
 
         purchase_write.save_po_draft(fake, draft_body(), CSRF)
@@ -255,9 +269,13 @@ class DraftTests(unittest.TestCase):
         self.assertEqual(tuple(warehouses), ())
         self.assertEqual(item_code, "ITEM-1")
         self.assertIsNone(order)
-        self.assertEqual(fake.purchase_facts_calls[0][2], fake.purchase_baseline_value)
+        reference, expected, baseline = fake.purchase_facts_calls[0]
+        self.assertEqual(reference, "PO-DRAFT-1")
+        self.assertEqual(expected["sle_rows"], 0)
+        self.assertEqual(expected["gl_rows_max"], 0)
+        self.assertEqual(baseline, fake.purchase_baseline_value)
 
-    def test_an_unknown_supplier_is_refused_before_the_fence(self):
+    def test_an_unknown_supplier_is_refused_before_any_mutation(self):
         fake = gateway()
         fake.purchase_draft_detail = draft_detail(supplier_exists=False)
 
@@ -265,10 +283,9 @@ class DraftTests(unittest.TestCase):
 
         self.assertEqual(payload, {"code": "VALIDATION"})
         self.assertEqual(fake.write_responses[-1][0], 417)
-        self.assertEqual(fake.purchase_fence_calls, [])
         self.assertEqual(fake.purchase_draft_calls, [])
 
-    def test_an_item_without_a_unit_is_refused_before_the_fence(self):
+    def test_an_item_without_a_unit_is_refused_before_any_mutation(self):
         fake = gateway()
         fake.purchase_draft_detail = draft_detail(
             items={"ITEM-1": item(stock_uom="")}
@@ -277,7 +294,37 @@ class DraftTests(unittest.TestCase):
         payload = purchase_write.save_po_draft(fake, draft_body(), CSRF)
 
         self.assertEqual(payload, {"code": "VALIDATION"})
-        self.assertEqual(fake.purchase_fence_calls, [])
+        self.assertEqual(fake.purchase_draft_calls, [])
+
+    def test_an_unreadable_supplier_is_a_permission_refusal(self):
+        fake = gateway()
+        fake.purchase_draft_detail = draft_detail(
+            supplier_exists=False, supplier_denied=True
+        )
+
+        with self.assertRaises(Denied):
+            purchase_write.save_po_draft(fake, draft_body(), CSRF)
+        self.assertEqual(fake.purchase_draft_calls, [])
+
+    def test_an_unreadable_item_is_a_permission_refusal(self):
+        fake = gateway()
+        fake.purchase_draft_detail = draft_detail(
+            items={"ITEM-1": item(exists=False, denied=True)}
+        )
+
+        with self.assertRaises(Denied):
+            purchase_write.save_po_draft(fake, draft_body(), CSRF)
+        self.assertEqual(fake.purchase_draft_calls, [])
+
+    def test_an_unset_company_default_is_refused_not_guessed(self):
+        fake = gateway()
+        fake.purchase_draft_detail = draft_detail(company="", currency="")
+
+        payload = purchase_write.save_po_draft(fake, draft_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "VALIDATION"})
+        self.assertEqual(fake.write_responses[-1][0], 417)
+        self.assertEqual(fake.purchase_draft_calls, [])
 
     def test_the_draft_body_is_strict(self):
         for candidate in (
@@ -293,7 +340,221 @@ class DraftTests(unittest.TestCase):
                 payload = purchase_write.save_po_draft(fake, candidate, CSRF)
                 self.assertEqual(payload, {"code": "VALIDATION"})
                 self.assertEqual(fake.write_responses[-1][0], 422)
-                self.assertEqual(fake.purchase_fence_calls, [])
+                self.assertEqual(fake.purchase_draft_calls, [])
+
+    def test_a_committed_draft_receipt_does_not_block_a_new_draft(self):
+        fake = gateway()
+        committed(fake, "purchase_order_draft", "purchase-write-key-0000")
+
+        payload = purchase_write.save_po_draft(fake, draft_body(), CSRF)
+
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(fake.purchase_fence_calls, [])
+        self.assertEqual(fake.purchase_receipt_list_calls, [])
+
+    def test_the_deployment_marker_is_not_required_by_the_draft_lane(self):
+        fake = gateway()
+        fake.deployment_approved = False
+        fake.fence_ready = False
+
+        payload = purchase_write.save_po_draft(fake, draft_body(), CSRF)
+
+        self.assertEqual(payload["status"], "created")
+
+    def test_a_native_insert_failure_is_uncertain_and_rolled_back(self):
+        fake = gateway()
+        fake.purchase_mutation_error = RuntimeError("insert rejected")
+
+        payload = purchase_write.save_po_draft(fake, draft_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.write_responses[-1][0], 409)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_side_effect_mismatch_is_uncertain_and_rolled_back(self):
+        fake = gateway()
+        fake.purchase_facts = {
+            "docstatus": 1,
+            "doctype": "Purchase Order",
+            "status": "To Receive and Bill",
+            "sle_rows": 0,
+            "gl_rows": 0,
+            "bins": {},
+        }
+
+        payload = purchase_write.save_po_draft(fake, draft_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.rollback_calls, 1)
+
+    def test_a_read_back_that_shows_a_submitted_row_is_uncertain(self):
+        fake = gateway()
+        fake.purchase_order_view_value = {
+            "purchase_order_id": "PO-DRAFT-1",
+            "status": "To Receive and Bill",
+            "docstatus": 1,
+        }
+
+        payload = purchase_write.save_po_draft(fake, draft_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.write_responses[-1][0], 409)
+        self.assertEqual(fake.commit_calls, 1)
+        self.assertEqual(fake.rollback_calls, 0)
+
+    def test_a_post_insert_error_keeps_uncertain_without_name_guessing(self):
+        for error in (
+            purchase_contract.PurchaseContractError("insert failed"),
+            patient_write.WriteLocked(),
+            RuntimeError("insert failed"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                fake = gateway()
+                fake.purchase_mutation_error = error
+
+                payload = purchase_write.save_po_draft(
+                    fake, draft_body(), CSRF
+                )
+
+                self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+                self.assertEqual(fake.write_responses[-1][0], 409)
+                self.assertEqual(fake.commit_calls, 0)
+                self.assertEqual(fake.rollback_calls, 1)
+                self.assertEqual(
+                    len(fake.purchase_draft_calls), 0
+                )
+
+    def test_a_missing_read_back_is_uncertain(self):
+        fake = gateway()
+        fake.purchase_order_view_missing = True
+
+        payload = purchase_write.save_po_draft(fake, draft_body(), CSRF)
+
+        self.assertEqual(payload, {"code": "WRITE_UNCERTAIN"})
+        self.assertEqual(fake.commit_calls, 1)
+
+
+class ReadTests(unittest.TestCase):
+    def test_view_returns_only_the_native_id_status_and_docstatus(self):
+        fake = gateway()
+
+        payload = purchase_write.view(fake, "PO-1")
+
+        self.assertEqual(
+            payload,
+            {
+                "purchase_order": {
+                    "purchase_order_id": "PO-1",
+                    "status": "Draft",
+                    "docstatus": 0,
+                }
+            },
+        )
+        self.assertEqual(fake.purchase_order_view_calls, ["PO-1"])
+
+    def test_view_refuses_an_unknown_or_unreadable_document(self):
+        fake = gateway()
+        fake.purchase_order_view_missing = True
+
+        with self.assertRaises(Denied):
+            purchase_write.view(fake, "PO-404")
+
+    def test_view_refuses_a_malformed_id(self):
+        for candidate in ("", "bad\x00id", " PAD-1", None):
+            with self.subTest(candidate=candidate):
+                fake = gateway()
+                with self.assertRaises(Denied):
+                    purchase_write.view(fake, candidate)
+                self.assertEqual(fake.purchase_order_view_calls, [])
+
+    def test_view_is_independent_of_the_write_flag(self):
+        fake = gateway(
+            settings=write_settings(clinic_ui_native_purchase_write_enabled=0)
+        )
+
+        payload = purchase_write.view(fake, "PO-1")
+
+        self.assertEqual(payload["purchase_order"]["docstatus"], 0)
+
+    def test_the_read_surface_is_limited_to_purchasing_roles(self):
+        fake = gateway(role="REC")
+
+        with self.assertRaises(Denied):
+            purchase_write.view(fake, "PO-1")
+
+    def test_the_read_surface_requires_the_approved_site(self):
+        fake = gateway(site="marley.local")
+
+        with self.assertRaises(Denied):
+            purchase_write.view(fake, "PO-1")
+
+    def test_drafts_requires_the_callers_own_supplier_read(self):
+        fake = gateway()
+        fake.doctype_reads = {"Supplier": False}
+
+        with self.assertRaises(Denied):
+            purchase_write.drafts(fake, "SUP-1")
+        self.assertEqual(fake.purchase_order_drafts_calls, [])
+
+    def test_drafts_stay_readable_when_the_write_flag_is_off(self):
+        fake = gateway(
+            settings=write_settings(clinic_ui_native_purchase_write_enabled=0)
+        )
+        fake.purchase_draft_names = ["PO-1"]
+
+        payload = purchase_write.drafts(fake, "SUP-1")
+
+        self.assertEqual(
+            [item["purchase_order_id"] for item in payload["items"]],
+            ["PO-1"],
+        )
+
+    def test_drafts_returns_bounded_readable_items(self):
+        fake = gateway()
+        fake.purchase_draft_names = ["PO-1", "PO-2"]
+
+        payload = purchase_write.drafts(fake, "SUP-1")
+
+        self.assertEqual(
+            payload,
+            {
+                "items": [
+                    {
+                        "purchase_order_id": "PO-1",
+                        "status": "Draft",
+                        "docstatus": 0,
+                    },
+                    {
+                        "purchase_order_id": "PO-2",
+                        "status": "Draft",
+                        "docstatus": 0,
+                    },
+                ]
+            },
+        )
+        self.assertEqual(fake.purchase_order_drafts_calls, [("SUP-1", 50)])
+        self.assertEqual(fake.purchase_order_view_calls, ["PO-1", "PO-2"])
+
+    def test_an_over_full_or_duplicated_page_is_refused(self):
+        fake = gateway()
+        fake.purchase_draft_names = None
+        with self.assertRaises(Denied):
+            purchase_write.drafts(fake, "SUP-1")
+
+        duplicated = gateway()
+        duplicated.purchase_draft_names = ["PO-1", "PO-1"]
+        with self.assertRaises(Denied):
+            purchase_write.drafts(duplicated, "SUP-1")
+
+    def test_an_unreadable_row_refuses_the_whole_page(self):
+        fake = gateway()
+        fake.purchase_draft_names = ["PO-1"]
+        fake.purchase_order_view_missing = True
+
+        with self.assertRaises(Denied):
+            purchase_write.drafts(fake, "SUP-1")
 
 
 class SubmitTests(unittest.TestCase):
@@ -498,7 +759,7 @@ class GateTests(unittest.TestCase):
             purchase_write.receive(fake, receipt_body(), CSRF)
         self.assertEqual(fake.purchase_fence_calls, [])
 
-    def test_boundary_and_install_drift_fail_closed(self):
+    def test_boundary_and_draft_install_drift_fail_closed(self):
         fake = gateway()
         fake.purchase_boundary_problem = "versions drift for erpnext"
         with self.assertRaises(Denied):
@@ -506,12 +767,29 @@ class GateTests(unittest.TestCase):
         self.assertEqual(fake.purchase_fence_calls, [])
 
         other = gateway()
-        other.purchase_install_problem = (
+        other.purchase_draft_install_problem = (
             "missing field Purchase Order.currency"
         )
         with self.assertRaises(Denied):
             purchase_write.save_po_draft(other, draft_body(), CSRF)
         self.assertEqual(other.purchase_fence_calls, [])
+
+    def test_a_receipt_family_install_gap_does_not_close_the_draft(self):
+        fake = gateway()
+        fake.purchase_install_problem = (
+            "missing field Purchase Order Item.purchase_order"
+        )
+
+        draft = purchase_write.save_po_draft(fake, draft_body(), CSRF)
+        self.assertEqual(draft["status"], "created")
+
+        fenced = gateway()
+        fenced.purchase_install_problem = (
+            "missing field Purchase Order Item.purchase_order"
+        )
+        with self.assertRaises(Denied):
+            purchase_write.submit_po(fenced, submit_body(), CSRF)
+        self.assertEqual(fenced.purchase_fence_calls, [])
 
     def test_the_native_create_authority_is_required(self):
         fake = gateway()
@@ -543,18 +821,24 @@ class GateTests(unittest.TestCase):
         self.assertEqual(fake.purchase_fence_calls, [])
         self.assertEqual(fake.purchase_receipt_calls, [])
 
-    def test_each_kind_has_its_own_budget(self):
+    def test_a_committed_receipt_does_not_block_the_draft_lane(self):
         fake = gateway()
         committed(fake, "purchase_order_draft", "purchase-write-key-0000")
 
+        payload = purchase_write.save_po_draft(fake, draft_body(), CSRF)
+
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(fake.purchase_receipt_list_calls, [])
+
+    def test_the_fenced_receipt_still_has_its_own_budget(self):
+        fake = gateway()
+        committed(fake, "purchase_receipt", "purchase-write-key-0000")
+
         self.assertEqual(
-            purchase_write.save_po_draft(fake, draft_body(), CSRF),
+            purchase_write.receive(fake, receipt_body(), CSRF),
             {"code": "WRITE_LOCKED"},
         )
-        self.assertEqual(
-            purchase_write.submit_po(fake, submit_body(), CSRF)["status"],
-            "submitted",
-        )
+        self.assertEqual(fake.purchase_fence_calls, [])
 
 
 class FenceAndUncertaintyTests(unittest.TestCase):
@@ -680,10 +964,10 @@ class ReceiptEncodeBeforeCommitTests(unittest.TestCase):
                 "invalid receipt reference"
             ),
         ):
-            payload = purchase_write.save_po_draft(fake, draft_body(), CSRF)
+            payload = purchase_write.submit_po(fake, submit_body(), CSRF)
 
         self.assertEqual(payload, {"code": "WRITE_LOCKED"})
-        self.assertEqual(len(fake.purchase_draft_calls), 1)
+        self.assertEqual(len(fake.purchase_submit_order_calls), 1)
         self.assertEqual(fake.commit_calls, 0)
         self.assertEqual(fake.purchase_fence_claim.committed, [])
         self.assertTrue(fake.purchase_fence_claim.unknowns)
@@ -805,7 +1089,7 @@ class RollbackFailureTests(unittest.TestCase):
             side_effect=RuntimeError("receipt encoder failed"),
         ):
             with self.assertRaises(purchase_write.RollbackFailed) as caught:
-                purchase_write.save_po_draft(fake, draft_body(), CSRF)
+                purchase_write.submit_po(fake, submit_body(), CSRF)
 
         self.assertEqual(order, ["marker", "rollback"])
         self.assertEqual(len(claim.unknowns), 1)
@@ -901,6 +1185,64 @@ class BootstrapTests(unittest.TestCase):
         )
         self.assertEqual(
             capabilities["write.purchase_order.submit"], "enabled"
+        )
+
+    def test_the_draft_surface_opens_without_the_deployment_marker(self):
+        fake = gateway()
+        fake.deployment_approved = False
+        fake.fence_ready = False
+
+        capabilities = session.bootstrap(fake)["capabilities"]
+
+        self.assertEqual(
+            capabilities["write.purchase_order.draft"], "enabled"
+        )
+        self.assertEqual(
+            capabilities["write.purchase_order.submit"], "read_only"
+        )
+        self.assertEqual(capabilities["write.stock.receive"], "read_only")
+
+    def test_an_unresolved_ledger_keeps_submit_and_receive_disabled(self):
+        fake = gateway()
+        fake.fence_ready = False
+
+        capabilities = session.bootstrap(fake)["capabilities"]
+
+        self.assertEqual(
+            capabilities["write.purchase_order.draft"], "enabled"
+        )
+        self.assertEqual(
+            capabilities["write.purchase_order.submit"], "read_only"
+        )
+        self.assertEqual(capabilities["write.stock.receive"], "read_only")
+
+    def test_a_fenced_install_gap_keeps_only_the_fenced_surfaces_closed(self):
+        fake = gateway()
+        fake.purchase_install_problem = (
+            "missing field Purchase Order Item.purchase_order"
+        )
+
+        capabilities = session.bootstrap(fake)["capabilities"]
+
+        self.assertEqual(
+            capabilities["write.purchase_order.draft"], "enabled"
+        )
+        self.assertEqual(
+            capabilities["write.purchase_order.submit"], "read_only"
+        )
+        self.assertEqual(capabilities["write.stock.receive"], "read_only")
+
+    def test_the_draft_surface_needs_the_native_create_permission(self):
+        fake = gateway(role="PHA")
+        fake.purchase_create_authority = {"Purchase Order": False}
+
+        capabilities = session.bootstrap(fake)["capabilities"]
+
+        self.assertEqual(
+            capabilities["write.purchase_order.draft"], "read_only"
+        )
+        self.assertEqual(
+            capabilities["write.purchase_order.submit"], "read_only"
         )
 
     def test_a_receptionist_sees_nothing(self):
