@@ -53,16 +53,22 @@ export function VisitTimeline({ patientId, encounterId }: { patientId: string; e
               <time className="visit-history-date" dateTime={visit.date}>{formatDate(visit.date, locale)}</time>
               <div className="visit-history-spine" aria-hidden="true" />
               <article className="visit-preview-card visit-history-card" data-photos={sides.length > 0} aria-labelledby={`history-${visit.id}`}>
-                <div className="visit-history-main visit-preview-stack">
+                <div className="visit-history-intro visit-preview-stack">
                   <div className="visit-preview-head">
                     <h3 id={`history-${visit.id}`}>{t("workspace.historyVisit", { id: visit.id })}</h3>
                     <Badge tone={visit.state === "completed" ? "success" : "warning"}>{t(`status.${visit.state}`)}</Badge>
                   </div>
                   <p className="pc-note">{formatDateTime(visit.date, locale)} · {coreData.practitionerById(visit.practitioner).name[locale]}</p>
-                  {files.length > 0 && <div className="visit-history-report visit-preview-stack">
-                    <h4>{t("workspace.lab")} · {t("workspace.privateAttachment")}</h4>
-                    <SampleLabFiles files={files} />
-                  </div>}
+                </div>
+                {files.length > 0 && <div className="visit-history-report visit-preview-stack">
+                  <h4>{t("workspace.lab")} · {t("workspace.privateAttachment")}</h4>
+                  <SampleLabFiles files={files} />
+                </div>}
+                {sides.length > 0 && <div className="visit-history-evidence visit-preview-stack">
+                  <h4>{t("workspace.photos")}</h4>
+                  <SamplePhotos sides={sides} />
+                </div>}
+                <div className="visit-history-narrative visit-preview-stack">
                   {visit.diagnoses.length > 0 && <p>{visit.diagnoses.map((row) => row.label[locale]).join(" · ")}</p>}
                   {narrative && (
                     <details className="visit-preview-details">
@@ -72,10 +78,6 @@ export function VisitTimeline({ patientId, encounterId }: { patientId: string; e
                   )}
                   {sides.length === 0 && files.length === 0 && <p className="pc-note">{t("workspace.noFiles")}</p>}
                 </div>
-                {sides.length > 0 && <div className="visit-history-evidence visit-preview-stack">
-                  <h4>{t("workspace.photos")}</h4>
-                  <SamplePhotos sides={sides} />
-                </div>}
               </article>
             </li>
           );

@@ -25,5 +25,11 @@ it.each([1440, 390] as const)("shows a distinct dated sample history at %ipx", a
   expect(visits[2]).toHaveAccessibleName("Visit SAMPLE-HISTORY-01");
   expect(within(visits[0]!).getByText("result-77.pdf")).toBeVisible();
   expect(within(visits[0]!).getByText("Read visit note")).toBeVisible();
+  const current = within(visits[0]!);
+  const files = current.getByText("result-77.pdf");
+  const photos = current.getByRole("heading", { name: "Same-visit photos" });
+  const note = current.getByText("Read visit note");
+  expect(files.compareDocumentPosition(photos) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(photos.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(screen.queryByRole("textbox", { name: "Visit narrative" })).not.toBeInTheDocument();
 });
