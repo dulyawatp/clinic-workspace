@@ -27,8 +27,19 @@ class FakeDB:
         self.hits = set()
         self.error = False
         self.calls = []
+        self.tax_templates = []
+        self.tax_queries = []
 
     def sql(self, query, params):
+        if "tabSales Taxes and Charges Template" in query:
+            self.tax_queries.append((query, params))
+            assert "is_default IS NULL OR is_default <> 0" in query
+            assert "company=%s" in query and "LIMIT 1" in query
+            return [(1,)] if any(
+                row["company"] == params[0] and
+                (row["is_default"] is None or row["is_default"] != 0)
+                for row in self.tax_templates
+            ) else []
         return self.rows.get(params, [("0",)])
 
     def get_value(self, doctype, filters, field, ignore, order_by):
@@ -36,6 +47,14 @@ class FakeDB:
             raise RuntimeError("query failed")
         assert field == "name" and ignore is False and order_by is None
         self.calls.append((doctype, _key(filters)))
+        if doctype == "Sales Taxes and Charges Template":
+            for row in self.tax_templates:
+                if row["company"] != filters["company"]:
+                    continue
+                value = row["is_default"]
+                if (filters["is_default"] == 1 and value == 1 or
+                        filters["is_default"] == ["is", "not set"] and value in (None, 0)):
+                    return "hidden"
         return "hidden" if (doctype, _key(filters)) in self.hits else None
 
 
@@ -170,9 +189,6 @@ class AccountingCheckpointTest(unittest.TestCase):
 
     def test_pricing_and_tax_sources_refuse(self):
         for doctype, filters in [
-            ("Sales Taxes and Charges Template", {"company": "Clinic", "is_default": 1}),
-            ("Sales Taxes and Charges Template",
-             {"company": "Clinic", "is_default": ["is", "not set"]}),
             ("Tax Rule", {}), ("Pricing Rule", {}), ("Promotional Scheme", {}),
             ("Item Price", {"item_code": "Consult"}), ("Item Tax", {}),
         ]:
@@ -182,6 +198,21 @@ class AccountingCheckpointTest(unittest.TestCase):
                 self.assertIsNone(resolve_visit_invoice_terms(
                     self.gateway, self.visit, VAT_MODE_NONE))
                 self.frappe.db.hits.clear()
+
+    def test_tax_template_default_probe_in_both_vat_modes(self):
+        self.enable_vat()
+        for mode in (VAT_MODE_NONE, VAT_MODE_ADD):
+            for value, disabled, allowed in (
+                (0, 0, True), (0, 1, True), (None, 0, False),
+                (1, 0, False), (1, 1, False), (2, 0, False),
+            ):
+                with self.subTest(mode=mode, value=value, disabled=disabled):
+                    self.frappe.db.tax_templates = [
+                        {"company": "Clinic", "is_default": value, "disabled": disabled},
+                        {"company": "Other", "is_default": 1, "disabled": 0},
+                    ]
+                    terms = resolve_visit_invoice_terms(self.gateway, self.visit, mode)
+                    self.assertEqual(terms is not None, allowed)
 
     def test_permission_settings_and_invalid_records_refuse(self):
         for key in self.frappe.docs:
@@ -244,12 +275,8 @@ class AccountingCheckpointTest(unittest.TestCase):
 
     def test_template_inventory_queries_are_pinned(self):
         self.assertIsNotNone(resolve_visit_invoice_terms(self.gateway, self.visit, VAT_MODE_NONE))
-        template = [filters for doctype, filters in self.frappe.db.calls
-                    if doctype == "Sales Taxes and Charges Template"]
-        self.assertEqual(template, [
-            _key({"company": "Clinic", "is_default": 1}),
-            _key({"company": "Clinic", "is_default": ["is", "not set"]}),
-        ])
+        self.assertEqual(len(self.frappe.db.tax_queries), 1)
+        self.assertEqual(self.frappe.db.tax_queries[0][1], ("Clinic",))
         self.assertIn(("Tax Rule", ()), self.frappe.db.calls)
         self.assertIn(("Item Tax", ()), self.frappe.db.calls)
 
@@ -451,15 +478,14 @@ class VatTermsTest(unittest.TestCase):
 
     def test_same_company_default_or_ambiguous_template_refuses_both_modes(self):
         self.setUpVat()
-        for filters in ({"company": "Clinic", "is_default": 1},
-                        {"company": "Clinic", "is_default": ["is", "not set"]}):
-            with self.subTest(filters=filters):
-                self.frappe.db.hits.add(
-                    ("Sales Taxes and Charges Template", _key(filters)))
+        for value in (1, None):
+            with self.subTest(value=value):
+                self.frappe.db.tax_templates = [
+                    {"company": "Clinic", "is_default": value, "disabled": 0}]
                 self.assertIsNone(self.terms())
                 self.assertIsNone(self.terms(VAT_MODE_NONE))
                 self.assertIsNone(resolve_visit_invoice_terms(self.gateway, self.visit, VAT_MODE_NONE))
-                self.frappe.db.hits.clear()
+                self.frappe.db.tax_templates.clear()
 
     def test_native_field_drift_refuses_both_modes(self):
         self.setUpVat()

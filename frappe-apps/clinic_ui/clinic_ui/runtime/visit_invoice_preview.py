@@ -2,9 +2,31 @@
 
 from datetime import date
 from decimal import Decimal, InvalidOperation
+import json
 
 from clinic_ui.runtime.visit_invoice import resolve_visit_invoice
 from clinic_ui.runtime.visit_invoice_accounting import MAX_TAX_DESCRIPTION_LENGTH, resolve_visit_invoice_terms
+
+
+def item_tax_rate_ok(value, mode, account):
+    """Accept only serialized native tax rates, never an Item Tax override."""
+    if value is None or value == "":
+        return True
+    if type(value) is not str:
+        return False
+    class ObjectPairs(list):
+        pass
+    try:
+        pairs = json.loads(value, object_pairs_hook=ObjectPairs, parse_float=Decimal)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(pairs, ObjectPairs):
+        return False
+    if not pairs:
+        return True
+    return (mode == "vat_7" and len(pairs) == 1 and isinstance(pairs[0], tuple)
+            and pairs[0][0] == account and type(pairs[0][1]) in (int, Decimal)
+            and pairs[0][1] == 7)
 
 
 def _money(value):
@@ -140,7 +162,8 @@ def preview_visit_invoice(frappe, visit, discount, terms):
     if not precision_ok():
         raise ValueError("unsupported native precision")
     if (doc.doctype != "Sales Invoice" or isinstance(doc.docstatus, bool)
-            or not isinstance(doc.docstatus, int) or doc.docstatus != 0 or not tax_identity_ok()):
+            or not isinstance(doc.docstatus, int) or doc.docstatus != 0 or not tax_identity_ok()
+            or not item_tax_rate_ok(getattr(doc.items[0], "item_tax_rate", None), "no_vat", None)):
         raise ValueError("native tax drift")
     doc.calculate_taxes_and_totals()
     gross, cut, total = (_money(getattr(doc, field)) for field in
@@ -184,7 +207,7 @@ def preview_visit_invoice(frappe, visit, discount, terms):
                     "margin_rate_or_amount", "discount_account", "insurance_coverage",
                     "coverage_percentage", "patient_insurance_policy", "insurance_payor",
                      "coverage_rate", "coverage_qty", "insurance_coverage_amount"))
-             or getattr(doc.items[0], "item_tax_rate", None) not in (None, "", "{}")
+              or not item_tax_rate_ok(getattr(doc.items[0], "item_tax_rate", None), mode, terms["tax_account"])
             or any(getattr(doc, field, None) for field in
                    ("additional_discount_account", "is_cash_or_non_trade_discount",
                     "insurance_coverage", "coverage_percentage"))

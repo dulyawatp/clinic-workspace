@@ -274,6 +274,12 @@ def _resolve_visit_invoice_accounting(gateway, visit):
             return None
         if any(not _schema(frappe.get_meta(dt), fields) for dt, fields in _INTEGRITY_FIELDS.items()):
             return None
+        if frappe.db.sql(
+            "SELECT 1 FROM `tabSales Taxes and Charges Template` "
+            "WHERE company=%s AND (is_default IS NULL OR is_default <> 0) LIMIT 1",
+            (company_name,),
+        ):
+            return None
         predicates = (
             ("GL Entry", {"party_type": "Customer", "party": customer_name, "company": company_name}),
             ("Party Account", {"parenttype": "Customer", "parent": customer_name, "company": company_name}),
@@ -283,9 +289,6 @@ def _resolve_visit_invoice_accounting(gateway, visit):
                                "company": company_name}),
             ("Party Account", {"parentfield": "income_account", "parent": "Healthcare Settings",
                                "company": company_name}),
-            ("Sales Taxes and Charges Template", {"company": company_name, "is_default": 1}),
-            ("Sales Taxes and Charges Template",
-             {"company": company_name, "is_default": ["is", "not set"]}),
             ("Tax Rule", {}),
             ("Pricing Rule", {}),
             ("Promotional Scheme", {}),

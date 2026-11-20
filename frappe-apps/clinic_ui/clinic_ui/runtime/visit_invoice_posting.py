@@ -3,6 +3,7 @@
 from decimal import Decimal, InvalidOperation
 
 from clinic_ui.runtime.visit_invoice_accounting import MAX_TAX_DESCRIPTION_LENGTH
+from clinic_ui.runtime.visit_invoice_preview import item_tax_rate_ok
 
 class PostingPreDispatch(Exception):
     """No write was dispatched; caller retains transaction ownership."""
@@ -50,7 +51,7 @@ _INVOICE_FIELDS = (
 _ITEM_FIELDS = (
     "item_code", "qty", "uom", "stock_uom", "income_account", "cost_center",
     "reference_dt", "reference_dn", "rate", "price_list_rate", "amount", "base_amount", "item_tax_template",
-    "net_amount", "base_net_amount", "distributed_discount_amount", "conversion_factor",
+    "net_amount", "base_net_amount", "distributed_discount_amount", "conversion_factor", "item_tax_rate",
 )
 _TAX_FIELDS = (
     "charge_type", "account_head", "rate", "included_in_print_rate", "cost_center", "description",
@@ -270,6 +271,8 @@ def _check_invoice(doc, visit, accounting, totals, discount, status):
             "insurance_coverage", "coverage_percentage")):
         raise ValueError("unsupported invoice adjustment")
     item = doc.items[0]
+    if not item_tax_rate_ok(getattr(item, "item_tax_rate", None), mode, accounting["tax_account"]):
+        raise ValueError("item tax rate drift")
     if any(getattr(item, field, None) for field in (
             "pricing_rules", "item_tax_template", "discount_percentage", "discount_amount", "margin_rate_or_amount",
             "discount_account", "insurance_coverage", "coverage_percentage",

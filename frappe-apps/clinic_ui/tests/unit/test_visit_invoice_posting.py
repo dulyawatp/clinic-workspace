@@ -293,6 +293,18 @@ class PostingLifecycleTest(unittest.TestCase):
             self.post()
         self.assertNotIn("insert", self.events)
 
+    def test_item_tax_rate_mask_rejects_before_insert(self):
+        original = self.frappe.get_meta
+        def meta(doctype):
+            result = original(doctype)
+            if doctype == "Sales Invoice Item":
+                result.get_masked_fields = lambda parenttype=None: [SimpleNamespace(fieldname="item_tax_rate")]
+            return result
+        self.frappe.get_meta = meta
+        with self.assertRaises(PostingPreDispatch):
+            self.post()
+        self.assertNotIn("insert", self.events)
+
     def test_posting_and_price_list_drift_rejected(self):
         for field, value in (("posting_date", "2026-11-21"), ("set_posting_time", 1),
                              ("selling_price_list", "other"), ("plc_conversion_rate", 2)):
@@ -325,7 +337,21 @@ class PostingLifecycleTest(unittest.TestCase):
 
     def test_vat_invoice_posts_separate_tax_ledger(self):
         self.enable_vat()
+        self.doc.items[0].item_tax_rate = '{"Tax": 7}'
         self.assertEqual(self.post(), "INV")
+
+    def test_item_tax_rate_drift_requires_rollback(self):
+        for mode, value in (("vat", '{"Other": 7}'), ("vat", '{"Tax": true}'),
+                            ("vat", '{"Tax": 7, "Tax": 7}'), ("vat", '{"Tax": 6}'),
+                            ("vat", '{"Tax": 7, "Other": 7}'), ("vat", '{bad}'),
+                            ("no_vat", '{"Tax": 7}')):
+            with self.subTest(mode=mode, value=value):
+                self.setUp()
+                if mode == "vat":
+                    self.enable_vat()
+                self.mutate = lambda store: setattr(store["invoice"].items[0], "item_tax_rate", value)
+                with self.assertRaises(PostingPostDispatch):
+                    self.post()
 
     def test_missing_mode_or_amounts_rejected_before_insert(self):
         for mapping, key in (("accounting", "vat_mode"), ("totals", "net"), ("totals", "vat")):

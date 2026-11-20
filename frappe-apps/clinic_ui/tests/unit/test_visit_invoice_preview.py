@@ -315,6 +315,8 @@ class PreviewTest(unittest.TestCase):
                 self.changes = changes
                 if "pre" in changes:
                     setattr(row, *changes["pre"])
+                if "pre_item" in changes:
+                    self.items[0].item_tax_rate = changes["pre_item"]
 
             def calculate_taxes_and_totals(self):
                 super().calculate_taxes_and_totals()
@@ -330,6 +332,8 @@ class PreviewTest(unittest.TestCase):
                     setattr(row, *self.changes["post"])
                 if "header" in self.changes:
                     setattr(self, *self.changes["header"])
+                if "post_item" in self.changes:
+                    self.items[0].item_tax_rate = self.changes["post_item"]
 
         class TaxFrappe:
             def __init__(self, changes):
@@ -339,6 +343,14 @@ class PreviewTest(unittest.TestCase):
                 return TaxDocument(values, self.changes)
 
         preview_visit_invoice(TaxFrappe({}), VISIT, None, VAT_TERMS)
+        preview_visit_invoice(TaxFrappe({"post_item": '{"VAT Payable": 7}'}), VISIT, None, VAT_TERMS)
+        for value in ('{"VAT Payable": 6}', '{"Other": 7}', '{"VAT Payable": true}',
+                      '{"VAT Payable": 7, "Other": 7}', '{"VAT Payable": 7, "VAT Payable": 7}',
+                      '{"VAT Payable": "7"}', '{bad}', [], {"VAT Payable": 7}):
+            with self.subTest(item_tax_rate=value), self.assertRaises(ValueError):
+                preview_visit_invoice(TaxFrappe({"post_item": value}), VISIT, None, VAT_TERMS)
+        with self.assertRaises(ValueError):
+            preview_visit_invoice(TaxFrappe({"pre_item": '{"VAT Payable": 7}'}), VISIT, None, VAT_TERMS)
         for changes in (
             {"pre": ("rate", 6)}, {"pre": ("included_in_print_rate", 1)},
             {"pre": ("description", "changed")}, {"post": ("description", "changed")},
