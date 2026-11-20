@@ -7,7 +7,17 @@ legacy fence, its files, records, quota and other writers unchanged.
 
 ## Isolation and proof
 
-Only `marley-sit.local` plus the separate private marker enables this identity.
+The operator-owned site `site_config.json` must explicitly set
+`clinic_ui_payment_deployment_profile` to `shared_slot_v1` for this deployment;
+only `marley-sit.local`, that profile, and the separate private marker together
+select the shared slot. Protect site configuration independently from the proof
+and from untrusted writes; neither request parameters nor headers select a lane.
+An independently proven distinct deployment using the same hostname must have
+the explicit `legacy` profile to retain its legacy lane. Missing, invalid or
+unreadable profile, or missing/invalid proof for `shared_slot_v1`, blocks payment
+posting instead of falling back. Never switch a cutover deployment back to the
+legacy profile after a slot commit or uncertain outcome.
+
 Use the existing `clinic_ui.core.deployment_marker.write_marker` operator API
 with private directory `<site>/private/clinic_ui_sit_payment_proof`, site
 `marley-sit.local`, and deployment ID `clinic-shared-sit-payment-v1`. It creates

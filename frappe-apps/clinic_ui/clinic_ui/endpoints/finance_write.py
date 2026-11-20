@@ -191,7 +191,7 @@ def _shared_gate(gateway, csrf_token, allowed_codes):
     return settings, view, role
 
 
-def _shared_sit_payment_gate(gateway, csrf_token):
+def _shared_sit_payment_ack_gate(gateway, csrf_token):
     gateway.refresh_site_config()
     settings, view, role = common._authorize_finance_base(
         gateway, PAYMENT_ROLE_CODES, csrf_token
@@ -200,6 +200,11 @@ def _shared_sit_payment_gate(gateway, csrf_token):
         gateway.deny()
     if sit_payment_slot.payment_lane(gateway) != "shared_slot_v1":
         gateway.deny()
+    return settings, view, role
+
+
+def _shared_sit_payment_gate(gateway, csrf_token):
+    settings, view, role = _shared_sit_payment_ack_gate(gateway, csrf_token)
     if gateway.native_finance_boundary_problem() is not None:
         gateway.deny()
     if gateway.native_finance_payment_install_problem() is not None:
@@ -899,7 +904,7 @@ def acknowledge(gateway, body, csrf_token=None):
         payload = finance_contract.validate_ack(body)
     except finance_contract.FinanceContractError:
         if sit_payment_slot.payment_lane(gateway) == "shared_slot_v1":
-            _shared_sit_payment_gate(gateway, csrf_token)
+            _shared_sit_payment_ack_gate(gateway, csrf_token)
         else:
             common.authorize_finance_write(
                 gateway, INVOICE_ROLE_CODES | PAYMENT_ROLE_CODES, csrf_token
@@ -910,7 +915,7 @@ def acknowledge(gateway, body, csrf_token=None):
         payload["kind"] == finance_contract.PAYMENT_KIND
         and sit_payment_slot.payment_lane(gateway) == "shared_slot_v1"
     ):
-        settings, view, _role = _shared_sit_payment_gate(gateway, csrf_token)
+        settings, view, _role = _shared_sit_payment_ack_gate(gateway, csrf_token)
         try:
             status = sit_payment_slot.verify_slot_ack(
                 gateway, sit_payment_slot.DEPLOYMENT_ID, settings.epoch_secret,

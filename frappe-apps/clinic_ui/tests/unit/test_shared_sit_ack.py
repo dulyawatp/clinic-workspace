@@ -6,7 +6,7 @@ from clinic_ui.endpoints import finance_write
 from clinic_ui.runtime import sit_payment_slot
 
 from .fake_gateway import Denied, SECRET
-from .test_endpoints_finance_write import CSRF, KEY, gateway
+from .test_endpoints_finance_write import CSRF, KEY, gateway, payment_body
 
 
 class SharedAckTests(unittest.TestCase):
@@ -90,3 +90,28 @@ class SharedAckTests(unittest.TestCase):
         row = {"state": "available", "actor": None, "operation_key": None, "receipt": None}
         with mock.patch.object(sit_payment_slot, "read_slot", return_value=row):
             self.assertEqual(finance_write.acknowledge(self.fake, self.body, CSRF), {"code": "OPERATION_CONFLICT"})
+
+    def test_post_metadata_drift_does_not_block_ack_but_still_blocks_post(self):
+        for method in ("native_finance_boundary_problem", "native_finance_payment_install_problem"):
+            with self.subTest(method=method), \
+                 mock.patch.object(self.fake, method, return_value="drift"), \
+                 mock.patch.object(sit_payment_slot, "verify_slot_ack", return_value="acked") as verify:
+                self.fake.finance_ack_calls.clear()
+                self.assertEqual(finance_write.acknowledge(self.fake, self.body, CSRF), {"acknowledged": True})
+                self.assertEqual(self.fake.finance_ack_calls, [])
+                verify.return_value = "invalid"
+                self.assertEqual(finance_write.acknowledge(self.fake, self.body, CSRF), {"code": "OPERATION_CONFLICT"})
+                self.assertEqual(self.fake.finance_ack_calls, [])
+                verify.side_effect = sit_payment_slot.SlotUnavailable()
+                self.assertEqual(finance_write.acknowledge(self.fake, self.body, CSRF), {"code": "WRITE_LOCKED"})
+                self.assertEqual(self.fake.finance_ack_calls, [])
+                verify.side_effect = None
+                verify.return_value = "not_owned"
+                self.assertEqual(finance_write.acknowledge(self.fake, self.body, CSRF), {"acknowledged": True})
+                self.assertEqual(len(self.fake.finance_ack_calls), 1)
+                self.fake.write_deployment_approved = mock.Mock(return_value=False)
+                with self.assertRaises(Denied):
+                    finance_write.acknowledge(self.fake, self.body, CSRF)
+                self.fake.write_deployment_approved = mock.Mock(return_value=True)
+                with self.assertRaises(Denied):
+                    finance_write.receive_payment(self.fake, payment_body(), CSRF)
