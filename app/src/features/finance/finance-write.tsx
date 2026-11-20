@@ -1,7 +1,7 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSession } from "../../app/SessionProvider";
-import { Button } from "../../design/components";
+import { Button, DataTable } from "../../design/components";
 import { nativeTransportEnabled } from "../../transport/native/flag";
 import {
   type NativeFinanceWriteError,
@@ -17,6 +17,11 @@ import {
   submitInvoice,
   viewInvoice,
 } from "../../transport/native/invoice-write";
+import {
+  getNativePostedInvoiceDetail,
+  type NativePostedInvoiceDetail,
+  NativePostedInvoiceError,
+} from "../../transport/native/posted-invoice";
 import { useCapabilities } from "../shell/CapabilityProvider";
 
 /**
@@ -97,7 +102,7 @@ function Field({
 export function InvoiceSubmitForm() {
   const { t } = useTranslation();
   const { get } = useCapabilities();
-  const { session } = useSession();
+  const { session, authGeneration } = useSession();
   const id = useId();
   const [customer, setCustomer] = useState("");
   const [priceList, setPriceList] = useState("");
@@ -114,29 +119,10 @@ export function InvoiceSubmitForm() {
    * The mounted form stops: no second dispatch, no acknowledgement, no retry.
    */
   const [stopped, setStopped] = useState(false);
-  const [lookupId, setLookupId] = useState("");
-  const [results, setResults] = useState<NativeInvoiceRecord[] | null>(null);
-  const [lookupError, setLookupError] = useState(false);
-  const [looking, setLooking] = useState(false);
 
   const canWrite = get("write.invoice.submit") === "enabled";
-  const canLookup = nativeTransportEnabled() && !!session?.user.roles.includes("CAS");
+  const canLookup = nativeTransportEnabled() && session?.mode === "live" && session.user.roles.includes("CAS");
   if (!canWrite && !canLookup) return null;
-
-  async function lookup(kind: "customer" | "invoice") {
-    const value = (kind === "customer" ? customer : lookupId).trim();
-    if (!value || looking) return;
-    setLooking(true);
-    setResults(null);
-    setLookupError(false);
-    try {
-      setResults(kind === "customer" ? await findInvoices(value) : [await viewInvoice(value)]);
-    } catch {
-      setLookupError(true);
-    } finally {
-      setLooking(false);
-    }
-  }
 
   const amount = Number(qty);
   const discountAmount = Number(discount);
@@ -354,27 +340,200 @@ export function InvoiceSubmitForm() {
       ) : null}
     </section> : null}
     {canLookup ? (
-      <section className="admin-write" aria-label={t("financeWrite.lookupTitle")}>
-        <h3>{t("financeWrite.lookupTitle")}</h3>
-        <p className="pc-note">{t("financeWrite.lookupNotice")}</p>
-        <div className="admin-write-fields">
-          <Field id={`${id}-lookup-customer`} label={t("financeWrite.lookupCustomer")} value={customer} onChange={setCustomer} disabled={stopped} />
-          <Field id={`${id}-lookup-invoice`} label={t("financeWrite.lookupInvoice")} value={lookupId} onChange={setLookupId} />
-        </div>
-        <div className="ops-form__actions">
-          <Button type="button" disabled={looking || !customer.trim()} onClick={() => void lookup("customer")}>{t("financeWrite.lookupCustomerAction")}</Button>
-          <Button type="button" disabled={looking || !lookupId.trim()} onClick={() => void lookup("invoice")}>{t("financeWrite.lookupInvoiceAction")}</Button>
-        </div>
-        {looking ? <p role="status">{t("financeWrite.lookupLoading")}</p> : null}
-        {lookupError ? <p role="alert" className="pc-error">{t("financeWrite.lookupError")}</p> : null}
-        {results ? <div role="status">
-          {results.length === 0 ? <p>{t("financeWrite.lookupEmpty")}</p> : (
-            <ul>{results.map((record) => <li key={record.invoice_id}>{record.invoice_id} · {record.status} · {t("financeWrite.lookupDocstatus")}: {record.docstatus}</li>)}</ul>
-          )}
-        </div> : null}
-      </section>
+      <InvoiceLookup key={authGeneration} customer={customer} setCustomer={setCustomer} stopped={stopped} />
     ) : null}
     </>
+  );
+}
+
+type DetailState =
+  | { status: "loading" | "denied" | "unavailable"; invoiceId: string }
+  | { status: "ready"; invoice: NativePostedInvoiceDetail };
+
+function InvoiceLookup({
+  customer,
+  setCustomer,
+  stopped,
+}: {
+  customer: string;
+  setCustomer: (customer: string) => void;
+  stopped: boolean;
+}) {
+  const { t } = useTranslation();
+  const id = useId();
+  const [lookupId, setLookupId] = useState("");
+  const [results, setResults] = useState<NativeInvoiceRecord[] | null>(null);
+  const [lookupError, setLookupError] = useState(false);
+  const [looking, setLooking] = useState(false);
+  const [detail, setDetail] = useState<DetailState | null>(null);
+  const detailRequest = useRef<AbortController | null>(null);
+  const selectedInvoiceId = detail?.status === "ready" ? detail.invoice.id : detail?.invoiceId;
+
+  useEffect(() => () => detailRequest.current?.abort(), []);
+
+  function clearDetail() {
+    detailRequest.current?.abort();
+    detailRequest.current = null;
+    setDetail(null);
+  }
+
+  async function lookup(kind: "customer" | "invoice") {
+    const value = (kind === "customer" ? customer : lookupId).trim();
+    if (!value || looking) return;
+    clearDetail();
+    setLooking(true);
+    setResults(null);
+    setLookupError(false);
+    try {
+      setResults(kind === "customer" ? await findInvoices(value) : [await viewInvoice(value)]);
+    } catch {
+      setLookupError(true);
+    } finally {
+      setLooking(false);
+    }
+  }
+
+  async function loadDetail(invoiceId: string) {
+    if (detail?.status === "loading" && selectedInvoiceId === invoiceId) return;
+    detailRequest.current?.abort();
+    const request = new AbortController();
+    detailRequest.current = request;
+    setDetail({ status: "loading", invoiceId });
+    try {
+      const invoice = await getNativePostedInvoiceDetail(invoiceId, request.signal);
+      if (!request.signal.aborted) setDetail({ status: "ready", invoice });
+    } catch (error) {
+      if (request.signal.aborted) return;
+      const denied = error instanceof NativePostedInvoiceError && error.reason === "denied";
+      setDetail({ status: denied ? "denied" : "unavailable", invoiceId });
+    }
+  }
+
+  return (
+    <section className="admin-write" aria-label={t("financeWrite.lookupTitle")}>
+      <h3>{t("financeWrite.lookupTitle")}</h3>
+      <p className="pc-note">{t("financeWrite.lookupNotice")}</p>
+      <div className="admin-write-fields">
+        <Field
+          id={`${id}-lookup-customer`}
+          label={t("financeWrite.lookupCustomer")}
+          value={customer}
+          onChange={(value) => { clearDetail(); setCustomer(value); }}
+          disabled={stopped}
+        />
+        <Field
+          id={`${id}-lookup-invoice`}
+          label={t("financeWrite.lookupInvoice")}
+          value={lookupId}
+          onChange={(value) => { clearDetail(); setLookupId(value); }}
+        />
+      </div>
+      <div className="ops-form__actions">
+        <Button disabled={looking || !customer.trim()} onClick={() => void lookup("customer")}>{t("financeWrite.lookupCustomerAction")}</Button>
+        <Button disabled={looking || !lookupId.trim()} onClick={() => void lookup("invoice")}>{t("financeWrite.lookupInvoiceAction")}</Button>
+      </div>
+      {looking ? <p role="status">{t("financeWrite.lookupLoading")}</p> : null}
+      {lookupError ? <p role="alert" className="pc-error">{t("financeWrite.lookupError")}</p> : null}
+      {results?.length === 0 ? <p role="status">{t("financeWrite.lookupEmpty")}</p> : null}
+      {results?.length ? (
+        <>
+          <p className="shell-sr-only" role="status">{t("financeWrite.lookupFound", { total: results.length })}</p>
+          <ul className="finance-lookup-results" role="list">
+            {results.map((record) => (
+              <li key={record.invoice_id}>
+                <span>{record.invoice_id} · {record.status} · {t("financeWrite.lookupDocstatus")}: {record.docstatus}</span>
+                {record.docstatus === 1 ? (
+                  <Button
+                    size="sm"
+                    aria-label={t("financeWrite.detailActionFor", { id: record.invoice_id })}
+                    aria-disabled={detail?.status === "loading" && selectedInvoiceId === record.invoice_id}
+                    onClick={() => void loadDetail(record.invoice_id)}
+                  >
+                    {t("financeWrite.detailAction")}
+                  </Button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      <p role="status" className={detail?.status === "loading" ? undefined : "shell-sr-only"}>
+        {detail?.status === "loading" ? t("financeWrite.detailLoading") : null}
+        {detail?.status === "ready" ? t("financeWrite.detailTitle", { id: detail.invoice.id }) : null}
+      </p>
+      {detail?.status === "denied" || detail?.status === "unavailable" ? (
+        <p role="alert" className="pc-error">
+          {t(detail.status === "denied" ? "financeWrite.detailDenied" : "financeWrite.detailUnavailable")}
+        </p>
+      ) : null}
+      {detail?.status === "ready" ? <PostedInvoiceDetails invoice={detail.invoice} /> : null}
+    </section>
+  );
+}
+
+function PostedInvoiceDetails({ invoice }: { invoice: NativePostedInvoiceDetail }) {
+  const { t, i18n } = useTranslation();
+  const id = useId();
+  const amounts = new Intl.NumberFormat(i18n.resolvedLanguage, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 20,
+  });
+  const facts: [string, string][] = [
+    ["financeWrite.detailStatus", invoice.status],
+    ["financeWrite.detailCurrency", invoice.currency],
+    ["financeWrite.detailCustomer", invoice.customer],
+    ["financeWrite.detailCompany", invoice.company],
+    ["financeWrite.detailPostingDate", invoice.postingDate],
+  ];
+  if (invoice.dueDate) facts.push(["financeWrite.detailDueDate", invoice.dueDate]);
+  const totals = [
+    ["financeWrite.detailSubtotal", invoice.subtotal],
+    ["financeWrite.detailDiscount", invoice.discount],
+    ["financeWrite.detailNetTotal", invoice.netTotal],
+    ["financeWrite.detailTaxTotal", invoice.taxTotal],
+    ["financeWrite.detailGrandTotal", invoice.grandTotal],
+    ["financeWrite.detailRoundedTotal", invoice.roundedTotal],
+    ["finance.outstanding", invoice.outstanding],
+  ] as const;
+
+  return (
+    <section className="finance-posted-detail" aria-labelledby={id}>
+      <h4 id={id}>{t("financeWrite.detailTitle", { id: invoice.id })}</h4>
+      <dl className="pc-dl">
+        {facts.map(([label, value]) => <div key={label}><dt>{t(label)}</dt><dd>{value}</dd></div>)}
+      </dl>
+      <DataTable
+        caption={t("financeWrite.detailItems")}
+        empty={t("financeWrite.detailNoItems")}
+        columns={[
+          { key: "name", label: t("financeWrite.detailItem") },
+          { key: "qty", label: t("financeWrite.qty"), align: "end" },
+          { key: "uom", label: t("financeWrite.detailUnit") },
+          { key: "rate", label: t("financeWrite.detailRate"), align: "end" },
+          { key: "amount", label: t("financeWrite.detailAmount"), align: "end" },
+          { key: "net", label: t("financeWrite.detailNetAmount"), align: "end" },
+        ]}
+        rows={invoice.items.map((item) => [
+          item.code && item.code !== item.name ? `${item.name} · ${item.code}` : item.name,
+          item.quantity, item.uom, amounts.format(item.rate), amounts.format(item.amount), amounts.format(item.netAmount),
+        ])}
+      />
+      <DataTable
+        caption={t("financeWrite.detailTaxes")}
+        empty={t("financeWrite.detailNoTaxes")}
+        columns={[
+          { key: "description", label: t("financeWrite.detailTax") },
+          { key: "rate", label: t("financeWrite.detailTaxRate"), align: "end" },
+          { key: "amount", label: t("financeWrite.detailAmount"), align: "end" },
+        ]}
+        rows={invoice.taxes.map((tax) => [tax.description, tax.rate ?? "—", amounts.format(tax.amount)])}
+      />
+      <dl className="pc-dl">
+        {totals.map(([label, value]) => value !== undefined ? (
+          <div key={label}><dt>{t(label)}</dt><dd>{amounts.format(value)}</dd></div>
+        ) : null)}
+      </dl>
+    </section>
   );
 }
 
@@ -424,6 +583,7 @@ export function PaymentReceiveForm() {
       setDone(
         result.status === "received"
           ? t("financeWrite.paymentDone", {
+              payment: result.payment,
               outstanding: result.outstanding.toFixed(2),
             })
           : t("financeWrite.uncertain"),
