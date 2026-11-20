@@ -59,6 +59,33 @@ DETAILS = {
 }
 
 
+def visit_evidence(**overrides):
+    """Eligible native visit evidence for the pilot driver appointment."""
+
+    values = {
+        "metadata_verified": True,
+        "record_fields_readable": True,
+        "billing_history_complete": True,
+        "prior_billing": False,
+        "appointment_id": "NATIVE-APPT-3",
+        "practitioner": "DOC-1",
+        "actor_practitioner": "DOC-1",
+        "status": "Open",
+        "docstatus": 0,
+        "encounter_id": None,
+        "invoiced": 0,
+        "ref_sales_invoice": None,
+        "patient": "PAT-1",
+        "customer": "CUST-1",
+        "company": "COMP-1",
+        "currency": "THB",
+        "service": "ITEM-1",
+        "price": Decimal("100"),
+    }
+    values.update(overrides)
+    return values
+
+
 def gateway(**overrides):
     values = {
         "site": SITE,
@@ -149,11 +176,76 @@ class AppointmentSuccessTests(unittest.TestCase):
             "modified": "2026-11-14 09:30:00.123456",
         }
         with patch("clinic_ui.endpoints.appointments.lookup_visit_invoice", create=True, return_value={"invoice_id": "INV-1"}):
-            self.assertNotIn("visit_invoice_appointment_id",
-                             appointments_endpoint.appointment_detail(fake, alias))
+            payload = appointments_endpoint.appointment_detail(fake, alias)
+            self.assertNotIn("visit_invoice_appointment_id", payload)
+            self.assertNotIn("visit_invoice_no_vat_allowed", payload)
             fake.current_session = session_view(user=ACTOR, roles=("Clinic Reception",))
-            self.assertNotIn("visit_invoice_appointment_id",
-                             appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3"))
+            payload = appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+            self.assertNotIn("visit_invoice_appointment_id", payload)
+            self.assertNotIn("visit_invoice_no_vat_allowed", payload)
+
+    def _native_driver(self):
+        """The native driver appointment the existing anchor publishes."""
+
+        fake = gateway(current_session=session_view(roles=("Physician",)))
+        fake.appointment_detail_map["NATIVE-APPT-3"] = {
+            "patient": "PAT-1",
+            "appointment_date": "2026-11-20",
+            "appointment_time": "09:30:00",
+            "status": "Open",
+            "modified": "2026-11-14 09:30:00.123456",
+        }
+        fake.visit_invoice_evidence = lambda _: visit_evidence()
+        return fake
+
+    def _project(self, fake, linked=None):
+        with patch(
+            "clinic_ui.endpoints.appointments.lookup_visit_invoice",
+            create=True,
+            return_value=linked,
+        ):
+            return appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+
+    def test_no_vat_flag_is_adjacent_to_the_verified_native_anchor(self):
+        with patch(
+            "clinic_ui.endpoints.appointments.no_vat_allowed", return_value=True
+        ):
+            payload = self._project(self._native_driver())
+        self.assertEqual(payload["visit_invoice_appointment_id"], "NATIVE-APPT-3")
+        self.assertIs(payload["visit_invoice_no_vat_allowed"], True)
+
+    def test_no_vat_flag_is_omitted_unless_the_authority_allows_it(self):
+        with patch(
+            "clinic_ui.endpoints.appointments.no_vat_allowed", return_value=False
+        ):
+            payload = self._project(self._native_driver())
+        self.assertEqual(payload["visit_invoice_appointment_id"], "NATIVE-APPT-3")
+        self.assertNotIn("visit_invoice_no_vat_allowed", payload)
+
+    def test_no_vat_flag_is_omitted_on_the_existing_native_read_site(self):
+        payload = self._project(self._native_driver())
+        self.assertEqual(payload["visit_invoice_appointment_id"], "NATIVE-APPT-3")
+        self.assertNotIn("visit_invoice_no_vat_allowed", payload)
+
+    def test_no_vat_flag_is_omitted_for_an_ineligible_visit(self):
+        fake = self._native_driver()
+        fake.visit_invoice_evidence = lambda _: visit_evidence(prior_billing=True)
+        with patch(
+            "clinic_ui.endpoints.appointments.no_vat_allowed", return_value=True
+        ):
+            payload = self._project(fake)
+        self.assertNotIn("visit_invoice_appointment_id", payload)
+        self.assertNotIn("visit_invoice_no_vat_allowed", payload)
+
+    def test_no_vat_flag_is_omitted_for_a_posted_only_read_only_context(self):
+        fake = self._native_driver()
+        fake.visit_invoice_evidence = lambda _: None
+        with patch(
+            "clinic_ui.endpoints.appointments.no_vat_allowed", return_value=True
+        ):
+            payload = self._project(fake, linked={"invoice_id": "INV-1"})
+        self.assertEqual(payload["visit_invoice_appointment_id"], "NATIVE-APPT-3")
+        self.assertNotIn("visit_invoice_no_vat_allowed", payload)
 
     def test_returns_the_five_field_rows_for_reception(self):
         fake = gateway()
@@ -787,6 +879,232 @@ class AppointmentDetailTests(unittest.TestCase):
         }
         with self.assertRaises(Denied):
             appointments_endpoint.appointment_detail(fake, "APPT-1")
+
+
+DEDICATED_SITE = "clinic-visit-invoice.local"
+DOCTOR = "doctor@example.test"
+
+
+class DedicatedVisitInvoiceDetailTests(unittest.TestCase):
+    """Raw canonical native docname detail on the dedicated site only.
+
+    Writes are off in these fixtures. The dedicated doctor reaches only a visit
+    whose eligibility or posted linkage is independently verified, and the
+    patient must still resolve through the existing static allowlist.
+    """
+
+    def _fake(
+        self,
+        *,
+        site=DEDICATED_SITE,
+        user=DOCTOR,
+        roles=("Physician",),
+        **settings_overrides,
+    ):
+        values = {
+            "clinic_ui_synthetic_site": site,
+            "clinic_ui_synthetic_patients": PATIENTS,
+            "clinic_ui_synthetic_appointments": APPOINTMENTS,
+            "clinic_ui_visit_invoice_write_enabled": 0,
+            "clinic_ui_visit_invoice_write_user": DOCTOR,
+            "clinic_ui_visit_invoice_read_appointments": ["NATIVE-APPT-3"],
+        }
+        values.update(settings_overrides)
+        fake = gateway(
+            site=site,
+            settings=settings(**values),
+            current_session=session_view(user=user, roles=roles),
+        )
+        fake.appointment_detail_map["NATIVE-APPT-3"] = {
+            "patient": "PAT-1",
+            "appointment_date": "2026-11-20",
+            "appointment_time": "09:30:00",
+            "status": "Open",
+            "modified": "2026-11-14 09:30:00.123456",
+        }
+        fake._configuration = lambda: fake._settings
+        fake.evidence_reads = []
+        fake.lookup_appointment_receipt = lambda *args: (_ for _ in ()).throw(
+            AssertionError("legacy store accessed")
+        )
+        fake.list_committed_appointment_receipts = lambda *args, **kwargs: (
+            (_ for _ in ()).throw(AssertionError("legacy store accessed"))
+        )
+        return fake
+
+    def _eligible(self, fake, **overrides):
+        def read(appointment_id):
+            fake.evidence_reads.append(appointment_id)
+            return visit_evidence(**overrides)
+
+        fake.visit_invoice_evidence = read
+        return fake
+
+    def test_dedicated_doctor_reads_an_eligible_visit_with_writes_off(self):
+        fake = self._eligible(self._fake())
+        payload = appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+        self.assertEqual(payload["appointment_id"], "NATIVE-APPT-3")
+        self.assertEqual(payload["workspace_patient_id"], "WS-1")
+        self.assertNotIn("PAT-1", repr(payload))
+        self.assertIs(payload["can_reschedule"], False)
+        self.assertIs(payload["can_checkin"], False)
+        self.assertEqual(payload["visit_invoice_appointment_id"], "NATIVE-APPT-3")
+        self.assertNotIn("visit_invoice_no_vat_allowed", payload)
+        self.assertEqual(fake.evidence_reads, ["NATIVE-APPT-3"])
+
+    def test_dedicated_doctor_reads_a_posted_only_visit_with_writes_off(self):
+        fake = self._fake()
+        fake.visit_invoice_evidence = lambda _: None
+        with patch(
+            "clinic_ui.endpoints.appointments.lookup_visit_invoice",
+            create=True,
+            return_value={"invoice_id": "INV-1"},
+        ) as lookup:
+            payload = appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+        self.assertEqual(payload["appointment_id"], "NATIVE-APPT-3")
+        self.assertIs(payload["can_reschedule"], False)
+        self.assertEqual(payload["visit_invoice_appointment_id"], "NATIVE-APPT-3")
+        self.assertNotIn("visit_invoice_no_vat_allowed", payload)
+        self.assertEqual(lookup.call_count, 1)
+
+    def test_dedicated_path_denies_another_actor(self):
+        for overrides in (
+            {"user": ACTOR},
+            {"clinic_ui_visit_invoice_write_user": ACTOR},
+            {"clinic_ui_visit_invoice_write_user": "Administrator"},
+        ):
+            with self.subTest(overrides=overrides):
+                fake = self._eligible(self._fake(**overrides))
+                with self.assertRaises(Denied):
+                    appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+
+    def test_dedicated_path_denies_reception_even_when_configured(self):
+        fake = self._eligible(
+            self._fake(
+                user=ACTOR,
+                roles=("Clinic Reception",),
+                clinic_ui_visit_invoice_write_user=ACTOR,
+            )
+        )
+        with self.assertRaises(Denied):
+            appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+
+    def test_dedicated_path_denies_other_sites(self):
+        fake = self._eligible(self._fake(site="clinic-visit-invoice.local.evil"))
+        with self.assertRaises(Denied):
+            appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+
+    def test_other_sites_keep_the_existing_native_read_behaviour(self):
+        fake = self._fake(site=SITE)
+        fake.visit_invoice_evidence = lambda _: None
+        with patch(
+            "clinic_ui.endpoints.appointments.lookup_visit_invoice",
+            create=True,
+            return_value=None,
+        ):
+            payload = appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+        self.assertEqual(payload["appointment_id"], "NATIVE-APPT-3")
+        self.assertNotIn("visit_invoice_appointment_id", payload)
+
+    def test_dedicated_path_denies_an_unproven_or_unowned_visit(self):
+        for overrides in (
+            {"prior_billing": True},
+            {"metadata_verified": False},
+            {"actor_practitioner": "DOC-2"},
+            {"appointment_id": "NATIVE-APPT-2"},
+        ):
+            with self.subTest(overrides=overrides):
+                fake = self._eligible(self._fake(), **overrides)
+                with patch(
+                    "clinic_ui.endpoints.appointments.lookup_visit_invoice",
+                    create=True,
+                    return_value=None,
+                ):
+                    with self.assertRaises(Denied):
+                        appointments_endpoint.appointment_detail(
+                            fake, "NATIVE-APPT-3"
+                        )
+
+    def test_dedicated_path_denies_malformed_posted_linkage(self):
+        for linkage in (
+            {"invoice_id": "INV-1", "extra": True},
+            {"invoice_id": "INV-1 "},
+            {"invoice_id": "INV-1", "patient": "PAT-1"},
+            "INV-1",
+        ):
+            with self.subTest(linkage=linkage):
+                fake = self._fake()
+                fake.visit_invoice_evidence = lambda _: None
+                with patch(
+                    "clinic_ui.endpoints.appointments.lookup_visit_invoice",
+                    create=True,
+                    return_value=linkage,
+                ):
+                    with self.assertRaises(Denied):
+                        appointments_endpoint.appointment_detail(
+                            fake, "NATIVE-APPT-3"
+                        )
+
+    def test_dedicated_path_preserves_static_precedence(self):
+        fake = self._eligible(self._fake())
+        fake.appointment_detail_map["NATIVE-APPT-1"] = {
+            **DETAILS["NATIVE-APPT-1"],
+            "modified": "2026-11-14 09:30:00.123456",
+        }
+        payload = appointments_endpoint.appointment_detail(fake, "APPT-1")
+        self.assertEqual(payload["appointment_id"], "APPT-1")
+        self.assertEqual(payload["workspace_patient_id"], "WS-1")
+        self.assertNotIn("visit_invoice_appointment_id", payload)
+        self.assertEqual(fake.evidence_reads, [])
+        fake._settings["clinic_ui_visit_invoice_read_appointments"] = ["NATIVE-APPT-1"]
+        with self.assertRaises(Denied):
+            appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-1")
+
+    def test_dedicated_path_preserves_booked_alias_precedence(self):
+        alias = build_alias(SECRET.encode(), DEDICATED_SITE, ACTOR, BOOK_KEY)
+        fake = self._eligible(self._fake(user=ACTOR))
+        fake.lookup_appointment_receipt = FakeGateway.lookup_appointment_receipt.__get__(fake)
+        fake.list_committed_appointment_receipts = FakeGateway.list_committed_appointment_receipts.__get__(fake)
+        fake.appointment_receipt_records.append(
+            FakeAppointmentReceipt(
+                "book",
+                ACTOR,
+                BOOK_KEY,
+                appointment_write.encode_receipt(
+                    kind="book", alias=alias, native_appointment_id="NATIVE-APPT-3"
+                ),
+            )
+        )
+        payload = appointments_endpoint.appointment_detail(fake, alias)
+        self.assertEqual(payload["appointment_id"], alias)
+        self.assertNotIn("NATIVE-APPT-3", repr(payload))
+        self.assertNotIn("visit_invoice_appointment_id", payload)
+
+    def test_dedicated_read_allowlist_is_literal_bounded_and_unique(self):
+        alias = build_alias(SECRET.encode(), DEDICATED_SITE, DOCTOR, BOOK_KEY)
+        for value in (None, [], "NATIVE-APPT-3", ["*"], ["NATIVE-APPT-3*"],
+                      ["NATIVE-APPT-3", "NATIVE-APPT-3"],
+                      ["NATIVE-APPT-3", " bad "], ["NATIVE-APPT-2"],
+                      ["NATIVE-APPT-3", 1], ["NATIVE-APPT-3", alias],
+                      ["NATIVE-APPT-3", "bad\x00id"],
+                      [f"NATIVE-APPT-{n}" for n in range(65)]):
+            with self.subTest(value=value):
+                fake = self._eligible(self._fake(
+                    clinic_ui_visit_invoice_read_appointments=value
+                ))
+                with self.assertRaises(Denied):
+                    appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+
+    def test_dedicated_path_requires_the_static_patient_allowlist(self):
+        fake = self._eligible(self._fake())
+        fake.appointment_detail_map["NATIVE-APPT-3"]["patient"] = "PAT-9"
+        with self.assertRaises(Denied):
+            appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+
+    def test_dedicated_path_requires_the_canonical_native_id(self):
+        fake = self._eligible(self._fake())
+        with self.assertRaises(Denied):
+            appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3 ")
 
 
 if __name__ == "__main__":

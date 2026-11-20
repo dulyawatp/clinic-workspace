@@ -1,8 +1,25 @@
-"""Read-only account baseline; not a complete preview-terms authorization."""
+"""Read-only native accounting context; not a preview-terms authorization.
+
+The VAT branch resolves exactly one explicitly configured, non-default,
+same-company ERPNext ``Sales Taxes and Charges Template`` holding one exclusive
+7% ``On Net Total`` row pointing at a verified same-company tax liability
+account. No VAT eligibility and no doctor authorization are decided here; both
+belong to the separate endpoint lane.
+"""
 
 from datetime import date
 from decimal import Decimal
 
+VAT_MODE_ADD = "vat_7"
+VAT_MODE_NONE = "no_vat"
+VAT_MODES = (VAT_MODE_ADD, VAT_MODE_NONE)
+# Server-only configuration naming the one approved VAT template. It is never
+# supplied by a caller, and a missing, malformed or unknown value disables the
+# VAT branch instead of falling back to a native default.
+VAT_TEMPLATE_KEY = "clinic_ui_visit_invoice_vat_template"
+VAT_RATE = Decimal("7")
+MAX_TAX_DESCRIPTION_LENGTH = 512
+_MAX_NAME_LENGTH = 140
 
 _SWITCHES = {
     "Healthcare Settings": (
@@ -12,6 +29,16 @@ _SWITCHES = {
         "create_observation_on_si_submit",
     ),
     "Selling Settings": ("enable_discount_accounting",),
+}
+
+_TAX_TEMPLATE_FIELDS = {
+    "company": ("Link", "Company"), "is_default": ("Check", None),
+    "disabled": ("Check", None), "taxes": ("Table", "Sales Taxes and Charges"),
+}
+_TAX_ROW_FIELDS = {
+    "charge_type": ("Select", None), "account_head": ("Link", "Account"),
+    "rate": ("Float", None), "included_in_print_rate": ("Check", None),
+    "description": ("Small Text", None),
 }
 
 _FIELDS = {
@@ -45,6 +72,7 @@ _FIELDS = {
         "stock_uom": ("Link", "UOM"), "variant_of": ("Link", "Item"),
     },
     "UOM": {"enabled": ("Check", None)},
+    "Sales Taxes and Charges Template": _TAX_TEMPLATE_FIELDS,
 }
 _INTEGRITY_FIELDS = {
     "Party Account": {"company": ("Link", "Company"), "account": ("Link", "Account")},
@@ -52,10 +80,8 @@ _INTEGRITY_FIELDS = {
         "company": ("Link", "Company"), "party_type": ("Link", "DocType"),
         "party": ("Dynamic Link", "party_type"),
     },
-    "Sales Taxes and Charges Template": {
-        "company": ("Link", "Company"), "is_default": ("Check", None), "disabled": ("Check", None),
-        "taxes": ("Table", "Sales Taxes and Charges"),
-    },
+    "Sales Taxes and Charges Template": _TAX_TEMPLATE_FIELDS,
+    "Sales Taxes and Charges": _TAX_ROW_FIELDS,
     "Tax Rule": {"company": ("Link", "Company"), "item_group": ("Link", "Item Group")},
     "Pricing Rule": {"disable": ("Check", None), "selling": ("Check", None), "company": ("Link", "Company")},
     "Promotional Scheme": {"disable": ("Check", None), "selling": ("Check", None),
@@ -115,11 +141,102 @@ def _unsupported_switches_disabled(gateway):
         return False
 
 
-def resolve_visit_invoice_accounting(gateway, visit):
+def _configured_vat_template(gateway):
+    """Read the one server-only approved VAT template name, or nothing."""
+    name = gateway._configuration().get(VAT_TEMPLATE_KEY)
+    if (type(name) is not str or not name or name != name.strip()
+            or len(name) > _MAX_NAME_LENGTH or not name.isprintable()):
+        return None
+    return name
+
+
+def _resolve_vat_tax(gateway, visit, terms):
+    """Resolve the approved template's single exclusive 7% tax row and account.
+
+    The template must be the exact configured, non-default, enabled,
+    same-company record. Its one row must charge 7% on the net total without
+    being included in the printed rate, and its ledger account must be an
+    enabled same-company leaf Tax liability in the invoice currency.
+    """
+    frappe = gateway.frappe
+    user = frappe.session.user
+    name = _configured_vat_template(gateway)
+    if name is None:
+        return None
+    row_meta = frappe.get_meta("Sales Taxes and Charges")
+    parenttype = "Sales Taxes and Charges Template"
+    allowed = set(row_meta.get_permlevel_access("read", parenttype=parenttype, user=user))
+    masked = {field.fieldname for field in row_meta.get_masked_fields(parenttype=parenttype)}
+    if (not _schema(row_meta, _TAX_ROW_FIELDS)
+            or any(row_meta.get_field(field).permlevel not in allowed or field in masked
+                   for field in _TAX_ROW_FIELDS)):
+        return None
+    template = _read(gateway, "Sales Taxes and Charges Template", name, user)
+    if template is None:
+        return None
+    rows = template.taxes
+    if (template.company != visit["company"] or not _check(template.is_default, 0)
+            or not _check(template.disabled, 0)
+            or not isinstance(rows, (list, tuple)) or len(rows) != 1):
+        return None
+    row = rows[0]
+    rate = row.rate
+    if (row.charge_type != "On Net Total" or not _check(row.included_in_print_rate, 0)
+            or type(rate) not in (int, float) or Decimal(str(rate)) != VAT_RATE
+            or type(row.description) is not str or not row.description.strip()
+            or len(row.description) > MAX_TAX_DESCRIPTION_LENGTH
+            or type(row.account_head) is not str or not row.account_head.strip()):
+        return None
+    account = _read(gateway, "Account", row.account_head, user)
+    if (account is None or account.company != visit["company"]
+            or account.account_currency != visit["currency"]
+            or not _check(account.disabled, 0) or not _check(account.is_group, 0)
+            or account.root_type != "Liability" or account.account_type != "Tax"
+            or row.account_head in (terms["receivable_account"], terms["income_account"])):
+        return None
+    return name, {"charge_type": "On Net Total", "account_head": row.account_head,
+                   "rate": VAT_RATE, "included_in_print_rate": 0, "description": row.description}
+
+
+def resolve_visit_invoice_terms(gateway, visit, vat_mode):
+    """Resolve the accounting context for one required, explicit VAT mode.
+
+    ``vat_7`` resolves the approved template and its single tax row; ``no_vat``
+    carries no template and no rows. Nothing here establishes No VAT
+    eligibility or doctor authorization, and no default template is ever used.
+    """
+    if not isinstance(vat_mode, str) or vat_mode not in VAT_MODES:
+        return None
+    try:
+        terms = _resolve_visit_invoice_accounting(gateway, visit)
+        if terms is None:
+            return None
+        tax = None
+        if vat_mode == VAT_MODE_ADD:
+            tax = _resolve_vat_tax(gateway, visit, terms)
+            if tax is None:
+                return None
+        result = dict(terms)
+        if tax is None:
+            result.update({"vat_mode": VAT_MODE_NONE, "tax_template": None,
+                           "tax_rows": (), "tax_account": None, "tax_rate": None})
+        else:
+            template, row = tax
+            result.update({"vat_mode": VAT_MODE_ADD, "tax_template": template,
+                           "tax_rows": (row,), "tax_account": row["account_head"],
+                           "tax_rate": VAT_RATE})
+        return result
+    except Exception:
+        return None
+
+
+def _resolve_visit_invoice_accounting(gateway, visit):
     """Resolve account baseline for an already authorized trusted visit.
 
     Result cannot authorize preview: unsupported settings and precision remain
     unverified. Integrity queries reveal neither matching names nor settings.
+    Any same-company default or ambiguous default tax template refuses the
+    baseline: native defaults must never supply a tax on their own.
     """
     try:
         frappe = gateway.frappe
@@ -166,7 +283,9 @@ def resolve_visit_invoice_accounting(gateway, visit):
                                "company": company_name}),
             ("Party Account", {"parentfield": "income_account", "parent": "Healthcare Settings",
                                "company": company_name}),
-            ("Sales Taxes and Charges Template", {}),
+            ("Sales Taxes and Charges Template", {"company": company_name, "is_default": 1}),
+            ("Sales Taxes and Charges Template",
+             {"company": company_name, "is_default": ["is", "not set"]}),
             ("Tax Rule", {}),
             ("Pricing Rule", {}),
             ("Promotional Scheme", {}),

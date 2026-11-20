@@ -30,6 +30,7 @@ const ITEM_KEYS = [
 const DETAIL_KEYS = [...ITEM_KEYS, "modified"] as const;
 const READ_KEYS = [...DETAIL_KEYS, "can_reschedule", "can_checkin"] as const;
 const INVOICE_READ_KEYS = [...READ_KEYS, "visit_invoice_appointment_id"] as const;
+const INVOICE_VAT_READ_KEYS = [...INVOICE_READ_KEYS, "visit_invoice_no_vat_allowed"] as const;
 
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const TIME = /^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/;
@@ -131,6 +132,7 @@ export interface NativeAppointmentRead extends NativeAppointmentDetail {
   can_reschedule: boolean;
   can_checkin: boolean;
   visit_invoice_appointment_id?: string;
+  visit_invoice_no_vat_allowed?: true;
 }
 
 /**
@@ -174,7 +176,9 @@ export function parseNativeAppointmentRead(
 ): NativeAppointmentRead {
   if (!isRecord(value)) throw unavailable();
   const hasInvoiceId = Object.hasOwn(value, "visit_invoice_appointment_id");
-  if (!hasExactKeys(value, hasInvoiceId ? INVOICE_READ_KEYS : READ_KEYS)) throw unavailable();
+  const hasNoVatFlag = Object.hasOwn(value, "visit_invoice_no_vat_allowed");
+  const keys = hasInvoiceId ? (hasNoVatFlag ? INVOICE_VAT_READ_KEYS : INVOICE_READ_KEYS) : READ_KEYS;
+  if (!hasExactKeys(value, keys)) throw unavailable();
   const invoiceId = value.visit_invoice_appointment_id;
   if (hasInvoiceId && (!isSafeId(invoiceId) || invoiceId.length > 140)) throw unavailable();
   const detail = readDetailFields(value, expectedId);
@@ -188,6 +192,8 @@ export function parseNativeAppointmentRead(
     can_reschedule: value.can_reschedule,
     can_checkin: value.can_checkin,
     ...(typeof invoiceId === "string" ? { visit_invoice_appointment_id: invoiceId } : {}),
+    ...(hasInvoiceId && hasNoVatFlag && value.visit_invoice_no_vat_allowed === true
+      ? { visit_invoice_no_vat_allowed: true } : {}),
   };
 }
 

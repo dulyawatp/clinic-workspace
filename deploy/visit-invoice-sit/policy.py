@@ -66,10 +66,10 @@ def allows(method, target, body=b"", content_type=""):
         return False
     if name == "login":
         return set(data) == {"usr", "pwd"} and all(text(v) for v in data.values())
-    required = {"appointment_id"} | ({"preview_token"} if name.endswith(".submit") else set())
+    required = {"appointment_id", "vat_mode"} | ({"preview_token"} if name.endswith(".submit") else set())
     if not required <= set(data) or set(data) - required - {"discount"}:
         return False
-    if not all(text(data[k]) for k in required):
+    if not all(text(data[k]) for k in required) or data["vat_mode"] not in ("vat_7", "no_vat"):
         return False
     if "discount" not in data:
         return True

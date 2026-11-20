@@ -145,7 +145,9 @@ an explicit approval blocker.
 The gateway allows GET Clinic shell and bundle assets, login/logout, bootstrap,
 directory, patient and appointment reads, and exactly
 `clinic_ui.api.visit_invoice.{view,preview,submit}`. JSON bodies and query keys
-are allowlisted; duplicate JSON keys and unknown keys are rejected. Cookies and
+are allowlisted; duplicate JSON keys and unknown keys are rejected. Preview and
+submit additionally require an exact string `vat_mode` of `vat_7` or `no_vat`;
+the gateway does not infer tax mode or No VAT eligibility. Cookies and
 CSRF headers pass through; upstream remains responsible for authentication,
 authorization and CSRF. Everything else is denied, including Desk and generic
 Frappe APIs. This is deliberately limited to the observed target transport, not

@@ -9,17 +9,57 @@ from clinic_ui.endpoints import common
 from clinic_ui.runtime import visit_invoice as runtime
 
 
+VAT_MODES = ("vat_7", "no_vat")
+_TOTALS = ("currency", "gross", "discount", "net", "vat", "total")
+
+
+def _vat_mode(body):
+    """Accept only the literal modes the browser chose; never infer or default."""
+    vat_mode = body.get("vat_mode")
+    return vat_mode if type(vat_mode) is str and vat_mode in VAT_MODES else None
+
+
+def _no_vat_allowed(gateway, appointment, vat_mode):
+    """No VAT needs positive server authority on every request that carries it."""
+    if vat_mode != "no_vat":
+        return True
+    try:
+        return gateway.visit_invoice_no_vat_allowed(appointment) is True
+    except Exception:
+        return False
+
+
+def _checked_totals(claims, vat_mode):
+    """Re-derive preview totals from the bound claims instead of trusting them."""
+    vat = claims.get("vat")
+    totals = claims.get("totals")
+    if type(vat) is not dict or vat.get("mode") != vat_mode or type(totals) is not dict:
+        raise ValueError("preview binding mismatch")
+    if set(totals) != set(_TOTALS):
+        raise ValueError("invalid preview totals")
+    gross, cut, net, vat_amount, total = (
+        Decimal(totals[field]) for field in ("gross", "discount", "net", "vat", "total"))
+    if (gross <= 0 or cut < 0 or net <= 0 or vat_amount < 0 or total <= 0
+            or gross - cut != net or net + vat_amount != total
+            or (vat_mode == "no_vat" and vat_amount != 0)
+            or (claims["discount"]["mode"] == "none" and cut != 0)
+            or (claims["discount"]["mode"] != "none" and cut <= 0)):
+        raise ValueError("invalid preview totals")
+    return totals
+
+
 def preview(gateway, body, csrf_token=None):
     common.begin(gateway)
     _settings, view, role = common.authorize(gateway, frozenset({"DOC"}))
     if (role != "DOC" or runtime.visit_invoice_write_enabled(gateway, view.user) is not True
             or not gateway.csrf_token_valid(csrf_token)):
         gateway.deny()
-    if (not isinstance(body, dict) or not {"appointment_id"} <= set(body)
-            or not set(body) <= {"appointment_id", "discount"}):
+    if (not isinstance(body, dict) or not {"appointment_id", "vat_mode"} <= set(body)
+            or not set(body) <= {"appointment_id", "discount", "vat_mode"}):
         return gateway.respond_write(422, {"code": "VALIDATION"})
-    appointment = body["appointment_id"]
-    if not is_valid_text(appointment, 140) or appointment != appointment.strip():
+    appointment, vat_mode = body["appointment_id"], _vat_mode(body)
+    if (not is_valid_text(appointment, 140) or appointment != appointment.strip()
+            or vat_mode is None):
         return gateway.respond_write(422, {"code": "VALIDATION"})
     try:
         discount = visit_invoice_contract.parse_discount(body)
@@ -30,10 +70,10 @@ def preview(gateway, body, csrf_token=None):
                    and (discount is None or gateway.visit_invoice_discount_allowed() is True))
     except Exception:
         allowed = False
-    if not allowed:
+    if not allowed or not _no_vat_allowed(gateway, appointment, vat_mode):
         gateway.deny()
     try:
-        result = gateway.build_visit_invoice_preview(appointment, discount)
+        result = gateway.build_visit_invoice_preview(appointment, discount, vat_mode)
         if type(result) is not dict or set(result) != {"totals", "claims"}:
             raise ValueError("invalid preview")
         totals, claims = result["totals"], result["claims"]
@@ -43,14 +83,13 @@ def preview(gateway, body, csrf_token=None):
                 or claims.get("actor") != view.user or claims.get("discount") != expected_discount
                 or claims.get("totals") != totals):
             raise ValueError("preview binding mismatch")
+        totals = _checked_totals(claims, vat_mode)
         token = visit_invoice_token.issue(
             gateway.visit_invoice_token_key(), claims, now=gateway.visit_invoice_clock()
         )
-        gross, cut, total = (Decimal(totals[field]) for field in ("gross", "discount", "total"))
-        if (gross <= 0 or cut < 0 or total <= 0 or gross - cut != total
-                or (discount is None and cut != 0) or (discount is not None and cut <= 0)):
-            raise ValueError("invalid preview totals")
-        return {**totals, "preview_token": token}
+        return {"currency": totals["currency"], "gross": totals["gross"],
+                "discount": totals["discount"], "net": totals["net"],
+                "vat": totals["vat"], "total": totals["total"], "preview_token": token}
     except Exception:
         gateway.deny()
 
@@ -59,9 +98,11 @@ class KnownMutationFailure(Exception):
     """Native worker confirms failure before commit; transaction needs rollback."""
 
 
-def _submit_in_lane(gateway, appointment, discount, token, actor, dispatched):
+def _submit_in_lane(gateway, appointment, discount, vat_mode, token, actor, dispatched):
+    if not _no_vat_allowed(gateway, appointment, vat_mode):
+        return "denied", None
     try:
-        prepared = gateway.prepare_visit_invoice_submission(appointment, discount)
+        prepared = gateway.prepare_visit_invoice_submission(appointment, discount, vat_mode)
         if type(prepared) is not dict or set(prepared) != {"draft", "totals", "claims"}:
             return "denied", None
         claims, totals = prepared["claims"], prepared["totals"]
@@ -73,9 +114,7 @@ def _submit_in_lane(gateway, appointment, discount, token, actor, dispatched):
                 or not visit_invoice_token.verify(gateway.visit_invoice_token_key(), claims, token,
                                                   now=gateway.visit_invoice_clock())):
             return "denied", None
-        gross, cut, total = (Decimal(totals[field]) for field in ("gross", "discount", "total"))
-        if (gross <= 0 or cut < 0 or total <= 0 or gross - cut != total
-                or (discount is None and cut != 0) or (discount is not None and cut <= 0)):
+        if _checked_totals(claims, vat_mode) != totals:
             return "denied", None
     except Exception:
         return "denied", None
@@ -118,11 +157,13 @@ def submit(gateway, body, csrf_token=None):
     if (role != "DOC" or runtime.visit_invoice_write_enabled(gateway, view.user) is not True
             or not gateway.csrf_token_valid(csrf_token)):
         gateway.deny()
-    if (not isinstance(body, dict) or not {"appointment_id", "preview_token"} <= set(body)
-            or not set(body) <= {"appointment_id", "discount", "preview_token"}):
+    if (not isinstance(body, dict) or not {"appointment_id", "preview_token", "vat_mode"} <= set(body)
+            or not set(body) <= {"appointment_id", "discount", "preview_token", "vat_mode"}):
         return gateway.respond_write(422, {"code": "VALIDATION"})
     appointment, token = body["appointment_id"], body["preview_token"]
+    vat_mode = _vat_mode(body)
     if (not is_valid_text(appointment, 140) or appointment != appointment.strip()
+            or vat_mode is None
             or type(token) is not str or not token or len(token) > 100):
         return gateway.respond_write(422, {"code": "VALIDATION"})
     try:
@@ -143,7 +184,8 @@ def submit(gateway, body, csrf_token=None):
     entered = lane.__enter__()
     dispatched = [False]
     try:
-        outcome, result = (_submit_in_lane(gateway, appointment, discount, token, view.user, dispatched)
+        outcome, result = (_submit_in_lane(gateway, appointment, discount, vat_mode, token,
+                                           view.user, dispatched)
                            if entered is True else ("denied", None))
     except BaseException:
         lane.__exit__(*sys.exc_info())

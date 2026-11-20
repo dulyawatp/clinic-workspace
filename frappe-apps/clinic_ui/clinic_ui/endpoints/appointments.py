@@ -34,10 +34,18 @@ from clinic_ui.core.text import is_valid_text
 from clinic_ui.endpoints import aliases, common
 from clinic_ui.runtime.visit_invoice import resolve_visit_invoice
 from clinic_ui.runtime.visit_invoice_lookup import lookup_visit_invoice
+from clinic_ui.runtime.visit_invoice_vat_authority import no_vat_allowed
 
 SOURCE_STATIC = "static"
 SOURCE_BOOKED = "booked"
 SOURCE_NATIVE = "native"
+
+# The dedicated visit-invoice SIT. Its own appointment docnames resolve for the
+# configured doctor only; no other site or role gains that read.
+VISIT_INVOICE_SITE = "clinic-visit-invoice.local"
+VISIT_INVOICE_WRITE_USER_KEY = "clinic_ui_visit_invoice_write_user"
+VISIT_INVOICE_READ_APPOINTMENTS_KEY = "clinic_ui_visit_invoice_read_appointments"
+MAX_VISIT_INVOICE_READ_APPOINTMENTS = 64
 
 OPEN_STATUSES = frozenset({"Open", "Confirmed"})
 RESCHEDULE_STATUSES = frozenset({"Scheduled", "Open", "Confirmed"})
@@ -337,6 +345,65 @@ def resolve_read(gateway, settings, actor, workspace_appointment_id):
     return matches[0]
 
 
+def _dedicated_visit_invoice_native(gateway, actor, role, appointment_id):
+    """Resolve one raw native appointment docname on the dedicated site only.
+
+    The dedicated visit-invoice SIT keeps its own appointment reachable by
+    docname for the configured doctor even with writes off, so a posted invoice
+    stays reconcilable. The server-owned allowlist is a provisioning assertion
+    that each ID names a native, non-booked synthetic visit; the dedicated site
+    has no booking ingress. Admission still requires independently verified eligible
+    visit ownership or a readable posted linkage, and the verified reads are
+    returned so the projection does not repeat them. A static row, a booked
+    alias or any other site resolves earlier and never reaches here.
+    """
+
+    try:
+        if role != "DOC" or gateway.site != VISIT_INVOICE_SITE:
+            return None
+        if (not is_valid_text(
+                appointment_id, appointment_write.MAX_APPOINTMENT_ID_LENGTH)
+                or appointment_id != appointment_id.strip()
+                or appointment_write.is_alias_shaped(appointment_id)):
+            return None
+        if (type(actor) is not str or not actor.strip() or actor != actor.strip()
+                or actor in ("Guest", "Administrator")):
+            return None
+        configured = gateway._configuration().get(VISIT_INVOICE_WRITE_USER_KEY)
+        if (type(configured) is not str or not configured.strip()
+                or configured != configured.strip()
+                or configured in ("Guest", "Administrator")
+                or configured != actor):
+            return None
+        allowed = gateway._configuration().get(VISIT_INVOICE_READ_APPOINTMENTS_KEY)
+        if (type(allowed) is not list
+                or not 0 < len(allowed) <= MAX_VISIT_INVOICE_READ_APPOINTMENTS
+                or any(type(item) is not str
+                       or not is_valid_text(item, appointment_write.MAX_APPOINTMENT_ID_LENGTH)
+                       or item != item.strip() or "*" in item
+                       or appointment_write.is_alias_shaped(item)
+                       for item in allowed)
+                or len(set(allowed)) != len(allowed)
+                or appointment_id not in allowed):
+            return None
+        resolved = ResolvedAppointment(
+            native_appointment_id=appointment_id,
+            workspace_appointment_id=appointment_id,
+            source=SOURCE_NATIVE,
+        )
+        visit = resolve_visit_invoice(gateway, appointment_id)
+        if visit is not None and visit.get("appointment_id") == appointment_id:
+            return resolved, visit, None
+        linked = lookup_visit_invoice(gateway, appointment_id)
+        if (type(linked) is dict and set(linked) == {"invoice_id"}
+                and is_valid_text(linked["invoice_id"], 140)
+                and linked["invoice_id"] == linked["invoice_id"].strip()):
+            return resolved, None, linked
+        return None
+    except Exception:
+        return None
+
+
 def checkin_patient_native_id(settings):
     """Return the configured dedicated check-in patient's native id."""
 
@@ -614,8 +681,18 @@ def appointment_detail(gateway, workspace_appointment_id=None):
     ):
         gateway.deny()
 
+    dedicated = None
     if resolved is None:
-        gateway.deny()
+        # Do not turn a configured static target into a raw native reference.
+        if any(native == workspace_appointment_id
+               for _, native in settings.appointment_allowlist):
+            gateway.deny()
+        dedicated = _dedicated_visit_invoice_native(
+            gateway, view.user, role, workspace_appointment_id
+        )
+        if dedicated is None:
+            gateway.deny()
+        resolved, dedicated_visit, dedicated_linked = dedicated
 
     detail = gateway.native_appointment_detail(resolved.native_appointment_id)
     if detail is None:
@@ -624,6 +701,10 @@ def appointment_detail(gateway, workspace_appointment_id=None):
         patient = detail["patient"]
     except (KeyError, TypeError):
         gateway.deny()
+
+    if dedicated is not None and dedicated_visit is not None:
+        if dedicated_visit.get("patient") != patient:
+            gateway.deny()
 
     # Booking, detail and check-in each enforce the current user's own Patient
     # read authority; configuration alone is never permission to read a patient.
@@ -646,8 +727,9 @@ def appointment_detail(gateway, workspace_appointment_id=None):
     except (KeyError, TypeError, ValueError):
         gateway.deny()
 
-    can_reschedule, can_checkin = _action_flags(
-        gateway, settings, view.user, resolved, detail
+    can_reschedule, can_checkin = (
+        (False, False) if dedicated is not None else
+        _action_flags(gateway, settings, view.user, resolved, detail)
     )
     try:
         result = dto.appointment_read(
@@ -667,11 +749,19 @@ def appointment_detail(gateway, workspace_appointment_id=None):
                     for _, native in settings.appointment_allowlist)):
         native_id = resolved.native_appointment_id
         try:
-            visit = resolve_visit_invoice(gateway, native_id)
-            linked = lookup_visit_invoice(gateway, native_id)
-            if ((visit is not None and visit.get("patient") == patient)
-                    or (type(linked) is dict and set(linked) == {"invoice_id"}
-                        and is_valid_text(linked["invoice_id"], 140))):
+            if dedicated is not None:
+                visit, linked = dedicated_visit, dedicated_linked
+            else:
+                visit = resolve_visit_invoice(gateway, native_id)
+                linked = lookup_visit_invoice(gateway, native_id)
+            if visit is not None and visit.get("patient") == patient:
+                result["visit_invoice_appointment_id"] = native_id
+                # The No VAT choice exists only beside a verified eligible visit
+                # and only for the configured doctor on the dedicated site.
+                if no_vat_allowed(gateway, native_id) is True:
+                    result["visit_invoice_no_vat_allowed"] = True
+            elif (type(linked) is dict and set(linked) == {"invoice_id"}
+                    and is_valid_text(linked["invoice_id"], 140)):
                 result["visit_invoice_appointment_id"] = native_id
         except Exception:
             pass

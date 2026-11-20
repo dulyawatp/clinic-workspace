@@ -68,15 +68,18 @@ class PostingLifecycleTest(unittest.TestCase):
         self.visit = dict(appointment_id="A", patient="P", customer="C", company="Co",
                           currency="USD", service="S", price="100.00")
         self.accounting = dict(uom="Each", income_account="Income", receivable_account="AR",
-                               cost_center="CC", posting_date="2026-11-20", selling_price_list="Standard")
-        self.totals = dict(currency="USD", gross="100.00", discount="10.00", total="90.00")
+                               cost_center="CC", posting_date="2026-11-20", selling_price_list="Standard",
+                               vat_mode="no_vat", tax_template=None, tax_rows=(),
+                               tax_account=None, tax_rate=None)
+        self.totals = dict(currency="USD", gross="100.00", discount="10.00",
+                           net="90.00", vat="0.00", total="90.00")
         self.discount = dict(mode="amount", value="10.00")
         self.store = {}
         self.events = []
         self.mutate = lambda store: None
         self.gl = [
-            ("Sales Invoice", "INV", "Co", "2026-11-20", "AR", "USD", "Customer", "C", 90, 0, 90, 0, 0, "Sales Invoice", "INV"),
-            ("Sales Invoice", "INV", "Co", "2026-11-20", "Income", "USD", None, None, 0, 90, 0, 90, 0, None, None),
+            ("Sales Invoice", "INV", "Co", "2026-11-20", "AR", "USD", "Customer", "C", 90, 0, 90, 0, 0, "Sales Invoice", "INV", None),
+            ("Sales Invoice", "INV", "Co", "2026-11-20", "Income", "USD", None, None, 0, 90, 0, 90, 0, None, None, "CC"),
         ]
         self.stock = []
         owner = self
@@ -100,7 +103,7 @@ class PostingLifecycleTest(unittest.TestCase):
             posting_date="2026-11-20", set_posting_time=0, selling_price_list="Standard",
             price_list_currency="USD", plc_conversion_rate=1,
             party_account_currency="USD", debit_to="AR", conversion_rate=1,
-            is_pos=0, is_return=0, update_stock=0, taxes=[], advances=[], payments=[],
+            is_pos=0, is_return=0, update_stock=0, taxes_and_charges=None, taxes=[], advances=[], payments=[],
             total=100, base_total=100, net_total=90, base_net_total=90,
             grand_total=90, base_grand_total=90, discount_amount=10,
             base_discount_amount=10, outstanding_amount=90, rounded_total=90,
@@ -131,6 +134,7 @@ class PostingLifecycleTest(unittest.TestCase):
                     "voucher_type": ("Link", "DocType"), "voucher_no": ("Dynamic Link", "voucher_type"),
                     "company": ("Link", "Company"), "posting_date": ("Date", None),
                     "account": ("Link", "Account"), "account_currency": ("Link", "Currency"),
+                    "cost_center": ("Link", "Cost Center"),
                     "party_type": ("Link", "DocType"), "party": ("Dynamic Link", "party_type"),
                     "debit": ("Currency", "Company:company:default_currency"),
                     "credit": ("Currency", "Company:company:default_currency"),
@@ -152,7 +156,7 @@ class PostingLifecycleTest(unittest.TestCase):
         def sql(query, values):
             self.events.append(("sql", query, values))
             if "tabGL Entry" in query:
-                return self.gl[:3]
+                return self.gl[:4]
             if "tabStock Ledger Entry" in query:
                 return self.stock[:1]
             raise AssertionError(query)
@@ -184,7 +188,7 @@ class PostingLifecycleTest(unittest.TestCase):
         self.assertEqual(len(queries), 2)
         self.assertEqual(queries[0][2], ("Sales Invoice", "INV"))
         self.assertEqual(queries[1][2], ("Sales Invoice", "INV"))
-        self.assertIn("WHERE voucher_type = %s AND voucher_no = %s LIMIT 3", queries[0][1])
+        self.assertIn("WHERE voucher_type = %s AND voucher_no = %s LIMIT 4", queries[0][1])
         self.assertIn("WHERE voucher_type = %s AND voucher_no = %s LIMIT 1", queries[1][1])
 
     def test_submit_denied_before_insert(self):
@@ -256,7 +260,7 @@ class PostingLifecycleTest(unittest.TestCase):
             [self.gl[0][:12] + (1,) + self.gl[0][13:], self.gl[1]],
             [self.gl[0][:8] + (89,) + self.gl[0][9:], self.gl[1]],
             [self.gl[0][:7] + ("wrong",) + self.gl[0][8:], self.gl[1]],
-            [self.gl[0][:-1] + ("OTHER",), self.gl[1]],
+            [self.gl[0][:14] + ("OTHER",) + self.gl[0][15:], self.gl[1]],
         ]
         for rows in cases:
             with self.subTest(rows=rows):
@@ -295,6 +299,80 @@ class PostingLifecycleTest(unittest.TestCase):
             with self.subTest(field=field):
                 self.setUp()
                 self.mutate = lambda store: setattr(store["invoice"], field, value)
+                with self.assertRaises(PostingPostDispatch):
+                    self.post()
+
+    def enable_vat(self):
+        self.accounting.update(vat_mode="vat_7", tax_template="VAT",
+            tax_rows=({"charge_type": "On Net Total", "account_head": "Tax",
+                       "rate": 7, "included_in_print_rate": 0, "description": "VAT 7%"},),
+            tax_account="Tax", tax_rate=7)
+        self.totals.update(net="90.00", vat="6.30", total="96.30")
+        self.doc.taxes_and_charges = "VAT"
+        self.doc.taxes = [SimpleNamespace(charge_type="On Net Total", account_head="Tax",
+            rate=7, included_in_print_rate=0, cost_center="CC", description="VAT 7%",
+            tax_amount=6.3, base_tax_amount=6.3, tax_amount_after_discount_amount=6.3,
+            base_tax_amount_after_discount_amount=6.3, total=96.3, base_total=96.3)]
+        for field in ("grand_total", "base_grand_total", "outstanding_amount",
+                      "rounded_total", "base_rounded_total"):
+            setattr(self.doc, field, 96.3)
+        self.doc.total_taxes_and_charges = self.doc.base_total_taxes_and_charges = 6.3
+        self.gl = [
+            ("Sales Invoice", "INV", "Co", "2026-11-20", "AR", "USD", "Customer", "C", 96.3, 0, 96.3, 0, 0, "Sales Invoice", "INV", None),
+            ("Sales Invoice", "INV", "Co", "2026-11-20", "Income", "USD", None, None, 0, 90, 0, 90, 0, None, None, "CC"),
+            ("Sales Invoice", "INV", "Co", "2026-11-20", "Tax", "USD", None, None, 0, 6.3, 0, 6.3, 0, None, None, "CC"),
+        ]
+
+    def test_vat_invoice_posts_separate_tax_ledger(self):
+        self.enable_vat()
+        self.assertEqual(self.post(), "INV")
+
+    def test_missing_mode_or_amounts_rejected_before_insert(self):
+        for mapping, key in (("accounting", "vat_mode"), ("totals", "net"), ("totals", "vat")):
+            with self.subTest(key=key):
+                self.setUp()
+                del (self.accounting if mapping == "accounting" else self.totals)[key]
+                with self.assertRaises(PostingPreDispatch):
+                    self.post()
+                self.assertNotIn("insert", self.events)
+
+    def test_totals_must_be_fixed_point_strings(self):
+        for value in (90, "90", "90.0", "090.00"):
+            with self.subTest(value=value):
+                self.setUp()
+                self.totals["net"] = value
+                with self.assertRaises(PostingPreDispatch):
+                    self.post()
+
+    def test_vat_persisted_tax_drift_requires_rollback(self):
+        for field, value in (("account_head", "other"), ("rate", 6),
+                             ("description", "changed"),
+                             ("included_in_print_rate", 1), ("included_in_paid_amount", 1),
+                             ("add_deduct_tax", "Deduct"), ("tax_amount_after_discount_amount", 5)):
+            with self.subTest(field=field):
+                self.setUp()
+                self.enable_vat()
+                self.mutate = lambda store: setattr(store["invoice"].taxes[0], field, value)
+                with self.assertRaises(PostingPostDispatch):
+                    self.post()
+
+    def test_item_tax_template_drift_requires_rollback(self):
+        self.enable_vat()
+        self.mutate = lambda store: setattr(store["invoice"].items[0], "item_tax_template", "other")
+        with self.assertRaises(PostingPostDispatch):
+            self.post()
+
+    def test_vat_extra_or_wrong_ledger_requires_rollback(self):
+        for change in ("extra", "cost_center", "party"):
+            with self.subTest(change=change):
+                self.setUp()
+                self.enable_vat()
+                if change == "extra":
+                    self.gl.append(self.gl[-1])
+                elif change == "cost_center":
+                    self.gl[-1] = self.gl[-1][:-1] + ("other",)
+                else:
+                    self.gl[-1] = self.gl[-1][:6] + ("Customer", "C") + self.gl[-1][8:]
                 with self.assertRaises(PostingPostDispatch):
                     self.post()
 

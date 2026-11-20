@@ -10,6 +10,8 @@ from clinic_ui.endpoints import visit_invoice
 
 KEY = b"k" * 32
 NOW = 1000
+TAX_ROW = {"charge_type": "On Net Total", "account_head": "VAT-LIAB",
+           "rate": "7", "included_in_print_rate": 0, "description": "Visit VAT"}
 
 
 class Denied(Exception):
@@ -21,6 +23,9 @@ class FakeGateway:
         self.csrf = True
         self.native = True
         self.discount_allowed = True
+        self.no_vat_allowed = True
+        self.no_vat_error = False
+        self.no_vat_calls = []
         self.calls = []
         self.claims = None
         self.events = []
@@ -48,27 +53,43 @@ class FakeGateway:
     def visit_invoice_native_create_submit_allowed(self):
         return self.native
 
+    def visit_invoice_no_vat_allowed(self, appointment_id):
+        self.no_vat_calls.append(appointment_id)
+        if self.no_vat_error:
+            raise RuntimeError("private authority details")
+        return self.no_vat_allowed
+
     def visit_invoice_discount_allowed(self):
         return self.discount_allowed
 
-    def build_visit_invoice_preview(self, appointment_id, discount):
-        self.calls.append((appointment_id, discount))
-        cut = Decimal("0") if discount is None else (
-            discount["value"] if discount["mode"] == "amount"
-            else discount["value"])
-        totals = {"currency": "USD", "gross": "100.00",
-                  "discount": f"{cut:.2f}", "total": f"{100 - cut:.2f}"}
-        self.claims = {
+    def totals(self, discount, vat_mode):
+        gross = Decimal("100.00")
+        cut = Decimal("0") if discount is None else discount["value"]
+        net = gross - cut
+        vat = (net * Decimal("7") / 100).quantize(Decimal("0.01")) if vat_mode == "vat_7" else Decimal("0.00")
+        return {"currency": "USD", "gross": f"{gross:.2f}", "discount": f"{cut:.2f}",
+                "net": f"{net:.2f}", "vat": f"{vat:.2f}", "total": f"{net + vat:.2f}"}
+
+    def claims_for(self, appointment_id, discount, vat_mode):
+        return {
             "actor": "doctor@example.test", "session": "private-session",
             "date": "2026-11-20", "appointment": appointment_id, "encounter": None,
             "discount": ({"mode": "none", "value": "0"} if discount is None else
                          {"mode": discount["mode"], "value": str(discount["value"])}),
+            "vat": ({"mode": "vat_7", "template": "VAT 7", "account": "VAT-LIAB",
+                     "rate": "7", "rows": [dict(TAX_ROW)]} if vat_mode == "vat_7" else
+                    {"mode": "no_vat", "template": None, "account": None,
+                     "rate": None, "rows": []}),
             "terms": {"patient": "private-patient", "customer": "customer",
                       "practitioner": "doctor", "company": "company",
                       "service": "service", "rate": "100.00"},
-            "totals": totals,
+            "totals": self.totals(discount, vat_mode),
         }
-        return {"totals": totals, "claims": self.claims}
+
+    def build_visit_invoice_preview(self, appointment_id, discount, vat_mode):
+        self.calls.append((appointment_id, discount, vat_mode))
+        self.claims = self.claims_for(appointment_id, discount, vat_mode)
+        return {"totals": dict(self.claims["totals"]), "claims": self.claims}
 
     def visit_invoice_token_key(self):
         return KEY
@@ -87,11 +108,11 @@ class FakeGateway:
         finally:
             self.events.append("exit")
 
-    def prepare_visit_invoice_submission(self, appointment_id, discount):
+    def prepare_visit_invoice_submission(self, appointment_id, discount, vat_mode):
         self.events.append("prepare")
         if self.prepare_error:
             raise ValueError("unavailable")
-        return {**self.build_visit_invoice_preview(appointment_id, discount),
+        return {**self.build_visit_invoice_preview(appointment_id, discount, vat_mode),
                 "draft": object()}
 
     def post_visit_invoice_and_verify_facts(self, prepared):
@@ -135,7 +156,7 @@ class PreviewTests(unittest.TestCase):
 
     def test_default_gate_denies_before_authorization_or_adapter(self):
         with self.assertRaises(Denied):
-            visit_invoice.preview(self.gateway, {"appointment_id": "APT-1"}, "csrf")
+            visit_invoice.preview(self.gateway, {"appointment_id": "APT-1", "vat_mode": "vat_7"}, "csrf")
         self.assertEqual(self.gateway.calls, [])
 
     def test_valid_preview_modes_and_no_discount_issue_real_opaque_token(self):
@@ -143,27 +164,98 @@ class PreviewTests(unittest.TestCase):
                                    ({"mode": "amount", "value": "12.50"}, "12.50"),
                                    ({"mode": "percent", "value": "15"}, "15.00")):
             with self.subTest(discount=discount), self.enabled():
-                body = {"appointment_id": "APT-1"}
+                body = {"appointment_id": "APT-1", "vat_mode": "vat_7"}
                 if discount is not None:
                     body["discount"] = discount
                 result = visit_invoice.preview(self.gateway, body, "csrf")
-                self.assertEqual(set(result), {"currency", "gross", "discount", "total", "preview_token"})
+                self.assertEqual(set(result), {"currency", "gross", "discount", "net", "vat",
+                                               "total", "preview_token"})
                 self.assertEqual(result["discount"], expected)
-                self.assertTrue(visit_invoice_token.verify(KEY, self.gateway.claims, result["preview_token"], now=NOW))
+                self.assertNotIn("preview_token", str(self.gateway.claims["terms"]))
+                self.assertTrue(visit_invoice_token.verify(KEY, self.gateway.claims,
+                                                           result["preview_token"], now=NOW))
                 self.assertNotIn("private", str(result))
 
+    def test_preview_amounts_show_net_vat_and_payable(self):
+        with self.enabled():
+            result = visit_invoice.preview(
+                self.gateway,
+                {"appointment_id": "APT-1", "vat_mode": "vat_7",
+                 "discount": {"mode": "percent", "value": "15"}},
+                "csrf",
+            )
+            self.assertEqual((result["net"], result["vat"], result["total"]),
+                             ("85.00", "5.95", "90.95"))
+            no_vat = visit_invoice.preview(
+                self.gateway,
+                {"appointment_id": "APT-1", "vat_mode": "no_vat",
+                 "discount": {"mode": "percent", "value": "15"}},
+                "csrf",
+            )
+            self.assertEqual((no_vat["net"], no_vat["vat"], no_vat["total"]),
+                             ("85.00", "0.00", "85.00"))
+        self.assertEqual(self.gateway.calls,
+                         [("APT-1", {"mode": "percent", "value": Decimal("15")}, "vat_7"),
+                          ("APT-1", {"mode": "percent", "value": Decimal("15")}, "no_vat")])
+
+    def test_vat_7_never_consults_no_vat_authority(self):
+        with self.enabled():
+            visit_invoice.preview(self.gateway, {"appointment_id": "APT-1", "vat_mode": "vat_7"}, "csrf")
+        self.assertEqual(self.gateway.no_vat_calls, [])
+
+    def test_no_vat_requires_positive_server_authority_before_preview(self):
+        for case in ("denied", "error"):
+            with self.subTest(case=case), self.enabled():
+                gateway = FakeGateway()
+                if case == "denied":
+                    gateway.no_vat_allowed = False
+                else:
+                    gateway.no_vat_error = True
+                with self.assertRaises(Denied):
+                    visit_invoice.preview(gateway, {"appointment_id": "APT-1", "vat_mode": "no_vat"}, "csrf")
+                self.assertEqual(gateway.calls, [])
+                self.assertEqual(gateway.no_vat_calls, ["APT-1"])
+
+    def test_no_vat_preview_binds_authorized_zero_tax_mode(self):
+        with self.enabled():
+            result = visit_invoice.preview(
+                self.gateway, {"appointment_id": "APT-1", "vat_mode": "no_vat"}, "csrf")
+        self.assertEqual(result["vat"], "0.00")
+        self.assertEqual(result["total"], "100.00")
+        self.assertEqual(self.gateway.claims["vat"]["mode"], "no_vat")
+        self.assertTrue(visit_invoice_token.verify(KEY, self.gateway.claims,
+                                                   result["preview_token"], now=NOW))
+
+    def test_missing_or_invalid_vat_mode_normalized(self):
+        for body in ({"appointment_id": "APT-1"},
+                     {"appointment_id": "APT-1", "vat_mode": None},
+                     {"appointment_id": "APT-1", "vat_mode": ""},
+                     {"appointment_id": "APT-1", "vat_mode": "vat"},
+                     {"appointment_id": "APT-1", "vat_mode": "vat_6"},
+                     {"appointment_id": "APT-1", "vat_mode": "VAT_7"},
+                     {"appointment_id": "APT-1", "vat_mode": " vat_7"},
+                     {"appointment_id": "APT-1", "vat_mode": 7}):
+            with self.subTest(body=body), self.enabled():
+                self.assertEqual(visit_invoice.preview(self.gateway, body, "csrf"),
+                                 (422, {"code": "VALIDATION"}))
+        self.assertEqual(self.gateway.calls, [])
+        self.assertEqual(self.gateway.no_vat_calls, [])
+
     def test_invalid_request_normalized(self):
-        for body in (None, {}, {"appointment_id": " APT-1"}, {"appointment_id": "x", "extra": 1},
-                     {"appointment_id": "x", "discount": {"mode": "amount", "value": "-1"}}):
+        for body in (None, {}, {"appointment_id": " APT-1", "vat_mode": "vat_7"},
+                     {"appointment_id": "x", "vat_mode": "vat_7", "extra": 1},
+                     {"appointment_id": "x", "vat_mode": "vat_7",
+                      "discount": {"mode": "amount", "value": "-1"}}):
             with self.subTest(body=body), self.enabled():
                 self.assertEqual(visit_invoice.preview(self.gateway, body, "csrf"),
                                  (422, {"code": "VALIDATION"}))
         self.assertEqual(self.gateway.calls, [])
 
     def test_csrf_native_and_discount_denials(self):
-        for attr, body in (("csrf", {"appointment_id": "x"}),
-                           ("native", {"appointment_id": "x"}),
-                           ("discount_allowed", {"appointment_id": "x", "discount": {"mode": "amount", "value": "1"}})):
+        for attr, body in (("csrf", {"appointment_id": "x", "vat_mode": "vat_7"}),
+                           ("native", {"appointment_id": "x", "vat_mode": "vat_7"}),
+                           ("discount_allowed", {"appointment_id": "x", "vat_mode": "vat_7",
+                                                 "discount": {"mode": "amount", "value": "1"}})):
             gateway = FakeGateway()
             setattr(gateway, attr, False)
             with self.subTest(attr=attr), self.enabled(), self.assertRaises(Denied):
@@ -173,17 +265,17 @@ class PreviewTests(unittest.TestCase):
     def test_invalid_adapter_data_denied(self):
         self.gateway.build_visit_invoice_preview = lambda *_: {"claims": {"secret": "x"}}
         with self.enabled(), self.assertRaises(Denied):
-            visit_invoice.preview(self.gateway, {"appointment_id": "x"}, "csrf")
+            visit_invoice.preview(self.gateway, {"appointment_id": "x", "vat_mode": "vat_7"}, "csrf")
 
     def test_authorization_denial_propagates(self):
         with self.enabled(), patch("clinic_ui.endpoints.visit_invoice.common.authorize", side_effect=Denied):
             with self.assertRaises(Denied):
-                visit_invoice.preview(self.gateway, {"appointment_id": "x"}, "csrf")
+                visit_invoice.preview(self.gateway, {"appointment_id": "x", "vat_mode": "vat_7"}, "csrf")
 
 
 class SubmitTests(PreviewTests):
-    def body(self, discount=None):
-        payload = {"appointment_id": "APT-1"}
+    def body(self, discount=None, vat_mode="vat_7"):
+        payload = {"appointment_id": "APT-1", "vat_mode": vat_mode}
         if discount is not None:
             payload["discount"] = discount
         token = visit_invoice.preview(self.gateway, payload, "csrf")["preview_token"]
@@ -198,6 +290,36 @@ class SubmitTests(PreviewTests):
                 self.assertEqual(visit_invoice.submit(self.gateway, body, "csrf"),
                                  {"invoice_id": "INV-1"})
                 self.assertEqual(self.gateway.events, ["enter", "prepare", "post", "commit", "view", "exit"])
+
+    def test_submit_no_vat_requires_authority_again_inside_lane(self):
+        with self.enabled():
+            body = self.body(vat_mode="no_vat")
+            self.gateway.no_vat_allowed = False
+            with self.assertRaises(Denied):
+                visit_invoice.submit(self.gateway, body, "csrf")
+            self.assertEqual(self.gateway.no_vat_calls, ["APT-1", "APT-1"])
+            self.assertEqual(self.gateway.events, ["enter", "exit"])
+            self.assertNotIn("post", self.gateway.events)
+            self.assertEqual(self.gateway.no_vat_calls, ["APT-1", "APT-1"])
+
+    def test_submit_no_vat_authority_error_inside_lane_denies(self):
+        with self.enabled():
+            body = self.body(vat_mode="no_vat")
+            self.gateway.no_vat_error = True
+            with self.assertRaises(Denied):
+                visit_invoice.submit(self.gateway, body, "csrf")
+            self.assertEqual(self.gateway.events, ["enter", "exit"])
+
+    def test_submit_missing_or_invalid_vat_mode_normalized(self):
+        with self.enabled():
+            body = self.body()
+            for payload in ({k: v for k, v in body.items() if k != "vat_mode"},
+                            {**body, "vat_mode": "vat_6"},
+                            {**body, "vat_mode": None}):
+                with self.subTest(payload=payload.get("vat_mode")):
+                    self.assertEqual(visit_invoice.submit(self.gateway, payload, "csrf"),
+                                     (422, {"code": "VALIDATION"}))
+            self.assertEqual(self.gateway.events, [])
 
     def test_stale_expired_tampered_or_duplicate_denied_before_post(self):
         for case in ("stale", "expired", "tampered", "duplicate"):
@@ -218,6 +340,33 @@ class SubmitTests(PreviewTests):
                                             "terms": {**result["claims"]["terms"], "rate": "101.00"}}
                         return result
                     self.gateway.prepare_visit_invoice_submission = changed
+                with self.assertRaises(Denied):
+                    visit_invoice.submit(self.gateway, body, "csrf")
+                self.assertNotIn("post", self.gateway.events)
+
+    def test_changed_mode_or_tax_facts_denied_before_post(self):
+        cases = {
+            "mode": lambda claims: claims.update(
+                {"vat": {**claims["vat"], "mode": "no_vat"}}),
+            "template": lambda claims: claims["vat"].update({"template": "VAT 6"}),
+            "account": lambda claims: claims["vat"].update({"account": "OTHER"}),
+            "rate": lambda claims: claims["vat"].update({"rate": "6"}),
+            "row": lambda claims: claims["vat"]["rows"][0].update({"account_head": "OTHER"}),
+            "vat_total": lambda claims: claims["totals"].update({"vat": "6.00"}),
+            "net": lambda claims: claims["totals"].update({"net": "99.00"}),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(case=name), self.enabled():
+                self.gateway = FakeGateway()
+                body = self.body()
+                original = self.gateway.prepare_visit_invoice_submission
+
+                def changed(*args):
+                    result = original(*args)
+                    mutate(result["claims"])
+                    return result
+
+                self.gateway.prepare_visit_invoice_submission = changed
                 with self.assertRaises(Denied):
                     visit_invoice.submit(self.gateway, body, "csrf")
                 self.assertNotIn("post", self.gateway.events)
@@ -368,7 +517,7 @@ class SubmitTests(PreviewTests):
             raise RuntimeError("private native details")
         self.gateway.visit_invoice_native_create_submit_allowed = fail
         with self.enabled(), self.assertRaises(Denied):
-            visit_invoice.preview(self.gateway, {"appointment_id": "x"}, "csrf")
+            visit_invoice.preview(self.gateway, {"appointment_id": "x", "vat_mode": "vat_7"}, "csrf")
 
     def test_mismatched_actor_or_totals_are_denied(self):
         original = self.gateway.build_visit_invoice_preview
@@ -379,7 +528,7 @@ class SubmitTests(PreviewTests):
                 return result
             self.gateway.build_visit_invoice_preview = altered
             with self.subTest(field=field), self.enabled(), self.assertRaises(Denied):
-                visit_invoice.preview(self.gateway, {"appointment_id": "x"}, "csrf")
+                visit_invoice.preview(self.gateway, {"appointment_id": "x", "vat_mode": "vat_7"}, "csrf")
 
 
 class ViewTests(PreviewTests):

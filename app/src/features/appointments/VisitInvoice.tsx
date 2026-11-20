@@ -8,6 +8,7 @@ import {
   type VisitInvoiceDiscount,
   type VisitInvoiceInput,
   type VisitInvoicePreview,
+  type VisitInvoiceVatMode,
 } from "../../transport/native/visit-invoice";
 import { Button } from "../../ui/Button";
 
@@ -18,15 +19,19 @@ export function VisitInvoice({
   appointmentId,
   canSubmit,
   canDiscount,
+  canChooseNoVat,
 }: {
   appointmentId: string;
   canSubmit: boolean;
   canDiscount: boolean;
+  canChooseNoVat: boolean;
 }) {
   const { t } = useTranslation();
   const heading = useId();
   const pending = useRef(false);
+  const previewRevision = useRef(0);
   const [busy, setBusy] = useState<Operation | null>(null);
+  const [vatMode, setVatMode] = useState<VisitInvoiceVatMode>("vat_7");
   const [mode, setMode] = useState<"none" | VisitInvoiceDiscount["mode"]>("none");
   const [amount, setAmount] = useState("");
   const [review, setReview] = useState<Review | null>(null);
@@ -36,10 +41,14 @@ export function VisitInvoice({
   const [lookupUnavailable, setLookupUnavailable] = useState(false);
 
   const canEdit = canSubmit && !uncertain && invoice === null;
-  const activeReview = canEdit && review && (canDiscount || !review.input.discount) ? review : null;
+  const activeVatMode = canChooseNoVat ? vatMode : "vat_7";
+  const activeReview = canEdit && review && review.input.vat_mode === activeVatMode &&
+    (canDiscount || !review.input.discount) ? review : null;
   const activeMode = canDiscount ? mode : "none";
+  const inputsLocked = busy === "submit" || busy === "lookup";
 
   function invalidatePreview() {
+    previewRevision.current += 1;
     setReview(null);
     setError(null);
   }
@@ -60,7 +69,8 @@ export function VisitInvoice({
     event.preventDefault();
     if (!canEdit || pending.current) return;
     invalidatePreview();
-    const input: VisitInvoiceInput = { appointment_id: appointmentId };
+    const revision = previewRevision.current;
+    const input: VisitInvoiceInput = { appointment_id: appointmentId, vat_mode: activeVatMode };
     if (activeMode !== "none") {
       if (!/^\d{1,7}(?:\.\d{1,2})?$/.test(amount) ||
           Number(amount) <= 0 || Number(amount) > (activeMode === "percent" ? 100 : 1_000_000)) {
@@ -71,10 +81,13 @@ export function VisitInvoice({
     }
     void run("preview", async () => {
       try {
-        setReview({ input, preview: await previewVisitInvoice(input) });
+        const preview = await previewVisitInvoice(input);
+        if (revision === previewRevision.current) setReview({ input, preview });
       } catch (failure) {
-        setError(failure instanceof VisitInvoiceError && failure.code === "validation"
-          ? "invalid" : "previewUnavailable");
+        if (revision === previewRevision.current) {
+          setError(failure instanceof VisitInvoiceError && failure.code === "validation"
+            ? "invalid" : "previewUnavailable");
+        }
       }
     });
   }
@@ -116,22 +129,37 @@ export function VisitInvoice({
   return (
     <section className="appointment-card appointment-write-card visit-invoice" aria-labelledby={heading}>
       <h2 id={heading}>{t("visitInvoice.title")}</h2>
-      {canEdit && (canDiscount || !activeReview) && (
+      {canEdit && (
         <form className="appointment-write-form" onSubmit={requestPreview} noValidate>
-          {canDiscount && (
+          {!canChooseNoVat && <p className="appointment-write-note">{t("visitInvoice.vat7")}</p>}
+          {(canChooseNoVat || canDiscount) && (
             <div className="appointment-form">
-              <label>
-                {t("visitInvoice.discount")}
-                <select value={mode} disabled={busy !== null} onChange={(event) => {
-                  setMode(event.target.value as typeof mode);
-                  setAmount("");
-                  invalidatePreview();
-                }}>
-                  <option value="none">{t("visitInvoice.none")}</option>
-                  <option value="amount">{t("visitInvoice.amount")}</option>
-                  <option value="percent">{t("visitInvoice.percent")}</option>
-                </select>
-              </label>
+              {canChooseNoVat && (
+                <label>
+                  {t("visitInvoice.vat")}
+                  <select value={activeVatMode} disabled={inputsLocked} onChange={(event) => {
+                    setVatMode(event.target.value === "no_vat" ? "no_vat" : "vat_7");
+                    invalidatePreview();
+                  }}>
+                    <option value="vat_7">{t("visitInvoice.vat7")}</option>
+                    <option value="no_vat">{t("visitInvoice.noVat")}</option>
+                  </select>
+                </label>
+              )}
+              {canDiscount && (
+                <label>
+                  {t("visitInvoice.discount")}
+                  <select value={mode} disabled={inputsLocked} onChange={(event) => {
+                    setMode(event.target.value as typeof mode);
+                    setAmount("");
+                    invalidatePreview();
+                  }}>
+                    <option value="none">{t("visitInvoice.none")}</option>
+                    <option value="amount">{t("visitInvoice.amount")}</option>
+                    <option value="percent">{t("visitInvoice.percent")}</option>
+                  </select>
+                </label>
+              )}
               {activeMode !== "none" && (
                 <label>
                   {t(activeMode === "amount" ? "visitInvoice.amount" : "visitInvoice.percent")}
@@ -139,7 +167,7 @@ export function VisitInvoice({
                     inputMode="decimal"
                     maxLength={10}
                     value={amount}
-                    disabled={busy !== null}
+                    disabled={inputsLocked}
                     aria-invalid={error === "invalidDiscount"}
                     onChange={(event) => {
                       setAmount(event.target.value);
@@ -163,7 +191,7 @@ export function VisitInvoice({
       {activeReview && (
         <div className="visit-invoice-review">
           <dl className="appointment-detail-list">
-            {(["gross", "discount", "total"] as const).map((field) => (
+            {(["gross", "discount", "net", "vat", "total"] as const).map((field) => (
               <div className={field === "total" ? "visit-invoice-total" : undefined} key={field}>
                 <dt>{t(`visitInvoice.${field}`)}</dt>
                 <dd>{activeReview.preview.currency} {activeReview.preview[field]}</dd>

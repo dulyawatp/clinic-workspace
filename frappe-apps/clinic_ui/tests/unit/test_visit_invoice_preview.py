@@ -15,6 +15,12 @@ ACCOUNTING = dict(company="Clinic", currency="USD", customer="CUS-1",
                   company_currency="USD", party_account_currency="USD",
                   posting_date=date(2026, 11, 20), selling_price_list="Standard",
                   unit_rate=Decimal("100"))
+VAT_ROW = dict(charge_type="On Net Total", account_head="VAT Payable",
+               rate=Decimal("7"), included_in_print_rate=0, description="VAT 7%")
+VAT_TERMS = dict(ACCOUNTING, vat_mode="vat_7", tax_template="VAT 7",
+                 tax_rows=(VAT_ROW,), tax_account="VAT Payable", tax_rate=Decimal("7"))
+NO_VAT_TERMS = dict(ACCOUNTING, vat_mode="no_vat", tax_template=None,
+                    tax_rows=(), tax_account=None, tax_rate=None)
 
 
 class FakeDocument:
@@ -90,17 +96,35 @@ class Gateway:
 
 
 class CompositionTest(unittest.TestCase):
-    def prepare(self, accounting=ACCOUNTING, frappe=None):
+    def test_explicit_mode_resolves_terms_and_rejects_invalid_mode(self):
+        gateway = Gateway(NativeShapeFrappe())
+        with patch("clinic_ui.runtime.visit_invoice_preview.resolve_visit_invoice", return_value=VISIT), \
+             patch("clinic_ui.runtime.visit_invoice_preview.resolve_visit_invoice_terms",
+                   return_value=NO_VAT_TERMS) as resolver:
+            result = prepare_visit_invoice(gateway, "APT-1", None, "no_vat")
+            self.assertEqual(result[3]["vat"], "0.00")
+            resolver.assert_called_once_with(gateway, VISIT, "no_vat")
+        with patch("clinic_ui.runtime.visit_invoice_preview.resolve_visit_invoice", return_value=VISIT), \
+             patch("clinic_ui.runtime.visit_invoice_preview.resolve_visit_invoice_terms",
+                   return_value=None) as resolver:
+            self.assertIsNone(prepare_visit_invoice(gateway, "APT-1", None, None))
+            resolver.assert_called_once_with(gateway, VISIT, None)
+        with patch("clinic_ui.runtime.visit_invoice_preview.resolve_visit_invoice", return_value=VISIT), \
+             patch("clinic_ui.runtime.visit_invoice_preview.resolve_visit_invoice_terms",
+                   return_value=NO_VAT_TERMS):
+            self.assertIsNone(prepare_visit_invoice(gateway, "APT-1", None, "vat_7"))
+
+    def prepare(self, accounting=NO_VAT_TERMS, frappe=None):
         frappe = frappe or NativeShapeFrappe()
         with patch("clinic_ui.runtime.visit_invoice_preview.resolve_visit_invoice", return_value=VISIT), \
-             patch("clinic_ui.runtime.visit_invoice_preview.resolve_visit_invoice_accounting", return_value=accounting):
-            return frappe, prepare_visit_invoice(Gateway(frappe), "APT-1", None)
+             patch("clinic_ui.runtime.visit_invoice_preview.resolve_visit_invoice_terms", return_value=accounting):
+            return frappe, prepare_visit_invoice(Gateway(frappe), "APT-1", None, "no_vat")
 
     def test_returns_same_checked_document_and_terms(self):
         frappe, result = self.prepare()
         visit, accounting, doc, totals = result
         self.assertIs(doc, frappe.document)
-        self.assertEqual((visit, accounting), (VISIT, ACCOUNTING))
+        self.assertEqual((visit, accounting), (VISIT, NO_VAT_TERMS))
         self.assertEqual((doc.debit_to, doc.selling_price_list), ("Receivable", "Standard"))
         self.assertEqual((doc.items[0].income_account, doc.items[0].cost_center,
                           doc.items[0].uom, doc.items[0].conversion_factor),
@@ -151,12 +175,16 @@ class CompositionTest(unittest.TestCase):
                         actor_practitioner="DR-1", status="Open", docstatus=0,
                         invoiced=0, ref_sales_invoice=None)
         gateway.visit_invoice_evidence = lambda appointment_id: evidence
-        with patch("clinic_ui.runtime.visit_invoice_preview.resolve_visit_invoice_accounting",
-                   return_value=ACCOUNTING) as accounting_resolver:
-            result = prepare_visit_invoice(gateway, "APT-1", None)
+        with patch("clinic_ui.runtime.visit_invoice_preview.resolve_visit_invoice_terms",
+                   return_value=NO_VAT_TERMS) as accounting_resolver:
+            result = prepare_visit_invoice(gateway, "APT-1", None, "no_vat")
         self.assertIsNotNone(result)
-        accounting_resolver.assert_called_once_with(gateway, VISIT)
-        self.assertIsNone(prepare_visit_invoice(gateway, "OTHER", None))
+        accounting_resolver.assert_called_once_with(gateway, VISIT, "no_vat")
+        self.assertIsNone(prepare_visit_invoice(gateway, "OTHER", None, "no_vat"))
+
+    def test_mode_argument_is_required(self):
+        with self.assertRaises(TypeError):
+            prepare_visit_invoice(Gateway(NativeShapeFrappe()), "APT-1", None)
 
 
 def outcome(discount="0", total="100"):
@@ -171,12 +199,27 @@ def outcome(discount="0", total="100"):
 
 class PreviewTest(unittest.TestCase):
     def setUp(self):
-        self.terms = ACCOUNTING
+        self.terms = NO_VAT_TERMS
 
     def preview(self, discount, values):
         frappe = FakeFrappe(values)
         _, result = preview_visit_invoice(frappe, VISIT, discount, self.terms)
         return frappe.document, result
+
+    def test_native_docstatus_subclass_and_bool_no_vat(self):
+        class DocStatus(int):
+            pass
+        class StatusFrappe(NativeShapeFrappe):
+            def get_doc(self, values):
+                doc = super().get_doc(values)
+                doc.docstatus = self.status
+                return doc
+        frappe = StatusFrappe()
+        frappe.status = DocStatus(0)
+        preview_visit_invoice(frappe, VISIT, None, NO_VAT_TERMS)
+        frappe.status = False
+        with self.assertRaises(ValueError):
+            preview_visit_invoice(frappe, VISIT, None, NO_VAT_TERMS)
 
     def test_native_amount_percent_and_no_discount(self):
         for discount, values, expected in [
@@ -192,6 +235,124 @@ class PreviewTest(unittest.TestCase):
                 self.assertEqual(doc.items[0].reference_dn, "APT-1")
                 if discount:
                     self.assertEqual(doc.apply_discount_on, "Net Total")
+
+    def test_explicit_vat_native_outcomes(self):
+        class VatDocument(NativeShapeDocument):
+            def __init__(self, values, outcome):
+                super().__init__(values, outcome)
+                self.taxes = [type("Tax", (), {**row, "precision": lambda self, field: 2})()
+                              for row in values["taxes"]]
+
+            def calculate_taxes_and_totals(self):
+                super().calculate_taxes_and_totals()
+                self.net_total = self.base_net_total = round(self.net_total, 2)
+                self.items[0].net_amount = self.items[0].base_net_amount = self.net_total
+                tax = round(self.net_total * 0.07, 2) if self.taxes else 0
+                self.total_taxes_and_charges = self.base_total_taxes_and_charges = tax
+                self.grand_total = self.base_grand_total = round(self.net_total + tax, 2)
+                self.rounded_total = self.base_rounded_total = self.grand_total
+                if self.taxes:
+                    row = self.taxes[0]
+                    row.tax_amount = row.base_tax_amount = tax
+                    row.tax_amount_after_discount_amount = row.base_tax_amount_after_discount_amount = tax
+                    row.total = row.base_total = self.grand_total
+
+        class VatFrappe:
+            def __init__(self, status=0):
+                self.status = status
+            def get_doc(self, values):
+                self.document = VatDocument(values, {})
+                self.document.docstatus = self.status
+                return self.document
+
+        for terms, discount, expected in (
+            (VAT_TERMS, None, ("100.00", "7.00", "107.00")),
+            (VAT_TERMS, {"mode": "percent", "value": Decimal("15")}, ("85.00", "5.95", "90.95")),
+            (VAT_TERMS, {"mode": "amount", "value": Decimal("10")}, ("90.00", "6.30", "96.30")),
+            (NO_VAT_TERMS, {"mode": "percent", "value": Decimal("15")}, ("85.00", "0.00", "85.00")),
+        ):
+            with self.subTest(terms=terms, discount=discount):
+                frappe = VatFrappe()
+                doc, totals = preview_visit_invoice(frappe, VISIT, discount, terms)
+                self.assertEqual((totals["net"], totals["vat"], totals["total"]), expected)
+                self.assertEqual(doc.taxes_and_charges, terms["tax_template"])
+                self.assertEqual(len(doc.taxes), len(terms["tax_rows"]))
+                if doc.taxes:
+                    self.assertEqual(doc.taxes[0].description, "VAT 7%")
+        class DocStatus(int):
+            pass
+        for terms in (VAT_TERMS, NO_VAT_TERMS):
+            with self.subTest(mode=terms["vat_mode"]):
+                preview_visit_invoice(VatFrappe(DocStatus(0)), VISIT, None, terms)
+                with self.assertRaises(ValueError):
+                    preview_visit_invoice(VatFrappe(False), VISIT, None, terms)
+        discount = {"mode": "amount", "value": Decimal("99.99")}
+        with self.assertRaises(ValueError):
+            preview_visit_invoice(VatFrappe(), VISIT, discount, VAT_TERMS)
+        self.assertEqual(preview_visit_invoice(VatFrappe(), VISIT, discount, NO_VAT_TERMS)[1]["total"], "0.01")
+
+    def test_reject_partial_and_invalid_tax_terms(self):
+        missing = dict(NO_VAT_TERMS)
+        del missing["tax_account"]
+        for terms in (ACCOUNTING, dict(ACCOUNTING, tax_template="VAT 7"),
+                      missing,
+                      dict(NO_VAT_TERMS, tax_rows=(VAT_ROW,)),
+                      dict(VAT_TERMS, tax_rows=(dict(VAT_ROW, rate=Decimal("6")),)),
+                      dict(VAT_TERMS, tax_rows=(dict(VAT_ROW, included_in_print_rate=1),)),
+                      dict(VAT_TERMS, tax_rows=(dict(VAT_ROW, description="  "),)),
+                      dict(VAT_TERMS, tax_rows=(VAT_ROW, VAT_ROW)),
+                      dict(VAT_TERMS, tax_account="Income")):
+            with self.subTest(terms=terms), self.assertRaises(ValueError):
+                preview_visit_invoice(FakeFrappe(outcome()), VISIT, None, terms)
+
+    def test_reject_tax_drift_before_and_after_calculation(self):
+        class TaxDocument(FakeDocument):
+            def __init__(self, values, changes):
+                super().__init__(values, outcome())
+                row = type("Tax", (), {**values["taxes"][0],
+                                       "precision": lambda self, field: 2})()
+                self.taxes = [row]
+                self.changes = changes
+                if "pre" in changes:
+                    setattr(row, *changes["pre"])
+
+            def calculate_taxes_and_totals(self):
+                super().calculate_taxes_and_totals()
+                self.grand_total = self.base_grand_total = 107
+                self.rounded_total = self.base_rounded_total = 107
+                self.outstanding_amount = 107
+                self.total_taxes_and_charges = self.base_total_taxes_and_charges = 7
+                row = self.taxes[0]
+                row.tax_amount = row.base_tax_amount = 7
+                row.tax_amount_after_discount_amount = row.base_tax_amount_after_discount_amount = 7
+                row.total = row.base_total = 107
+                if "post" in self.changes:
+                    setattr(row, *self.changes["post"])
+                if "header" in self.changes:
+                    setattr(self, *self.changes["header"])
+
+        class TaxFrappe:
+            def __init__(self, changes):
+                self.changes = changes
+
+            def get_doc(self, values):
+                return TaxDocument(values, self.changes)
+
+        preview_visit_invoice(TaxFrappe({}), VISIT, None, VAT_TERMS)
+        for changes in (
+            {"pre": ("rate", 6)}, {"pre": ("included_in_print_rate", 1)},
+            {"pre": ("description", "changed")}, {"post": ("description", "changed")},
+            {"post": ("account_head", "OTHER")}, {"post": ("rate", 6)},
+            {"post": ("charge_type", "Actual")}, {"post": ("included_in_print_rate", 1)},
+            {"post": ("tax_amount", 6)}, {"post": ("base_tax_amount_after_discount_amount", 6)},
+            {"post": ("total", 106)}, {"header": ("taxes_and_charges", "OTHER")},
+            {"header": ("base_grand_total", 106)}, {"header": ("rounding_adjustment", 0.01)},
+            {"post": ("precision", lambda field: 3)},
+            {"header": ("docstatus", 1)},
+            {"header": ("doctype", "OTHER")},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                preview_visit_invoice(TaxFrappe(changes), VISIT, None, VAT_TERMS)
 
     def test_native_float_operand_shapes(self):
         for discount, expected in (
@@ -232,9 +393,9 @@ class PreviewTest(unittest.TestCase):
                     self.preview(discount, values)
 
     def test_reject_unsupported_settings_and_currency(self):
-        for terms in (dict(ACCOUNTING, company_currency="EUR"),
-                      dict(ACCOUNTING, party_account_currency="EUR"),
-                      dict(ACCOUNTING, posting_date=None)):
+        for terms in (dict(NO_VAT_TERMS, company_currency="EUR"),
+                      dict(NO_VAT_TERMS, party_account_currency="EUR"),
+                      dict(NO_VAT_TERMS, posting_date=None)):
             with self.subTest(terms=terms):
                 with self.assertRaises(ValueError):
                     preview_visit_invoice(FakeFrappe(outcome()), VISIT, None, terms)
@@ -249,10 +410,11 @@ class PreviewTest(unittest.TestCase):
                     self.preview(discount, values)
 
     def test_reject_changed_visit_reference_and_rate(self):
-        for changes in ({"reference_dn": "OTHER"}, {"rate": 99}):
+        for changes in ({"reference_dn": "OTHER"}, {"rate": 99}, {"item_tax_rate": '{"VAT Payable": 0}'}):
             with self.subTest(changes=changes):
                 with self.assertRaises(ValueError):
                     self.preview(None, dict(outcome(), row_changes=changes))
+        self.preview(None, dict(outcome(), row_changes={"item_tax_rate": "{}"}))
 
     def test_reject_payable_row_and_adjustment_drift(self):
         discount = {"mode": "amount", "value": Decimal("12.50")}

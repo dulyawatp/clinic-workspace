@@ -76,7 +76,7 @@ is not an executable provisioning recipe and does not claim acceptance.
    practitioner for the user. Use `.invalid` identity and suppress welcome
    email. Read credentials from owner-only private storage without displaying
    them; never embed them in commands, arguments, logs, or repository files.
-7. Create three distinct fictional Patients and their three distinct enabled
+7. Create four distinct fictional Patients and their four distinct enabled
    Customers, each linked through `Patient.customer`; verify native hooks and
    party creation before doing so. Customer currency must be empty or USD.
    For each, create one distinct current-site-date `Open`, draft, uninvoiced
@@ -89,10 +89,14 @@ is not an executable provisioning recipe and does not claim acceptance.
    `frappe.utils.today()`, not the operator's workstation date.
 8. Refuse if any matching customer/company GL Entry or Party Account override
    exists for customer, customer group, practitioner, or Healthcare Settings
-   income account. Refuse *any* Sales Taxes and Charges Template, Tax Rule,
-   Pricing Rule, Promotional Scheme or Item Tax row site-wide, and any Item
-   Price for the fixture Item. These broad predicates are intentional current
-   guard behavior; do not delete conflicts. Verify 2-decimal native invoice
+   income account. Refuse any Tax Rule, Pricing Rule, Promotional Scheme or
+   Item Tax row site-wide, and any Item Price for the fixture Item. Preserve
+   all existing templates. After review, unset the synthetic company's 6%
+   default without deleting it; both invoice modes require no company default
+   tax template. Create one enabled, nondefault company template with one
+   exclusive `On Net Total` charge at 7% to a distinct, enabled USD leaf
+   Liability / Tax account. Set `clinic_ui_visit_invoice_vat_template` to the
+   exact approved template name while keeping the write gate off. Verify 2-decimal native invoice
    and item money precision and all calculated preview/posting invariants in
    `visit_invoice_preview.py` and `visit_invoice_posting.py`.
 9. Review actual metadata permission levels and native permissions. Prepare an
@@ -107,9 +111,24 @@ is not an executable provisioning recipe and does not claim acceptance.
    by native hooks for review; do not bypass with `ignore_permissions`.
 10. Keep `clinic_ui_visit_invoice_write_enabled` absent or false. Do not set
     `clinic_ui_visit_invoice_write_user`, discount delegation or preview
-    secret as an implicit enablement path. Any future feature enablement,
-    role grant or submit requires a separate explicit approval and independently
-    reviewed commands. Do not submit an invoice during provisioning.
+     secret as an implicit enablement path. Any future feature enablement,
+     role grant or submit requires a separate explicit approval and independently
+     reviewed commands. Do not submit an invoice during provisioning.
+     For Clinic read/bootstrap, verify `clinic_ui_enabled`, exact
+     `clinic_ui_synthetic_site=clinic-visit-invoice.local`, a separately
+     generated private `clinic_ui_epoch_secret` of at least 32 characters,
+     and a valid `clinic_ui_role_map` mapping the narrow native synthetic
+     doctor role to `DOC`. Leave unrelated write gates off.
+     In the later acceptance phase, map the synthetic patients to static Clinic
+     patient aliases, not the appointments. Set the literal server-side
+     `clinic_ui_visit_invoice_read_appointments` allowlist to the four verified
+     native fixture IDs only. Verify none is a static appointment target or
+     a booked alias target. The dedicated doctor uses
+     `/clinic/appointments/<native-appointment-id>`; live list discovery stays
+     off. Classify only the fourth appointment as No VAT using the literal
+     `clinic_ui_visit_invoice_no_vat_appointments` allowlist and the exact doctor
+     in `clinic_ui_visit_invoice_no_vat_user`. This is synthetic test evidence,
+     not a production tax classification.
 
 Record only non-secret synthetic fixture identifiers and verification results
 in owner-only private evidence. On conflict or incomplete native knowledge,

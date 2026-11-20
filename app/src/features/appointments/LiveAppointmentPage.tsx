@@ -416,6 +416,7 @@ export function LiveAppointmentPage({ id }: { id: string }) {
               appointmentId={appointment.visit_invoice_appointment_id}
               canSubmit={get("write.visit_invoice.submit") === "enabled"}
               canDiscount={get("write.visit_invoice.discount") === "enabled"}
+              canChooseNoVat={appointment.visit_invoice_no_vat_allowed === true}
             />
           )}
       </div>

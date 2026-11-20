@@ -4,9 +4,11 @@ import { nativeCsrfToken } from "./session";
 const METHOD = "clinic_ui.api.visit_invoice";
 
 export type VisitInvoiceDiscount = { mode: "amount" | "percent"; value: string };
+export type VisitInvoiceVatMode = "vat_7" | "no_vat";
 
 export interface VisitInvoiceInput {
   appointment_id: string;
+  vat_mode: VisitInvoiceVatMode;
   discount?: VisitInvoiceDiscount;
 }
 
@@ -14,6 +16,8 @@ export interface VisitInvoicePreview {
   currency: string;
   gross: string;
   discount: string;
+  net: string;
+  vat: string;
   total: string;
   preview_token: string;
 }
@@ -87,21 +91,23 @@ async function post(
 
 export async function previewVisitInvoice(input: VisitInvoiceInput): Promise<VisitInvoicePreview> {
   const value = await post("preview", input);
-  if (!exact(value, ["currency", "gross", "discount", "total", "preview_token"]))
+  if (!exact(value, ["currency", "gross", "discount", "net", "vat", "total", "preview_token"]))
     throw new VisitInvoiceError("unavailable");
-  const { currency, gross, discount, total, preview_token } = value;
-  if (!safeText(currency, 140) || !money(gross) || !money(discount) || !money(total) ||
-      !safeText(preview_token, 100))
+  const { currency, gross, discount, net, vat, total, preview_token } = value;
+  if (!safeText(currency, 140) || !money(gross) || !money(discount) || !money(net) ||
+      !money(vat) || !money(total) || !safeText(preview_token, 100))
     throw new VisitInvoiceError("unavailable");
 
-  // Check server totals without floating-point rounding or recalculating the discount.
+  // Check the server's breakdown without recalculating the discount or VAT.
   const cents = (amount: string) => BigInt(amount.replace(".", ""));
   const cut = cents(discount);
-  const outstanding = cents(total);
-  if (outstanding <= 0n || cents(gross) - cut !== outstanding ||
+  const subtotal = cents(net);
+  const tax = cents(vat);
+  if (subtotal <= 0n || cents(gross) - cut !== subtotal || subtotal + tax !== cents(total) ||
+      (input.vat_mode === "no_vat" && tax !== 0n) ||
       (cut > 0n) !== (input.discount !== undefined))
     throw new VisitInvoiceError("unavailable");
-  return { currency, gross, discount, total, preview_token };
+  return { currency, gross, discount, net, vat, total, preview_token };
 }
 
 export async function submitVisitInvoice(

@@ -429,15 +429,15 @@ class Gateway:
             raise SerializationError("visit invoice lane unavailable")
         self._visit_invoice_lane.rollback()
 
-    def build_visit_invoice_preview(self, appointment_id, discount):
+    def build_visit_invoice_preview(self, appointment_id, discount, vat_mode):
         from clinic_ui.runtime.visit_invoice_binding import build_visit_invoice_preview
 
-        return build_visit_invoice_preview(self, appointment_id, discount)
+        return build_visit_invoice_preview(self, appointment_id, discount, vat_mode)
 
-    def prepare_visit_invoice_submission(self, appointment_id, discount):
+    def prepare_visit_invoice_submission(self, appointment_id, discount, vat_mode):
         from clinic_ui.runtime.visit_invoice_binding import prepare_visit_invoice_submission
 
-        return prepare_visit_invoice_submission(self, appointment_id, discount)
+        return prepare_visit_invoice_submission(self, appointment_id, discount, vat_mode)
 
     def post_visit_invoice_and_verify_facts(self, prepared):
         from clinic_ui.runtime.visit_invoice_binding import post_visit_invoice_and_verify_facts
@@ -468,6 +468,11 @@ class Gateway:
         from clinic_ui.runtime.visit_invoice_binding import native_create_submit_allowed
 
         return native_create_submit_allowed(self)
+
+    def visit_invoice_no_vat_allowed(self, appointment_id):
+        from clinic_ui.runtime.visit_invoice_vat_authority import no_vat_allowed
+
+        return no_vat_allowed(self, appointment_id)
 
     def visit_invoice_discount_allowed(self):
         from clinic_ui.runtime.visit_invoice_binding import discount_allowed

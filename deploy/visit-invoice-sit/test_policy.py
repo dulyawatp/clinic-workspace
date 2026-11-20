@@ -68,7 +68,7 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(allows("POST", prefix + "logout", b"", "application/json"))
         self.assertTrue(allows("GET", prefix + "clinic_ui.api.visit_invoice.view?appointment_id=APPT%2F1"))
         self.assertTrue(allows("POST", prefix + "clinic_ui.api.visit_invoice.submit",
-                               b'{"appointment_id":"A","preview_token":"t"}', "application/json"))
+                               b'{"appointment_id":"A","vat_mode":"vat_7","preview_token":"t"}', "application/json"))
         for target, body in [
             (prefix + "login", b'{"usr":"u","pwd":"p","cmd":"frappe.client.delete"}'),
             (prefix + "login", b'{"usr":"u","usr":"v","pwd":"p"}'),
@@ -79,6 +79,41 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(allows("GET", prefix + "clinic_ui.api.visit_invoice.view?appointment_id=A&cmd=x"))
         self.assertFalse(allows("GET", prefix + "clinic_ui.api.visit_invoice.view?%61ppointment_id=A"))
         self.assertFalse(allows("POST", prefix + "login", b"usr=u&pwd=p", "application/x-www-form-urlencoded"))
+
+    def test_invoice_vat_mode_is_required_exact_string(self):
+        prefix = "/api/method/"
+        for name in ("preview", "submit"):
+            target = prefix + "clinic_ui.api.visit_invoice." + name
+            token = b',"preview_token":"t"' if name == "submit" else b""
+            for mode in (b'"vat_7"', b'"no_vat"'):
+                body = b'{"appointment_id":"A","vat_mode":' + mode + token + b"}"
+                with self.subTest(name=name, mode=mode):
+                    self.assertTrue(allows("POST", target, body, "application/json"))
+            for mode in (b'"VAT_7"', b'"vat 7"', b'"VAT7"', b'""', b'"7"', b'"vat_0"',
+                         b"null", b"true", b"7", b'["vat_7"]', b'{"mode":"vat_7"}'):
+                body = b'{"appointment_id":"A","vat_mode":' + mode + token + b"}"
+                with self.subTest(name=name, mode=mode):
+                    self.assertFalse(allows("POST", target, body, "application/json"))
+            for body in [
+                b'{"appointment_id":"A"' + token + b"}",
+                b'{"appointment_id":"A","vat_mode":"vat_7","vat_mode":"no_vat"' + token + b"}",
+                b'{"appointment_id":"A","vat_mode":"vat_7","preview_token":"t"}' if name == "preview" else
+                b'{"appointment_id":"A","vat_mode":"vat_7"}',
+                b'{"appointment_id":"A","vat_mode":"vat_7","cmd":"x"' + token + b"}",
+                b'{"appointment_id":"A","vat_mode":"vat_7","preview_tokn":"t"' + token + b"}",
+                b'{"appointment_id":"A","vat_mode":"vat_7","discount":"10"' + token + b"}",
+            ]:
+                with self.subTest(name=name, body=body):
+                    self.assertFalse(allows("POST", target, body, "application/json"))
+            body = b'{"appointment_id":"A","vat_mode":"vat_7","discount":{"mode":"percent","value":"15"}' + token + b"}"
+            with self.subTest(name=name, discount=True):
+                self.assertTrue(allows("POST", target, body, "application/json"))
+            body = b'{"appointment_id":"A","vat_mode":"vat_7","discount":{"mode":"percent","value":"15","cmd":"x"}' + token + b"}"
+            with self.subTest(name=name, discount_unknown=True):
+                self.assertFalse(allows("POST", target, body, "application/json"))
+            body = b'{"appointment_id":"A","vat_mode":"vat_7","discount":{"mode":"amount","value":"10"}}'
+            with self.subTest(name=name, discount_only_preview=name == "preview"):
+                self.assertIs(allows("POST", target, body, "application/json"), name == "preview")
 
 
 if __name__ == "__main__":

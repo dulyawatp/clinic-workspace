@@ -6,9 +6,10 @@ import { parseNativeAppointmentRead } from "./appointment";
 import { previewVisitInvoice, submitVisitInvoice, viewVisitInvoice } from "./visit-invoice";
 
 const base = "/api/method/clinic_ui.api.visit_invoice";
-const input = { appointment_id: "VISIT/& 1", discount: { mode: "amount", value: "12.50" } } as const;
+const input = { appointment_id: "VISIT/& 1", vat_mode: "vat_7", discount: { mode: "amount", value: "12.50" } } as const;
 const preview = {
-  currency: "USD", gross: "100.00", discount: "12.50", total: "87.50", preview_token: "token",
+  currency: "USD", gross: "100.00", discount: "12.50",
+  net: "87.50", vat: "6.13", total: "93.63", preview_token: "token",
 };
 
 async function csrf() {
@@ -25,29 +26,40 @@ async function csrf() {
 
 afterEach(clearNativeCsrfToken);
 
-it("accepts an explicit visit invoice ID only on the native appointment detail", () => {
+it("requires an explicit native visit anchor and literal true to offer No VAT", () => {
   const detail = {
     appointment_id: "alias", workspace_patient_id: "patient", appointment_date: "2026-11-20",
     appointment_time: "09:00", status: "Open", modified: "2026-11-20 09:00:00",
     can_reschedule: false, can_checkin: false,
   };
   expect(parseNativeAppointmentRead(detail).visit_invoice_appointment_id).toBeUndefined();
-  expect(parseNativeAppointmentRead({ ...detail, visit_invoice_appointment_id: input.appointment_id }, "alias"))
+  const anchored = { ...detail, visit_invoice_appointment_id: input.appointment_id };
+  expect(parseNativeAppointmentRead(anchored, "alias"))
     .toMatchObject({ appointment_id: "alias", visit_invoice_appointment_id: input.appointment_id });
+  expect(parseNativeAppointmentRead(anchored).visit_invoice_no_vat_allowed).toBeUndefined();
+  expect(parseNativeAppointmentRead({ ...anchored, visit_invoice_no_vat_allowed: true })
+    .visit_invoice_no_vat_allowed).toBe(true);
+  for (const flag of [false, "true", 1, null]) {
+    expect(parseNativeAppointmentRead({ ...anchored, visit_invoice_no_vat_allowed: flag })
+      .visit_invoice_no_vat_allowed).toBeUndefined();
+  }
+  expect(() => parseNativeAppointmentRead({ ...detail, visit_invoice_no_vat_allowed: true })).toThrow();
   expect(() => parseNativeAppointmentRead({ ...detail, visit_invoice_appointment_id: " \n" })).toThrow();
 });
 
-it("sends exact POST bodies with the native CSRF header and encodes the view query", async () => {
+it.each(["vat_7", "no_vat"] as const)("sends exact %s POSTs with native CSRF and encodes the view query", async (vat_mode) => {
   await csrf();
+  const requestInput = { ...input, vat_mode };
+  const result = vat_mode === "vat_7" ? preview : { ...preview, vat: "0.00", total: preview.net };
   server.use(
     http.post(`${base}.preview`, async ({ request }) => {
       expect(request.headers.get("X-Frappe-CSRF-Token")).toBe("csrf");
-      expect(await request.json()).toEqual(input);
-      return HttpResponse.json({ message: preview });
+      expect(await request.json()).toEqual(requestInput);
+      return HttpResponse.json({ message: result });
     }),
     http.post(`${base}.submit`, async ({ request }) => {
       expect(request.headers.get("X-Frappe-CSRF-Token")).toBe("csrf");
-      expect(await request.json()).toEqual({ ...input, preview_token: "token" });
+      expect(await request.json()).toEqual({ ...requestInput, preview_token: "token" });
       return HttpResponse.json({ message: { invoice_id: "INV-1" } });
     }),
     http.get(`${base}.view`, ({ request }) => {
@@ -55,18 +67,25 @@ it("sends exact POST bodies with the native CSRF header and encodes the view que
       return HttpResponse.json({ message: { invoice_id: "INV-1" } });
     }),
   );
-  expect(await previewVisitInvoice(input)).toEqual(preview);
-  expect(await submitVisitInvoice({ ...input, preview_token: "token" })).toEqual({ invoice_id: "INV-1" });
+  expect(await previewVisitInvoice(requestInput)).toEqual(result);
+  expect(await submitVisitInvoice({ ...requestInput, preview_token: "token" })).toEqual({ invoice_id: "INV-1" });
   expect(await viewVisitInvoice(input.appointment_id)).toEqual({ invoice_id: "INV-1" });
 });
 
 it.each([
   { total: 87.5 }, { discount: "12.5" }, { gross: "1e2" }, { currency: " " },
-  { total: "90.00" }, { preview_token: "" }, { customer: "private" },
+  { net: "87.50\n" }, { vat: "6.1" }, { vat: 6.13 }, { net: undefined }, { vat: undefined },
+  { net: "90.00" }, { total: "90.00" }, { preview_token: "" }, { customer: "private" },
 ])("rejects invalid preview fields: %j", async (override) => {
   await csrf();
   server.use(http.post(`${base}.preview`, () => HttpResponse.json({ message: { ...preview, ...override } })));
   await expect(previewVisitInvoice(input)).rejects.toMatchObject({ code: "unavailable" });
+});
+
+it("rejects tax in a No VAT preview even when the totals add up", async () => {
+  await csrf();
+  server.use(http.post(`${base}.preview`, () => HttpResponse.json({ message: preview })));
+  await expect(previewVisitInvoice({ ...input, vat_mode: "no_vat" })).rejects.toMatchObject({ code: "unavailable" });
 });
 
 it.each([417, 422])("recognizes normalized validation at HTTP %i", async (status) => {

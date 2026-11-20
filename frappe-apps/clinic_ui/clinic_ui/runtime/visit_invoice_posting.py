@@ -2,6 +2,7 @@
 
 from decimal import Decimal, InvalidOperation
 
+from clinic_ui.runtime.visit_invoice_accounting import MAX_TAX_DESCRIPTION_LENGTH
 
 class PostingPreDispatch(Exception):
     """No write was dispatched; caller retains transaction ownership."""
@@ -44,12 +45,17 @@ _INVOICE_FIELDS = (
     "redeem_loyalty_points", "allocate_advances_automatically",
     "write_off_outstanding_amount_automatically", "apply_discount_on",
     "additional_discount_percentage", "posting_date", "set_posting_time", "selling_price_list",
-    "price_list_currency", "plc_conversion_rate",
+    "price_list_currency", "plc_conversion_rate", "taxes_and_charges",
 )
 _ITEM_FIELDS = (
     "item_code", "qty", "uom", "stock_uom", "income_account", "cost_center",
-    "reference_dt", "reference_dn", "rate", "price_list_rate", "amount", "base_amount",
+    "reference_dt", "reference_dn", "rate", "price_list_rate", "amount", "base_amount", "item_tax_template",
     "net_amount", "base_net_amount", "distributed_discount_amount", "conversion_factor",
+)
+_TAX_FIELDS = (
+    "charge_type", "account_head", "rate", "included_in_print_rate", "cost_center", "description",
+    "tax_amount", "base_tax_amount", "tax_amount_after_discount_amount",
+    "base_tax_amount_after_discount_amount", "total", "base_total",
 )
 
 
@@ -78,11 +84,11 @@ def _read(gateway, doctype, name, fields):
     return doc
 
 
-def _item_fields_readable(frappe):
-    meta = frappe.get_meta("Sales Invoice Item")
+def _child_fields_readable(frappe, doctype, fields):
+    meta = frappe.get_meta(doctype)
     allowed = set(meta.get_permlevel_access("read", parenttype="Sales Invoice", user=frappe.session.user))
     masked = {field.fieldname for field in meta.get_masked_fields(parenttype="Sales Invoice")}
-    for name in _ITEM_FIELDS:
+    for name in fields:
         field = meta.get_field(name)
         if field is None or field.permlevel not in allowed or name in masked:
             return False
@@ -101,6 +107,7 @@ _GL_FIELDS = {
     "is_cancelled": ("Check", None),
     "against_voucher_type": ("Link", "DocType"),
     "against_voucher": ("Dynamic Link", "against_voucher_type"),
+    "cost_center": ("Link", "Cost Center"),
 }
 _SLE_FIELDS = {key: _GL_FIELDS[key] for key in ("voucher_type", "voucher_no")}
 
@@ -113,37 +120,44 @@ def _check_meta(frappe, doctype, fields):
             raise ValueError("ledger metadata mismatch")
 
 
-def _check_ledger(frappe, name, visit, accounting, totals):
+def _check_ledger(frappe, name, visit, accounting, totals, invoice):
     _check_meta(frappe, "GL Entry", _GL_FIELDS)
     _check_meta(frappe, "Stock Ledger Entry", _SLE_FIELDS)
     rows = frappe.db.sql(
         "SELECT voucher_type, voucher_no, company, posting_date, account, account_currency, "
         "party_type, party, debit, credit, debit_in_account_currency, "
-        "credit_in_account_currency, is_cancelled, against_voucher_type, against_voucher FROM `tabGL Entry` "
-        "WHERE voucher_type = %s AND voucher_no = %s LIMIT 3",
+        "credit_in_account_currency, is_cancelled, against_voucher_type, against_voucher, cost_center FROM `tabGL Entry` "
+        "WHERE voucher_type = %s AND voucher_no = %s LIMIT 4",
         ("Sales Invoice", name),
     )
-    if len(rows) != 2:
+    vat_mode = accounting.get("vat_mode") == "vat_7"
+    if len(rows) != (3 if vat_mode else 2):
         raise ValueError("unexpected ledger row count")
     total = _number(totals["total"])
+    net = _number(totals["net"])
     expected = {
-        accounting["receivable_account"]: ("Customer", visit["customer"], total, Decimal(0)),
-        accounting["income_account"]: (None, None, Decimal(0), total),
+        accounting["receivable_account"]: ("Customer", visit["customer"], total, Decimal(0), None),
+        accounting["income_account"]: (None, None, Decimal(0), net, accounting["cost_center"]),
     }
-    if len(expected) != 2:
+    if vat_mode:
+        expected[accounting["tax_account"]] = (None, None, Decimal(0), _number(totals["vat"]),
+                                                invoice.taxes[0].cost_center or None)
+    if len(expected) != (3 if vat_mode else 2):
         raise ValueError("ledger accounts overlap")
     seen = set()
     for row in rows:
-        if len(row) != 15:
+        if len(row) != 16:
             raise ValueError("ledger projection mismatch")
         (voucher_type, voucher_no, company, posting_date, account, currency, party_type, party,
-         debit, credit, debit_currency, credit_currency, cancelled, against_type, against) = row
+         debit, credit, debit_currency, credit_currency, cancelled, against_type, against, cost_center) = row
         if (voucher_type != "Sales Invoice" or voucher_no != name or company != visit["company"]
                 or str(posting_date) != str(accounting["posting_date"]) or currency != visit["currency"]
                 or account not in expected or account in seen or _number(cancelled) != 0):
             raise ValueError("ledger identity drift")
-        expected_type, expected_party, expected_debit, expected_credit = expected[account]
+        expected_type, expected_party, expected_debit, expected_credit, expected_cost_center = expected[account]
         if ((party_type or None) != expected_type or (party or None) != expected_party
+                or (account != accounting["receivable_account"] and
+                    (cost_center or None) != expected_cost_center)
                 or ((against_type or None), (against or None)) !=
                    (("Sales Invoice", name) if account == accounting["receivable_account"] else (None, None))
                 or _number(debit) != expected_debit or _number(credit) != expected_credit
@@ -173,19 +187,33 @@ def _check_invoice(doc, visit, accounting, totals, discount, status):
             raise ValueError("invoice identity drift")
     if str(doc.posting_date) != str(accounting["posting_date"]):
         raise ValueError("posting date drift")
+    if set(totals) != {"currency", "gross", "discount", "net", "vat", "total"}:
+        raise ValueError("invalid totals projection")
+    for key in ("gross", "discount", "net", "vat", "total"):
+        value = totals[key]
+        if type(value) is not str or format(_number(value), ".2f") != value:
+            raise ValueError("invalid monetary projection")
     gross, cut, total = (_number(totals[k]) for k in ("gross", "discount", "total"))
+    net = _number(totals["net"])
+    vat = _number(totals["vat"])
+    mode = accounting["vat_mode"]
+    if mode not in ("no_vat", "vat_7"):
+        raise ValueError("invalid VAT mode")
     if (totals["currency"] != visit["currency"] or gross != _number(visit["price"])
-            or gross <= 0 or cut < 0 or total <= 0 or gross - cut != total
-            or any(value != value.quantize(Decimal("0.01")) for value in (gross, cut, total))):
+            or gross <= 0 or cut < 0 or net <= 0 or vat < 0 or gross - cut != net
+            or net + vat != total or (mode != "vat_7" and vat != 0)
+            or (mode == "vat_7" and (vat <= 0 or abs(vat - net * Decimal("0.07")) > Decimal("0.005")))
+            or any(value != value.quantize(Decimal("0.01")) for value in (gross, cut, net, vat, total))):
         raise ValueError("invalid totals")
     for field, expected in {
         "conversion_rate": 1, "plc_conversion_rate": 1, "set_posting_time": 0,
-        "total": gross, "base_total": gross, "net_total": total,
-        "base_net_total": total, "grand_total": total, "base_grand_total": total,
+        "total": gross, "base_total": gross, "net_total": net,
+        "base_net_total": net, "grand_total": total, "base_grand_total": total,
         "discount_amount": cut, "base_discount_amount": cut, "outstanding_amount": total,
+        "total_taxes_and_charges": vat, "base_total_taxes_and_charges": vat,
         **{field: 0 for field in (
             "is_pos", "is_return", "update_stock", "rounding_adjustment", "base_rounding_adjustment",
-            "total_taxes_and_charges", "base_total_taxes_and_charges", "total_advance",
+            "total_advance",
             "paid_amount", "base_paid_amount", "write_off_amount", "base_write_off_amount",
             "change_amount", "base_change_amount", "loyalty_points", "loyalty_amount",
             "redeem_loyalty_points", "allocate_advances_automatically",
@@ -207,15 +235,43 @@ def _check_invoice(doc, visit, accounting, totals, discount, status):
               (_number(doc.additional_discount_percentage) != _number(discount["value"])
                or abs(cut - gross * _number(discount["value"]) / 100) > Decimal("0.005")))):
         raise ValueError("discount drift")
-    if doc.taxes or doc.advances or doc.payments or len(doc.items) != 1:
+    if doc.advances or doc.payments or len(doc.items) != 1:
         raise ValueError("unexpected invoice rows")
+    if mode == "vat_7":
+        rows = accounting["tax_rows"]
+        if (not accounting["tax_template"] or doc.taxes_and_charges != accounting["tax_template"]
+                or len(rows) != 1 or len(doc.taxes) != 1 or _number(accounting["tax_rate"]) != 7):
+            raise ValueError("tax template drift")
+        expected = rows[0]
+        tax = doc.taxes[0]
+        description = expected.get("description")
+        if (expected != {"charge_type": "On Net Total", "account_head": accounting["tax_account"],
+                         "rate": Decimal(7), "included_in_print_rate": 0, "description": description}
+                or type(description) is not str or not description.strip()
+                or len(description) > MAX_TAX_DESCRIPTION_LENGTH
+                or tax.description != description
+                or tax.charge_type != expected["charge_type"] or tax.account_head != expected["account_head"]
+                or _number(tax.rate) != 7 or _number(tax.included_in_print_rate) != 0
+                or getattr(tax, "included_in_paid_amount", 0)
+                or getattr(tax, "add_deduct_tax", None) == "Deduct"):
+            raise ValueError("tax row drift")
+        for field in ("tax_amount", "base_tax_amount", "tax_amount_after_discount_amount",
+                      "base_tax_amount_after_discount_amount"):
+            if _number(getattr(tax, field)) != vat:
+                raise ValueError("tax amount drift")
+        if _number(tax.total) != total or _number(tax.base_total) != total:
+            raise ValueError("tax total drift")
+    elif (doc.taxes or getattr(doc, "taxes_and_charges", None)
+          or accounting["tax_template"] or accounting["tax_rows"]
+          or accounting["tax_account"] or accounting["tax_rate"] is not None):
+        raise ValueError("unexpected tax")
     if any(getattr(doc, field, None) for field in (
             "additional_discount_account", "is_cash_or_non_trade_discount",
             "insurance_coverage", "coverage_percentage")):
         raise ValueError("unsupported invoice adjustment")
     item = doc.items[0]
     if any(getattr(item, field, None) for field in (
-            "pricing_rules", "discount_percentage", "discount_amount", "margin_rate_or_amount",
+            "pricing_rules", "item_tax_template", "discount_percentage", "discount_amount", "margin_rate_or_amount",
             "discount_account", "insurance_coverage", "coverage_percentage",
             "patient_insurance_policy", "insurance_payor", "coverage_rate", "coverage_qty",
             "insurance_coverage_amount")):
@@ -229,7 +285,7 @@ def _check_invoice(doc, visit, accounting, totals, discount, status):
             raise ValueError("invoice item drift")
     for field, expected in {
         "qty": 1, "conversion_factor": 1, "rate": gross, "price_list_rate": gross, "amount": gross,
-        "base_amount": gross, "net_amount": total, "base_net_amount": total,
+        "base_amount": gross, "net_amount": net, "base_net_amount": net,
         "distributed_discount_amount": cut,
     }.items():
         if _number(getattr(item, field)) != expected:
@@ -247,7 +303,9 @@ def post_visit_invoice(gateway, doc, visit, accounting, totals, discount, *, enc
         if getattr(doc, "name", None):
             raise ValueError("draft already named")
         _check_invoice(doc, visit, accounting, totals, discount, 0)
-        if not _item_fields_readable(gateway.frappe):
+        if (not _child_fields_readable(gateway.frappe, "Sales Invoice Item", _ITEM_FIELDS)
+                or (accounting.get("vat_mode") == "vat_7" and
+                    not _child_fields_readable(gateway.frappe, "Sales Taxes and Charges", _TAX_FIELDS))):
             raise ValueError("item field authorization unavailable")
     except PostingPreDispatch:
         raise
@@ -277,7 +335,7 @@ def post_visit_invoice(gateway, doc, visit, accounting, totals, discount, *, enc
             encounter = _read(gateway, "Patient Encounter", encounter_id, ("appointment", "invoiced"))
             if encounter.appointment != visit["appointment_id"] or _number(encounter.invoiced) != 1:
                 raise ValueError("encounter marker drift")
-        _check_ledger(gateway.frappe, name, visit, accounting, totals)
+        _check_ledger(gateway.frappe, name, visit, accounting, totals, invoice)
     except Exception as exc:
         raise PostingPostDispatch("posting requires rollback") from exc
     return name
