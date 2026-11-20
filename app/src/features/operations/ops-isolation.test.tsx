@@ -10,7 +10,6 @@ import { AdminSystemPage } from "../admin/AdminSystemPage";
 import { AdminUsersPage } from "../admin/AdminUsersPage";
 import { CashierPage } from "../finance/CashierPage";
 import { InvoicesPage } from "../finance/InvoicesPage";
-import { PaymentsPage } from "../finance/PaymentsPage";
 import { ManagementHomePage } from "../management/ManagementHomePage";
 import { ManagementReportsPage } from "../management/ManagementReportsPage";
 import { PharmacyPurchasingPage } from "../pharmacy/PharmacyPurchasingPage";
@@ -27,6 +26,7 @@ afterEach(() => {
 });
 
 // PHA-02/03/04/06 have mode-specific transport guards in NativeInventoryPage.test.tsx.
+// CAS-03 has mode-specific transport guards in NativeCashierPaymentPage.test.tsx.
 const surfaces: ReadonlyArray<{
   readonly name: string;
   readonly role: RoleCode;
@@ -37,7 +37,6 @@ const surfaces: ReadonlyArray<{
   { name: "PHA-07", role: "PHA", testId: "pharmacy-purchasing", ui: () => <PharmacyPurchasingPage /> },
   { name: "CAS-01", role: "CAS", testId: "cashier-page", ui: () => <CashierPage /> },
   { name: "CAS-02", role: "CAS", testId: "invoices-page", ui: () => <InvoicesPage /> },
-  { name: "CAS-03", role: "CAS", testId: "payments-page", ui: () => <PaymentsPage /> },
   { name: "MGR-01", role: "MGR", testId: "management-page", ui: () => <ManagementHomePage /> },
   { name: "MGR-02", role: "MGR", testId: "management-reports", ui: () => <ManagementReportsPage /> },
   { name: "ADM-01", role: "ADM", testId: "admin-home", ui: () => <AdminHomePage /> },

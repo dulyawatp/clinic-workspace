@@ -8,9 +8,8 @@ import { server } from "../../test/msw/server";
 import { NATIVE_BOOTSTRAP, nativeSession } from "../../test/network-spy";
 import { renderWithFixtures } from "../../test/render";
 import { clearNativeCsrfToken } from "../../transport/native/session";
-import { InvoiceSubmitForm } from "./finance-write";
+import { InvoiceSubmitForm, PaymentReceiveForm } from "./finance-write";
 import { InvoicesPage } from "./InvoicesPage";
-import { PaymentsPage } from "./PaymentsPage";
 
 const PREVIEW = "/api/method/clinic_ui.api.finance_write.save_invoice_draft";
 const SUBMIT = "/api/method/clinic_ui.api.finance_write.submit_invoice";
@@ -450,6 +449,7 @@ it("keeps the void/amend control not available", async () => {
   ).toBeNull();
 });
 
+// The legacy writer contract is tested in isolation; the native Payments route never mounts it.
 it("receives a payment with one allocation equal to the paid amount", async () => {
   const user = userEvent.setup();
   const bodies: Record<string, unknown>[] = [];
@@ -469,7 +469,7 @@ it("receives a payment with one allocation equal to the paid amount", async () =
     }),
     http.post(ACK, ack),
   );
-  renderWithFixtures(<PaymentsPage />, {
+  renderWithFixtures(<PaymentReceiveForm />, {
     role: "CAS",
     sessionMode: "live",
     path: ROUTES.payments,
@@ -509,7 +509,7 @@ it("requires a terminal reference for a card payment and sends it", async () => 
     }),
     http.post(ACK, ack),
   );
-  renderWithFixtures(<PaymentsPage />, {
+  renderWithFixtures(<PaymentReceiveForm />, {
     role: "CAS",
     sessionMode: "live",
     path: ROUTES.payments,
@@ -554,7 +554,7 @@ it("keeps an unacknowledged payment uncertain without showing a payment ID or ba
     } })),
     http.post(ACK, () => new HttpResponse(null, { status: 503 })),
   );
-  renderWithFixtures(<PaymentsPage />, { role: "CAS", sessionMode: "live", path: ROUTES.payments });
+  renderWithFixtures(<PaymentReceiveForm />, { role: "CAS", sessionMode: "live", path: ROUTES.payments });
   const form = await screen.findByTestId("payment-write-form");
   await user.type(within(form).getByLabelText("เลขที่ใบแจ้งหนี้"), "SINV-1");
   await user.type(within(form).getByLabelText("ยอดรับชำระ"), "5");

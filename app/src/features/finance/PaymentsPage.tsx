@@ -10,6 +10,7 @@ import {
   SampleBanner,
 } from "../../design/components";
 import { useLocale } from "../../i18n/LocaleProvider";
+import { nativeTransportEnabled } from "../../transport/native/flag";
 import { useOpsCopy } from "../operations/ops-copy";
 import {
   allocationsFor,
@@ -28,6 +29,11 @@ import {
   useOpsFormat,
 } from "../operations/ops-ui";
 import { PaymentReceiveForm } from "./finance-write";
+import { NativeCashierPaymentPage } from "./NativeCashierPaymentPage";
+
+export function PaymentsPage() {
+  return nativeTransportEnabled() ? <NativeCashierPaymentPage /> : <FixturePaymentsPage />;
+}
 
 /**
  * CAS-03 payments. The form is the designed control set, but this build has no
@@ -36,7 +42,7 @@ import { PaymentReceiveForm } from "./finance-write";
  * from the fixture helpers (`dueOf` over posted payments), never from the
  * screen's own arithmetic on a total.
  */
-export function PaymentsPage() {
+function FixturePaymentsPage() {
   const { t } = useTranslation();
   const copy = useOpsCopy();
   const { locale } = useLocale();
