@@ -503,6 +503,7 @@ class AppointmentDetailTests(unittest.TestCase):
         }
         own = appointments_endpoint.appointment_detail(fake, alias)
         self.assertIs(own.get("is_fixture"), False)
+        self.assertEqual(own["native_appointment_id"], "NATIVE-APPT-3")
         self.assertTrue(own["can_reschedule"])
         self.assertFalse(own["can_checkin"])
         # The non-mutating target check receives the resolved target's own
@@ -540,6 +541,7 @@ class AppointmentDetailTests(unittest.TestCase):
         }
         payload = appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
         self.assertIs(payload.get("is_fixture"), False)
+        self.assertEqual(payload["native_appointment_id"], "NATIVE-APPT-3")
 
     def test_a_future_scheduled_booking_is_reschedulable(self):
         fake = gateway(

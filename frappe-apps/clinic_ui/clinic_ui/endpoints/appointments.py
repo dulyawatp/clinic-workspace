@@ -654,6 +654,8 @@ def appointment_detail(gateway, workspace_appointment_id=None):
             can_checkin=can_checkin,
         )
         result["is_fixture"] = resolved.source == SOURCE_STATIC
+        if not result["is_fixture"]:
+            result["native_appointment_id"] = resolved.native_appointment_id
         return result
     except ValueError:
         gateway.deny()
