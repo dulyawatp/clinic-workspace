@@ -473,6 +473,7 @@ class AppointmentDetailTests(unittest.TestCase):
                 "modified": "2026-11-14 09:30:00.123456",
                 "can_reschedule": False,
                 "can_checkin": False,
+                "is_fixture": True,
             },
         )
         self.assertNotIn("NATIVE-APPT-1", repr(payload))
@@ -501,6 +502,7 @@ class AppointmentDetailTests(unittest.TestCase):
             "modified": "2026-11-14 09:30:00.123456",
         }
         own = appointments_endpoint.appointment_detail(fake, alias)
+        self.assertIs(own.get("is_fixture"), False)
         self.assertTrue(own["can_reschedule"])
         self.assertFalse(own["can_checkin"])
         # The non-mutating target check receives the resolved target's own
@@ -526,8 +528,18 @@ class AppointmentDetailTests(unittest.TestCase):
         other.appointment_receipt_records = fake.appointment_receipt_records
         other.appointment_detail_map = fake.appointment_detail_map
         payload = appointments_endpoint.appointment_detail(other, alias)
+        self.assertIs(payload.get("is_fixture"), False)
         self.assertFalse(payload["can_reschedule"])
         self.assertFalse(payload["can_checkin"])
+
+    def test_native_detail_is_not_fixture(self):
+        fake = gateway()
+        fake.appointment_detail_map["NATIVE-APPT-3"] = {
+            **DETAILS["NATIVE-APPT-1"],
+            "modified": "2026-11-14 09:30:00.123456",
+        }
+        payload = appointments_endpoint.appointment_detail(fake, "NATIVE-APPT-3")
+        self.assertIs(payload.get("is_fixture"), False)
 
     def test_a_future_scheduled_booking_is_reschedulable(self):
         fake = gateway(

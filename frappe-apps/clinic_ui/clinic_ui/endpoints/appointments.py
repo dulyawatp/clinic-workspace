@@ -648,10 +648,12 @@ def appointment_detail(gateway, workspace_appointment_id=None):
         gateway, settings, view.user, resolved, detail
     )
     try:
-        return dto.appointment_read(
+        result = dto.appointment_read(
             payload,
             can_reschedule=can_reschedule,
             can_checkin=can_checkin,
         )
+        result["is_fixture"] = resolved.source == SOURCE_STATIC
+        return result
     except ValueError:
         gateway.deny()
