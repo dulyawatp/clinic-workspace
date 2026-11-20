@@ -133,6 +133,7 @@ type NoteEdit = { original: LinkedNote | null; text: string };
 type Write = "save" | "submit";
 type Operation = Write | "check" | "notes";
 type Uncertain = { kind: Write; rejected?: true };
+type Recovery = { unavailable: boolean; uncertain: Uncertain | null };
 
 // Same-tab recovery marker only. Do not persist record identifiers or any
 // patient, note, or clinical data. This fingerprint is not authorization.
@@ -144,33 +145,27 @@ function pendingKey(kind: Write, id: string) {
   return `clinic.linked.${kind}.${fingerprint.toString(16)}`;
 }
 
-function isPending(key: string): boolean {
-  try { return sessionStorage.getItem(key) === "pending"; }
-  catch { return false; }
+function readMarker(key: string): "clear" | "pending" | "unavailable" {
+  try {
+    const value = sessionStorage.getItem(key);
+    return value === null ? "clear" : value === "pending" ? "pending" : "unavailable";
+  } catch {
+    return "unavailable";
+  }
+}
+
+function readRecovery(saveKey: string, draftSubmitKey: string | null): Recovery {
+  const save = readMarker(saveKey);
+  const submit = draftSubmitKey ? readMarker(draftSubmitKey) : "clear";
+  const unavailable = save === "unavailable" || submit === "unavailable";
+  const uncertain = unavailable ? null : submit === "pending" ? { kind: "submit" } as const :
+    save === "pending" ? { kind: "save" } as const : null;
+  return { unavailable, uncertain };
 }
 
 function clearPending(key: string) {
   try { sessionStorage.removeItem(key); }
   catch { /* Leave a conservative lock if storage becomes unavailable. */ }
-}
-
-function matchesSavedInput(before: LinkedEncounter, after: LinkedEncounter, sent: LinkedClinical) {
-  if (!before.encounter || !after.encounter || before.encounter.modified === after.encounter.modified) return false;
-  if (!sent.symptoms && !sent.diagnoses && !sent.note) return false;
-  for (const kind of ["symptoms", "diagnoses"] as const) {
-    const wanted = sent[kind];
-    const persisted = after.encounter[kind];
-    if (wanted && (wanted.length !== persisted.length || wanted.some((item, i) => item !== persisted[i]))) return false;
-  }
-  if (sent.note) {
-    const wanted = sent.note;
-    // New notes have no known native identity, and inaccessible or unlisted
-    // notes cannot be inferred from the encounter version alone.
-    if (!wanted.id || !wanted.modified || after.notes.state !== "available") return false;
-    return after.notes.items.some((item) =>
-      item.id === wanted.id && item.modified !== wanted.modified && item.text === wanted.text);
-  }
-  return true;
 }
 
 function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; appointmentRef: string }) {
@@ -183,11 +178,8 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   const [busy, setBusy] = useState<Operation | null>(null);
   const saveKey = pendingKey("save", initial.context.appointment);
   const submitKey = initial.encounter && pendingKey("submit", initial.encounter.id);
-  const [uncertain, setUncertain] = useState<Uncertain | null>(() => {
-    if (submitKey && initial.encounter?.docstatus === 0 && isPending(submitKey)) return { kind: "submit" };
-    if (isPending(saveKey)) return { kind: "save" };
-    return null;
-  });
+  const [recovery, setRecovery] = useState(() => readRecovery(saveKey, initial.encounter?.docstatus === 0 ? submitKey : null));
+  const { unavailable: recoveryUnavailable, uncertain } = recovery;
   const [feedback, setFeedback] = useState<string | null>(null);
   const [pageError, setPageError] = useState(false);
   const inFlight = useRef(false);
@@ -211,7 +203,9 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
     else if (completed && initial.encounter?.docstatus === 0) patientHeading.current?.focus();
   }, [confirm, completed, initial.encounter?.docstatus]);
 
-  const locked = Boolean(busy || uncertain || confirm);
+  const readLocked = Boolean(busy || uncertain || confirm);
+  const locked = readLocked || recoveryUnavailable;
+  const readOnly = completed || recoveryUnavailable;
   const hasClinicalChanges = Object.keys(clinical).length > 0;
   const dirty = hasClinicalChanges || edit !== null;
   const noteChanged = edit && edit.text !== (edit.original ? noteContent(edit.original.text).text : "");
@@ -243,7 +237,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
 
   function accept(next: LinkedEncounter) {
     setConfirm(false);
-    setUncertain(null);
+    setRecovery({ unavailable: false, uncertain: null });
     setClinical({});
     setEdit(null);
     setPageError(false);
@@ -266,11 +260,9 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
       if (kind === "submit" && (next.encounter?.docstatus === 1 || rejected)) {
         if (submitKey) clearPending(submitKey);
         accept(next);
-      } else if (kind === "save" && matchesSavedInput(record, next, saveInput)) {
-        clearPending(saveKey);
-        accept(next);
-        if (next.encounter?.docstatus === 0) setFeedback("linkedEncounter.saved");
       } else {
+        // Current data, even identical values at a newer version, cannot
+        // establish whether an ambiguous save request has finished.
         setFeedback(kind === "submit" ? "linkedEncounter.stillDraft" :
           dirty ? "linkedEncounter.saveUnconfirmed" : "linkedEncounter.saveUnverified");
       }
@@ -280,17 +272,25 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   }
 
   function persist(kind: Write) {
-    if (completed || uncertain || (kind === "submit" && (!encounter || dirty || !confirm))) return;
+    if (readOnly || uncertain || (kind === "submit" && (!encounter || dirty || !confirm))) return;
     if (kind === "save" && (confirm || cannotSave || (noteChanged && notes.state !== "available"))) return;
     const key = kind === "save" ? saveKey : submitKey;
     if (!key) return;
     void run(kind, async (signal) => {
       setFeedback(null);
+      const currentRecovery = readRecovery(saveKey, submitKey);
+      if (currentRecovery.unavailable || currentRecovery.uncertain) {
+        setConfirm(false);
+        setRecovery(currentRecovery);
+        return;
+      }
       try {
         sessionStorage.setItem(key, "pending");
+        if (readMarker(key) !== "pending") throw new Error();
       } catch {
+        clearPending(key);
         setConfirm(false);
-        setFeedback("linkedEncounter.recoveryUnavailable");
+        setRecovery({ unavailable: true, uncertain: null });
         return;
       }
       try {
@@ -314,9 +314,9 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
           setFeedback("linkedEncounter.writeDenied");
         } else if (rejected) {
           setFeedback("linkedEncounter.writeRejected");
-          if (kind === "submit") setUncertain({ kind, rejected: true });
+          if (kind === "submit") setRecovery({ unavailable: false, uncertain: { kind, rejected: true } });
         } else {
-          setUncertain({ kind });
+          setRecovery({ unavailable: false, uncertain: { kind } });
           await reconcile({ kind }, signal);
         }
       }
@@ -324,7 +324,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   }
 
   function loadNotes() {
-    if (notes.next_offset === null || locked) return;
+    if (notes.next_offset === null || readLocked) return;
     const offset = notes.next_offset;
     void run("notes", async (signal) => {
       setPageError(false);
@@ -391,8 +391,8 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
         status={encounter ? <EncounterStatus status={encounter.docstatus} /> :
           <Badge tone="warning">{t("linkedEncounter.unsaved")}</Badge>}
         details={<div className="visit-preview-stack">
-          {(["symptoms", "diagnoses"] as const).map((kind) => completed
-            ? <SavedTerms key={kind} kind={kind} items={encounter[kind]} />
+          {(["symptoms", "diagnoses"] as const).map((kind) => readOnly
+            ? <SavedTerms key={kind} kind={kind} items={clinical[kind] ?? encounter?.[kind] ?? []} />
             : <ClinicalMasterPicker key={kind} kind={kind} selected={clinical[kind] ?? encounter?.[kind] ?? []}
               disabled={locked} onChange={(values) => setClinical((prev) => ({ ...prev, [kind]: values }))} />)}
         </div>}
@@ -405,7 +405,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
                 <h4>{item.id}</h4>
                 <p className="visit-linked-note-text">{content.text || t("linkedEncounter.noNoteText")}</p>
                 {content.rich && <p className="pc-note">{t("linkedEncounter.formattedNote")}</p>}
-                {!content.rich && !completed && <div>
+                {!content.rich && !readOnly && <div>
                   <Button variant="secondary" disabled={locked || edit !== null}
                     onClick={() => setEdit({ original: item, text: content.text })}>
                     {t("linkedEncounter.editNote", { id: item.id })}
@@ -414,27 +414,31 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
               </article>;
             })}
             {pageError && <p role="alert">{t("linkedEncounter.notesLoadFailed")}</p>}
-            {notes.next_offset !== null && <div><Button variant="secondary" disabled={locked || edit !== null} onClick={loadNotes}>
+            {notes.next_offset !== null && <div><Button variant="secondary" disabled={readLocked || edit !== null} onClick={loadNotes}>
               {t(busy === "notes" ? "common.loading" : "linkedEncounter.moreNotes")}
             </Button></div>}
             {!completed && (edit ? (
               <div className="pc-field">
                 <label>{t("workspace.narrative")}
-                  <textarea value={edit.text} disabled={locked} onChange={(event) => setEdit({ ...edit, text: event.target.value })} />
+                  <textarea value={edit.text} readOnly={recoveryUnavailable} disabled={readLocked}
+                    onChange={(event) => setEdit({ ...edit, text: event.target.value })} />
                 </label>
-                <p className="pc-note">{t("linkedEncounter.noteSaveHint")}</p>
-                <div><Button variant="secondary" disabled={locked} onClick={() => setEdit(null)}>
-                  {t("linkedEncounter.discardNote")}
-                </Button></div>
+                {!recoveryUnavailable && <>
+                  <p className="pc-note">{t("linkedEncounter.noteSaveHint")}</p>
+                  <div><Button variant="secondary" disabled={locked} onClick={() => setEdit(null)}>
+                    {t("linkedEncounter.discardNote")}
+                  </Button></div>
+                </>}
               </div>
-            ) : <div><Button variant="secondary" disabled={locked} onClick={() => setEdit({ original: null, text: "" })}>
+            ) : !recoveryUnavailable && <div><Button variant="secondary" disabled={locked} onClick={() => setEdit({ original: null, text: "" })}>
               {t("linkedEncounter.addNote")}
             </Button></div>)}
           </div>}
         medications={<p className="pc-note">{t("workspace.savedMedicationsUnavailable")}</p>}
       />
-      {(feedback || !completed) && (
+       {(feedback || !completed) && (
         <div className="visit-preview-card visit-preview-actions visit-preview-stack">
+          {recoveryUnavailable && <p role="alert">{t("linkedEncounter.recoveryUnavailable")}</p>}
           {feedback && <p role={feedback === "linkedEncounter.saved" ? "status" : "alert"}>{t(feedback)}</p>}
           {confirm ? (
             <div role="group" aria-labelledby={confirmLabel} className="visit-preview-stack" ref={confirmation} tabIndex={-1}>
@@ -444,7 +448,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
                 <Button variant="secondary" disabled={Boolean(busy)} onClick={() => setConfirm(false)}>{t("linkedEncounter.back")}</Button>
               </div>
             </div>
-          ) : !completed && <>
+          ) : !readOnly && <>
             {encounter && dirty && <p className="pc-note">{t("linkedEncounter.saveBeforeSubmit")}</p>}
             <div className="pc-row">
               <Button variant="primary" disabled={locked || cannotSave}

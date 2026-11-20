@@ -37,17 +37,18 @@ beforeEach(() => {
     http.get("/api/method/clinic_ui.api.appointments.view", () => reply({
       workspace_patient_id: "WS-PAT", appointment_id: REF, appointment_date: "2026-11-20",
       appointment_time: "09:30:00", status: "Open", modified: VERSION,
-      can_reschedule: false, can_checkin: false,
+      can_reschedule: false, can_checkin: false, is_fixture: false,
     })),
   );
 });
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
   localStorage.removeItem(LOCALE_KEY);
   sessionStorage.clear();
 });
 
-it.each([true, false] as const)("shows the launch according to the authoritative is_fixture=%s flag", async (is_fixture) => {
+it.each([true, false, undefined] as const)("shows the launch according to the authoritative is_fixture=%s flag", async (is_fixture) => {
   server.use(http.get("/api/method/clinic_ui.api.appointments.view", () => reply({
     workspace_patient_id: "WS-PAT", appointment_id: REF, appointment_date: "2026-11-20",
     appointment_time: "09:30:00", status: "Open", modified: VERSION,
@@ -55,7 +56,7 @@ it.each([true, false] as const)("shows the launch according to the authoritative
   })));
   setup(ROUTES.appointment(REF));
   expect(await screen.findByTestId("appointment-reference")).toBeVisible();
-  if (is_fixture) expect(screen.queryByRole("link", { name: "Open encounter" })).not.toBeInTheDocument();
+  if (is_fixture !== false) expect(screen.queryByRole("link", { name: "Open encounter" })).not.toBeInTheDocument();
   else expect(screen.getByRole("link", { name: "Open encounter" })).toBeVisible();
 });
 
@@ -276,7 +277,7 @@ it("distinguishes a write explicitly rejected by Frappe from a lost submit respo
   expect(post).toHaveBeenCalledTimes(1);
 });
 
-it("preserves coded changes and note input across ambiguous save reads until the selected note and encounter are verified", async () => {
+it("preserves coded changes and note input even when a delayed read matches the ambiguous save", async () => {
   const changedVersion = "2026-11-20 09:45:00.000001";
   const noteText = "New follow-up instructions.";
   let current = draft;
@@ -320,15 +321,71 @@ it("preserves coded changes and note input across ambiguous save reads until the
   expect(input).toHaveAttribute("readonly");
   current = { ...current, notes: { ...notes, items: [{ ...note, modified: changedVersion, text: noteText }] } };
   await user.click(await screen.findByRole("button", { name: "Check encounter status" }));
-  expect(await screen.findByText("Draft saved.")).toBeVisible();
-  expect(screen.getByText(noteText)).toBeVisible();
-  expect(screen.queryByRole("textbox", { name: "Visit narrative" })).not.toBeInTheDocument();
+  expect(await screen.findByText("The save is not confirmed. Your changes are shown below so you can copy them if needed.")).toBeVisible();
+  input = screen.getByRole("textbox", { name: "Visit narrative" });
+  expect(input).toHaveValue(noteText);
+  expect(input).toHaveAttribute("readonly");
+  expect(screen.getByText("Itching")).toBeVisible();
+  expect(screen.queryByText("Draft saved.")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /save draft|submit encounter/i })).not.toBeInTheDocument();
   expect(get).toHaveBeenCalledTimes(4);
   expect(save.mock.calls).toEqual([[{
     appointment_ref: REF,
     expected_version: VERSION,
     clinical: { symptoms: ["Pain", "Itching"], note: { id: note.id, modified: note.modified, text: noteText } },
   }]]);
+});
+
+it("keeps draft reads and Patient History available when recovery marker reads are blocked on remount", async () => {
+  server.use(
+    http.get(`${METHOD}open_for_appointment`, () => reply(draft)),
+    http.get(`${METHOD}list_for_patient`, () => reply({
+      items: [{ id: ENC, patientId: PAT, patientName: "Timeline Patient", practitioner: context.practitioner, encounterDate: null, docstatus: 0 }],
+      nextOffset: null,
+    })),
+  );
+  const page = setup(canonical);
+  expect(await screen.findByRole("button", { name: "Submit encounter" })).toBeEnabled();
+  page.unmount();
+  const read = Storage.prototype.getItem;
+  vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (this: Storage, key) {
+    if (key.startsWith("clinic.linked.")) throw new DOMException("Blocked", "SecurityError");
+    return read.call(this, key);
+  });
+  const posts = postSpy();
+  try {
+    setup(canonical);
+    expect(await screen.findByText("This browser could not protect against a repeat request. No changes were sent.")).toBeVisible();
+    expect(screen.getByText(note.text)).toBeVisible();
+    const history = screen.getByRole("link", { name: "Patient History" });
+    expect(history).toHaveAttribute("href", ROUTES.patientHistory(PAT));
+    expect(screen.queryByRole("button", { name: /save draft|submit encounter|add clinical note/i })).not.toBeInTheDocument();
+    await userEvent.setup().click(history);
+    expect(await screen.findByRole("heading", { name: `Visit ${ENC}` })).toBeVisible();
+    expect(posts.posts).toEqual([]);
+  } finally {
+    posts.stop();
+  }
+});
+
+it("sends no POST if browser storage silently drops the recovery marker", async () => {
+  server.use(http.get(`${METHOD}open_for_appointment`, () => reply(draft)));
+  const write = Storage.prototype.setItem;
+  vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+    if (!key.startsWith("clinic.linked.")) write.call(this, key, value);
+  });
+  const posts = postSpy();
+  try {
+    setup(canonical);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Submit encounter" }));
+    await user.click(screen.getByRole("button", { name: "Confirm submission" }));
+    expect(await screen.findByText("This browser could not protect against a repeat request. No changes were sent.")).toBeVisible();
+    expect(screen.getByText(note.text)).toBeVisible();
+    expect(posts.posts).toEqual([]);
+  } finally {
+    posts.stop();
+  }
 });
 
 it("does not treat an indistinguishable new note as proof of an ambiguous save", async () => {

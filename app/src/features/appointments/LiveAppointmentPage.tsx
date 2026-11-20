@@ -234,7 +234,7 @@ export function LiveAppointmentPage({ id }: { id: string }) {
           </dl>
 
           <div className="appointment-actions">
-            {appointment.is_fixture !== true && <Link className="pc-button pc-button--primary" to={ROUTES.linkedVisit(appointment.appointment_id)}>
+            {appointment.is_fixture === false && <Link className="pc-button pc-button--primary" to={ROUTES.linkedVisit(appointment.appointment_id)}>
               {t("workspace.openEncounter")}
             </Link>}
             {!canReschedule ? (
