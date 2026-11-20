@@ -1509,11 +1509,7 @@ class HookRegistrationTests(unittest.TestCase):
             self.hooks.before_request,
             ["clinic_photos.access.entrypoints.mark_direct_private_request"],
         )
-        self.assertEqual(self.hooks.doc_events, {
-            "Patient Appointment": {
-                "on_update": "clinic_photos.access.visit_observation.appointment_updated",
-            },
-        })
+        self.assertFalse(getattr(self.hooks, "doc_events", None))
 
 
 class ControllerWiringTests(unittest.TestCase):

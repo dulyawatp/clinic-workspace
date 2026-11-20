@@ -56,10 +56,3 @@ scheduler_events = {
         ],
     },
 }
-
-# Capture native check-in only for an existing consent; never hook encounter saves.
-doc_events = {
-    "Patient Appointment": {
-        "on_update": "clinic_photos.access.visit_observation.appointment_updated",
-    },
-}

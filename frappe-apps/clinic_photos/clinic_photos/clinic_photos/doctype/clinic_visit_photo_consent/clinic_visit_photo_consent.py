@@ -1,9 +1,6 @@
 import frappe
 from frappe.model.document import Document
 
-from clinic_photos.access import visit_observation
-
-
 class ClinicVisitPhotoConsent(Document):
     def validate(self):
         if not self.get("appointment") or not self.get("patient"):
@@ -48,8 +45,7 @@ class ClinicVisitPhotoConsent(Document):
             frappe.throw("Consent revocation audit is server controlled.")
         before = getattr(previous, "checked_in_at", None)
         if self.get("checked_in_at") != before:
-            if before or self.get("revoked") or not visit_observation.is_observing(self):
-                frappe.throw("Check-in observation is server controlled.")
+            frappe.throw("Check-in observation is unavailable.")
 
     def on_trash(self):
         frappe.throw("Consent records cannot be deleted.")

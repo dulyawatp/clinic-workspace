@@ -32,7 +32,6 @@ document.Document = Document
 
 with patch.dict(sys.modules, {"frappe": frappe, "frappe.model": model, "frappe.model.document": document}):
     consent_module = importlib.import_module("clinic_photos.clinic_photos.doctype.clinic_visit_photo_consent.clinic_visit_photo_consent")
-    observer = importlib.import_module("clinic_photos.access.visit_observation")
 
 
 class DB:
@@ -104,26 +103,14 @@ class ConsentTests(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 consent().validate()
 
-    def test_hook_requires_transition_existing_consent_and_permission(self):
-        old = types.SimpleNamespace(name="A", patient="P", status="Open", position_in_queue=0)
-        appt = types.SimpleNamespace(name="A", patient="P", status="Checked In", position_in_queue=3,
-                                     get_doc_before_save=lambda: old)
+    def test_client_cannot_set_observation_on_existing_consent(self):
         self.doc.validate()
         self.doc.previous = types.SimpleNamespace(**vars(self.doc))
         self.doc.name = "C"
         frappe.db.current = vars(self.doc.previous)
-        self.doc.save = lambda: self.doc.validate()
-        frappe.get_doc = lambda *args: self.doc
-        frappe.has_permission = lambda *args, **kwargs: True
-        observer.appointment_updated(appt, None)
-        self.assertIsNone(self.doc.get("checked_in_at"))
-        frappe.db.consent = True
-        frappe.has_permission = lambda *args, **kwargs: False
-        observer.appointment_updated(appt, None)
-        self.assertIsNone(self.doc.get("checked_in_at"))
-        frappe.has_permission = lambda *args, **kwargs: True
-        observer.appointment_updated(appt, None)
-        self.assertEqual(self.doc.checked_in_at, "server-time")
+        self.doc.checked_in_at = "forged"
+        with self.assertRaises(ValidationError):
+            self.doc.validate()
 
     def test_stale_consent_cannot_erase_concurrent_observation(self):
         self.doc.validate()
@@ -132,34 +119,3 @@ class ConsentTests(unittest.TestCase):
         frappe.db.current = {**vars(self.doc.previous), "checked_in_at": "other-transaction"}
         with self.assertRaises(ValidationError):
             self.doc.validate()
-
-    def test_hook_refuses_unverified_or_unrelated_visits(self):
-        old = types.SimpleNamespace(name="A", patient="P", status="Open", position_in_queue=0)
-        self.doc.validate()
-        self.doc.previous = types.SimpleNamespace(**vars(self.doc))
-        self.doc.name = "C"
-        frappe.db.consent = True
-        frappe.db.current = vars(self.doc.previous)
-        frappe.get_doc = lambda *args: self.doc
-        frappe.has_permission = lambda *args, **kwargs: True
-        self.doc.save = lambda: self.doc.validate()
-        for status, queue, patient in (("Closed", 1, "P"), ("Checked In", 0, "P"), ("Checked In", 1, "Q")):
-            appt = types.SimpleNamespace(name="A", patient=patient, status=status, position_in_queue=queue,
-                                         get_doc_before_save=lambda: old)
-            observer.appointment_updated(appt, None)
-            self.assertIsNone(self.doc.get("checked_in_at"))
-
-    def test_hook_rejects_retained_queue_and_no_transition(self):
-        self.doc.validate()
-        self.doc.previous = types.SimpleNamespace(**vars(self.doc))
-        self.doc.name = "C"
-        frappe.db.consent = True
-        frappe.db.current = vars(self.doc.previous)
-        frappe.get_doc = lambda *args: self.doc
-        self.doc.save = lambda: self.doc.validate()
-        for status, queue, patient in (("Open", 3, "P"), ("Checked In", 0, "P"), ("Open", 0, "Q")):
-            old = types.SimpleNamespace(name="A", patient=patient, status=status, position_in_queue=queue)
-            appt = types.SimpleNamespace(name="A", patient="P", status="Checked In", position_in_queue=3,
-                                         get_doc_before_save=lambda: old)
-            observer.appointment_updated(appt, None)
-            self.assertIsNone(self.doc.get("checked_in_at"))
