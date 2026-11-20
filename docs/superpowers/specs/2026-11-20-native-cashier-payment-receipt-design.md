@@ -1,0 +1,10 @@
+# Native cashier payment and receipt
+
+Keep the cashier in Clinic to identify an invoice, collect its full balance, and open the native receipt. ERPNext remains the source of truth. Prefer the existing permission-checked payment action and native print format over an ERPNext Desk handoff; use the handoff only where a safe, verified Clinic workflow is unavailable. Do not replace posting or printing with a React implementation.
+
+- Currency selector defaults to THB and filters invoices; it never changes their currency or performs conversion.
+- The searchable selector lists existing submitted invoices with a positive outstanding balance. Show invoice ID, billing customer, invoice date and outstanding balance in the result; keep patient identity distinct. Show patient name and ID only from an explicit, permission-checked native link. Distinguish an absent link from unavailable patient details.
+- One invoice, one payment method, full current outstanding balance. The amount is read-only. Only Cash and Credit Card; the latter records an already-approved terminal transaction and requires its transaction reference. No card data or new selectable master records.
+- Re-read the invoice before posting and stop if the balance, currency or eligibility changed. The read protects against already-visible changes, not races. Before enabling the action, verify the existing backend guarantees full settlement against the latest balance at posting time and that configured settlement accounts do not require conversion. If either is unverified, keep posting disabled; no backend changes, permission grants or alternate write path.
+- Show receipt details from a verified submitted Payment Entry linked to the selected invoice. Only enable the configured native receipt print action after verifying read and print access. A lost or uncertain result must never trigger another payment or a receipt inferred from form values.
+- No live writes, permission changes or deployment without separate approval. Use realistic synthetic data offline for missing fixtures.

@@ -294,6 +294,35 @@
   margin: var(--pc-sp-3) 0;
 }
 
+.finance-lookup-results {
+  display: grid;
+  gap: var(--pc-sp-2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.finance-lookup-results li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--pc-sp-2);
+}
+
+.finance-lookup-results span,
+.finance-posted-detail dd {
+  overflow-wrap: anywhere;
+}
+
+.finance-posted-detail {
+  display: grid;
+  gap: var(--pc-sp-3);
+  min-width: 0;
+  padding-block-start: var(--pc-sp-3);
+  border-block-start: 1px solid var(--pc-border);
+}
+
 .admin-write-fields {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));

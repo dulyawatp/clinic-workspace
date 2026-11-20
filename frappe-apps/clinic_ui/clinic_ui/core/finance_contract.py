@@ -59,6 +59,7 @@ import hmac
 import json
 import re
 from dataclasses import dataclass
+from decimal import Decimal
 
 from clinic_ui.core import procedure_contract, write_budgets
 from clinic_ui.core.text import is_valid_text
@@ -216,6 +217,7 @@ INSTALLED_CANDIDATES = {
         "customer": ("customer",),
         "company": ("company",),
         "currency": ("currency",),
+        "party_account_currency": ("party_account_currency",),
         "conversion_rate": ("conversion_rate",),
         "posting_date": ("posting_date",),
         "due_date": ("due_date",),
@@ -253,11 +255,16 @@ INSTALLED_CANDIDATES = {
         "party_type": ("party_type",),
         "party": ("party",),
         "company": ("company",),
-        "currency": ("currency",),
         "paid_from": ("paid_from",),
         "paid_to": ("paid_to",),
+        "paid_from_account_currency": ("paid_from_account_currency",),
+        "paid_to_account_currency": ("paid_to_account_currency",),
         "paid_amount": ("paid_amount",),
         "received_amount": ("received_amount",),
+        "base_paid_amount": ("base_paid_amount",),
+        "base_received_amount": ("base_received_amount",),
+        "unallocated_amount": ("unallocated_amount",),
+        "difference_amount": ("difference_amount",),
         "source_exchange_rate": ("source_exchange_rate",),
         "target_exchange_rate": ("target_exchange_rate",),
         "posting_date": ("posting_date",),
@@ -287,7 +294,9 @@ INSTALLED_CANDIDATES = {
     },
     ACCOUNT_DOCTYPE: {
         "company": ("company",),
+        "account_currency": ("account_currency",),
         "is_group": ("is_group",),
+        "disabled": ("disabled",),
         "account_type": ("account_type",),
     },
     ITEM_DOCTYPE: {
@@ -308,6 +317,7 @@ INSTALLED_CANDIDATES = {
     },
     MODE_OF_PAYMENT_DOCTYPE: {
         "enabled": ("enabled",),
+        "type": ("type",),
         "accounts": ("accounts",),
     },
     MODE_OF_PAYMENT_ACCOUNT_DOCTYPE: {
@@ -317,15 +327,35 @@ INSTALLED_CANDIDATES = {
     GL_ENTRY_DOCTYPE: {
         "voucher_type": ("voucher_type",),
         "voucher_no": ("voucher_no",),
+        "company": ("company",),
         "account": ("account",),
+        "account_currency": ("account_currency",),
         "debit": ("debit",),
         "credit": ("credit",),
+        "debit_in_account_currency": ("debit_in_account_currency",),
+        "credit_in_account_currency": ("credit_in_account_currency",),
+        "party_type": ("party_type",),
+        "party": ("party",),
+        "against_voucher_type": ("against_voucher_type",),
+        "against_voucher": ("against_voucher",),
         "is_cancelled": ("is_cancelled",),
     },
     PAYMENT_LEDGER_DOCTYPE: {
         "voucher_type": ("voucher_type",),
         "voucher_no": ("voucher_no",),
+        "company": ("company",),
+        "account": ("account",),
+        "account_currency": ("account_currency",),
+        "party_type": ("party_type",),
+        "party": ("party",),
+        "against_voucher_type": ("against_voucher_type",),
+        "against_voucher_no": ("against_voucher_no",),
         "amount": ("amount",),
+        "amount_in_account_currency": ("amount_in_account_currency",),
+        "posting_date": ("posting_date",),
+        "due_date": ("due_date",),
+        "cost_center": ("cost_center",),
+        "remarks": ("remarks",),
         "account_type": ("account_type",),
         "delinked": ("delinked",),
     },
@@ -333,6 +363,23 @@ INSTALLED_CANDIDATES = {
         "voucher_type": ("voucher_type",),
         "voucher_no": ("voucher_no",),
     },
+}
+
+# Payment preflight excludes invoice pricing masters, while retaining every
+# field read by the locked settlement and voucher verification path.
+PAYMENT_INSTALLED_CANDIDATES = {
+    doctype: INSTALLED_CANDIDATES[doctype]
+    for doctype in (
+        INVOICE_DOCTYPE,
+        PAYMENT_DOCTYPE,
+        PAYMENT_REFERENCE_DOCTYPE,
+        COMPANY_DOCTYPE,
+        ACCOUNT_DOCTYPE,
+        MODE_OF_PAYMENT_DOCTYPE,
+        MODE_OF_PAYMENT_ACCOUNT_DOCTYPE,
+        GL_ENTRY_DOCTYPE,
+        PAYMENT_LEDGER_DOCTYPE,
+    )
 }
 
 # Converted invoice lane only. ``taxes`` is a Table field and is collected from
@@ -536,6 +583,10 @@ def install_problem(meta_fields):
     """Return the first missing installed field, or ``None`` when complete."""
 
     return _installed_problem(meta_fields, INSTALLED_CANDIDATES)
+
+
+def payment_install_problem(meta_fields):
+    return _installed_problem(meta_fields, PAYMENT_INSTALLED_CANDIDATES)
 
 
 def invoice_install_problem(meta_fields):
@@ -1073,8 +1124,11 @@ def payment_problems(detail, payload):
                 f"invoice {payload['invoice']} has no customer",
             )
         )
-    allocated = sum(entry["amount"] for entry in payload["allocations"])
-    if abs(allocated - payload["amount"]) > MONEY_TOLERANCE:
+    allocated = sum(
+        (Decimal(str(entry["amount"])) for entry in payload["allocations"]),
+        Decimal(0),
+    )
+    if allocated != Decimal(str(payload["amount"])):
         problems.append(
             (
                 HTTP_REFUSED,
@@ -1090,6 +1144,14 @@ def payment_problems(detail, payload):
                 "amount",
                 "the paid amount exceeds the invoice outstanding balance",
             )
+        )
+    elif _positive(outstanding) and Decimal(str(payload["amount"])) != Decimal(str(outstanding)):
+        problems.append(
+            (HTTP_REFUSED, "amount", "the paid amount must equal the invoice outstanding balance")
+        )
+    if len(payload["allocations"]) != 1:
+        problems.append(
+            (HTTP_REFUSED, "allocations", "exactly one allocation is required")
         )
 
     mode = detail.get("mode") or {}

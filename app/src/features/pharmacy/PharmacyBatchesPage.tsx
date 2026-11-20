@@ -10,6 +10,7 @@ import {
 } from "../../design/components";
 import { opsData } from "../../fixtures/data-ops";
 import { useLocale } from "../../i18n/LocaleProvider";
+import { nativeTransportEnabled } from "../../transport/native/flag";
 import { useOpsCopy } from "../operations/ops-copy";
 import {
   expiryBucketCounts,
@@ -25,9 +26,14 @@ import {
   SourceNote,
   useOpsFormat,
 } from "../operations/ops-ui";
+import { NativeInventoryPage } from "./NativeInventoryPage";
 
 const WINDOWS = ["all", "expired", "7", "30", "90"] as const;
 type Window = (typeof WINDOWS)[number];
+
+export function PharmacyBatchesPage() {
+  return nativeTransportEnabled() ? <NativeInventoryPage kind="batches" /> : <FixtureBatchesPage />;
+}
 
 /**
  * PHA-03 batches and expiry. The filter windows are cumulative (30 includes 7),
@@ -35,7 +41,7 @@ type Window = (typeof WINDOWS)[number];
  * `urgency` value, so the five buckets always add up to the row total. Usable
  * quantity excludes expired lots; physical quantity does not.
  */
-export function PharmacyBatchesPage() {
+function FixtureBatchesPage() {
   const copy = useOpsCopy();
   const { locale } = useLocale();
   const { date } = useOpsFormat();

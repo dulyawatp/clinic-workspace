@@ -214,6 +214,7 @@ async function acknowledge(
 async function submit(
   kind: FinanceWriteKind,
   input: Record<string, unknown>,
+  fullSettlementInvoice?: string,
 ): Promise<FinancePaymentResult> {
   const operationKey = input.operation_key;
   if (!isText(operationKey)) throw new NativeFinanceWriteError("validation");
@@ -260,6 +261,10 @@ async function submit(
   let parsed: { result: FinancePaymentResult; ackToken: string };
   try {
     parsed = parseWriteResult(kind, body);
+    if (fullSettlementInvoice !== undefined &&
+      (parsed.result.invoice !== fullSettlementInvoice || parsed.result.outstanding !== 0)) {
+      throw new NativeFinanceWriteError("uncertain");
+    }
   } catch {
     notifyLock();
     throw new NativeFinanceWriteError("uncertain");
@@ -278,6 +283,7 @@ async function submit(
 
 export async function receivePayment(
   input: ReceivePaymentInput,
+  options?: { expectFullSettlement?: boolean },
 ): Promise<FinancePaymentResult> {
   return submit("payment_receive", {
     operation_key: input.operation_key,
@@ -291,5 +297,5 @@ export async function receivePayment(
     ...(input.reference_no?.trim()
       ? { reference_no: input.reference_no.trim() }
       : {}),
-  });
+  }, options?.expectFullSettlement ? input.invoice : undefined);
 }

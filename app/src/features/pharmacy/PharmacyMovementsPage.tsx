@@ -12,6 +12,7 @@ import {
 import { opsData } from "../../fixtures/data-ops";
 import { useOpsRoles } from "../operations/ops-role";
 import { useLocale } from "../../i18n/LocaleProvider";
+import { nativeTransportEnabled } from "../../transport/native/flag";
 import { useOpsCopy } from "../operations/ops-copy";
 import {
   itemName,
@@ -25,6 +26,7 @@ import {
   OpsTabs,
   useOpsFormat,
 } from "../operations/ops-ui";
+import { NativeInventoryPage } from "./NativeInventoryPage";
 import { AdjustStockForm, TransferStockForm } from "./stock-write";
 
 type MovementTab = "transfer" | "usage" | "reconcile";
@@ -66,6 +68,15 @@ const REASONS: Record<MovementTab, ReadonlyArray<{ th: string; en: string }>> = 
   ],
 };
 
+export function PharmacyMovementsPage() {
+  return nativeTransportEnabled() ? (
+    <NativeInventoryPage kind="movements">
+      <TransferStockForm />
+      <AdjustStockForm />
+    </NativeInventoryPage>
+  ) : <FixtureMovementsPage />;
+}
+
 /**
  * PHA-06 stock operations. Transfer and usage are local sample transactions:
  * confirming one records a row in this screen only, with no ledger or balance
@@ -76,7 +87,7 @@ const REASONS: Record<MovementTab, ReadonlyArray<{ th: string; en: string }>> = 
  * pair and reconciliation request rows; the core rows themselves are untouched
  * and stay chronological (oldest first).
  */
-export function PharmacyMovementsPage() {
+function FixtureMovementsPage() {
   const { t } = useTranslation();
   const copy = useOpsCopy();
   const { locale } = useLocale();

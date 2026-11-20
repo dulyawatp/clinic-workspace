@@ -12,6 +12,18 @@ describe("i18n catalogue", () => {
       ]
     `);
   });
+
+  it("keeps both native inventory descriptions explicit about what is not shown", () => {
+    for (const [locale, stock, availability] of [
+      ["en", "does not show warehouse stock", "not available or usable stock"],
+      ["th", "ไม่แสดงยอดคงเหลือรายคลัง", "ไม่ใช่จำนวนที่พร้อมเบิกหรือใช้ได้"],
+    ] as const) {
+      const i18n = initI18n(locale);
+      expect(i18n.t("inventoryRead.batches.hint")).toContain(stock);
+      expect(i18n.t("inventoryRead.balances.hint")).toContain(availability);
+      expect(i18n.t("inventoryRead.page", { page: 2 })).toBe(locale === "en" ? "Page 2" : "หน้า 2");
+    }
+  });
   it("keeps Thai and English catalogue key sets identical", () => {
     expect(Object.keys(en).sort()).toEqual(Object.keys(th).sort());
   });

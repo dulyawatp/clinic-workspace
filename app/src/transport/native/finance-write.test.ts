@@ -81,6 +81,23 @@ describe("native payment writes", () => {
     expect(financeWriteLocked("payment_receive")).toBe(true);
   });
 
+  it.each([
+    { invoice: "SINV-other", outstanding: 0 },
+    { invoice: "SINV-1", outstanding: 0.01 },
+  ])("keeps the lock and never acknowledges an unexpected full settlement (%j)", async (result) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(json({
+      status: "received",
+      payment: "PE-1",
+      ackToken: TOKEN,
+      ...result,
+    })).mockResolvedValueOnce(acknowledged());
+
+    await expect(receivePayment(PAYMENT, { expectFullSettlement: true })).rejects.toMatchObject({ code: "uncertain" });
+    expect(financeWriteLocked("payment_receive")).toBe(true);
+    await expect(receivePayment(PAYMENT, { expectFullSettlement: true })).rejects.toMatchObject({ code: "locked" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("maps a validation refusal and clears the pending lock", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       json({ code: "VALIDATION", problem: "mode_of_payment" }, 417),
