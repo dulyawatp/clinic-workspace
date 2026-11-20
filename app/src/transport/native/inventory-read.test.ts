@@ -55,6 +55,42 @@ it.each([401, 403])("maps HTTP %i to permission", async (status) => {
   await expect(readNativeInventory("items", 0)).rejects.toMatchObject({ kind: "permission" });
 });
 
+it("propagates abort during fetch unchanged", async () => {
+  const abort = new DOMException("Aborted", "AbortError");
+  const controller = new AbortController();
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementationOnce(() =>
+    new Promise((_resolve, reject) => controller.signal.addEventListener("abort", () => reject(abort))),
+  );
+  try {
+    const result = readNativeInventory("items", 0, controller.signal);
+    controller.abort();
+    await expect(result).rejects.toBe(abort);
+  } finally {
+    fetchSpy.mockRestore();
+  }
+});
+
+it("propagates abort during response body consumption unchanged", async () => {
+  const abort = new DOMException("Aborted", "AbortError");
+  const controller = new AbortController();
+  const response = new Response();
+  let bodyStarted!: () => void;
+  const started = new Promise<void>((resolve) => { bodyStarted = resolve; });
+  vi.spyOn(response, "json").mockImplementationOnce(() => new Promise((_resolve, reject) => {
+    controller.signal.addEventListener("abort", () => reject(abort));
+    bodyStarted();
+  }));
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(response);
+  try {
+    const result = readNativeInventory("items", 0, controller.signal);
+    await started;
+    controller.abort();
+    await expect(result).rejects.toBe(abort);
+  } finally {
+    fetchSpy.mockRestore();
+  }
+});
+
 it.each([{ data: null }, {}, { data: [{ ...samples.movements, actual_qty: "3" }] }, { data: [{ ...samples.movements, qty_after_transaction: null }] }])("rejects malformed data", async (body) => {
   server.use(http.get("http://localhost:5173/api/resource/Stock Ledger Entry", () => HttpResponse.json(body)));
   await expect(readNativeInventory("movements", 0)).rejects.toMatchObject({ kind: "unavailable" });

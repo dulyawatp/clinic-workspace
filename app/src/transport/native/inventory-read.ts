@@ -13,6 +13,10 @@ export class InventoryReadError extends Error {
   }
 }
 
+function isAbort(cause: unknown): boolean {
+  return typeof cause === "object" && cause !== null && "name" in cause && cause.name === "AbortError";
+}
+
 const resources = {
   items: { doctype: "Item", fields: ["name", "item_code", "item_name", "stock_uom", "disabled", "is_stock_item", "has_batch_no"], numbers: ["disabled", "is_stock_item", "has_batch_no"], filters: { is_stock_item: 1 } },
   batches: { doctype: "Batch", fields: ["name", "batch_id", "item", "expiry_date", "disabled"], numbers: ["disabled"], filters: {} },
@@ -38,12 +42,15 @@ export async function readNativeInventory<K extends InventoryKind>(
       credentials: "same-origin", cache: "no-store", redirect: "error", signal,
     });
   } catch (cause) {
-    if (cause instanceof Error && cause.name === "AbortError") throw cause;
+    if (isAbort(cause)) throw cause;
     throw new InventoryReadError("unavailable");
   }
   if (response.status === 401 || response.status === 403) throw new InventoryReadError("permission");
   if (!response.ok) throw new InventoryReadError("unavailable");
-  const body: unknown = await response.json().catch(() => null);
+  const body: unknown = await response.json().catch((cause: unknown) => {
+    if (isAbort(cause)) throw cause;
+    return null;
+  });
   if (!body || typeof body !== "object" || !("data" in body) || !Array.isArray(body.data) || body.data.length > 26) {
     throw new InventoryReadError("unavailable");
   }
