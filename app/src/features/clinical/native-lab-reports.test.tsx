@@ -1,10 +1,11 @@
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { appRoutes } from "../../app/router";
 import { ROUTES } from "../../app/routes";
 import { LOCALE_KEY } from "../../i18n/locale-storage";
+import { installDialogMethods } from "../../test/dialog";
 import { server } from "../../test/msw/server";
 import { NATIVE_BOOTSTRAP, nativeSession } from "../../test/network-spy";
 import { renderWithDataRouter } from "../../test/render";
@@ -57,6 +58,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  Reflect.deleteProperty(navigator, "pdfViewerEnabled");
   localStorage.removeItem(LOCALE_KEY);
   sessionStorage.clear();
 });
@@ -88,8 +90,136 @@ async function verifyReport() {
   expect(screen.getByText(receipt.uploadedBy)).toBeVisible();
   expect(screen.getByText(receipt.uploadedAt)).toBeVisible();
   expect(screen.getByText("9 bytes")).toBeVisible();
-  expect(screen.getByRole("link", { name: `View ${receipt.name}` })).toHaveAttribute("href", receipt.downloadUrl);
+  expect(screen.getByRole("button", { name: `View ${receipt.name}` })).toBeVisible();
+  const download = screen.getByRole("link", { name: `Download ${receipt.name}` });
+  expect(download).toHaveAttribute("href", receipt.downloadUrl);
+  expect(download).toHaveAttribute("download", receipt.name);
 }
+
+function previewFixture(response: (init: RequestInit) => Response | Promise<Response>) {
+  server.use(http.get(`${METHODS}list_for_appointment`, () => list([receipt])));
+  const fetch = globalThis.fetch;
+  const read = vi.fn(response);
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) =>
+    input === receipt.downloadUrl ? Promise.resolve().then(() => read(init ?? {})) : fetch(input, init));
+  return read;
+}
+
+function previewBlobUrls(pdfViewerEnabled = true) {
+  Object.defineProperty(navigator, "pdfViewerEnabled", { configurable: true, value: pdfViewerEnabled });
+  const create = vi.fn(() => "blob:synthetic-report");
+  const revoke = vi.fn();
+  vi.stubGlobal("URL", class extends URL {
+    static override createObjectURL = create;
+    static override revokeObjectURL = revoke;
+  });
+  return { create, revoke };
+}
+
+it("opens the exact authorized file only on View, keeps a native download, and restores focus on Escape", async () => {
+  const restore = installDialogMethods();
+  try {
+    const { create, revoke } = previewBlobUrls();
+    const read = previewFixture(() => new Response("%PDF-1.7\n", { headers: { "Content-Type": "application/pdf" } }));
+    const page = renderPage();
+    const user = userEvent.setup();
+    const view = await screen.findByRole("button", { name: `View ${receipt.name}` });
+    const location = page.router.state.location;
+    expect(read).not.toHaveBeenCalled();
+    await user.click(view);
+    const dialog = screen.getByRole("dialog", { name: receipt.name });
+    expect(within(dialog).getByRole("button", { name: "Close" })).toHaveFocus();
+    expect(await within(dialog).findByTitle(`Preview of ${receipt.name}`)).toHaveAttribute("src", "blob:synthetic-report");
+    expect(read).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      credentials: "same-origin", mode: "same-origin", cache: "no-store", redirect: "error", signal: expect.any(AbortSignal),
+    }));
+    const download = within(dialog).getByRole("link", { name: `Download ${receipt.name}` });
+    expect(download).toHaveAttribute("href", receipt.downloadUrl);
+    expect(download).toHaveAttribute("download", receipt.name);
+    expect(create).toHaveBeenCalledTimes(1);
+    fireEvent(dialog, new Event("cancel", { cancelable: true }));
+    expect(screen.queryByRole("dialog", { name: receipt.name })).not.toBeInTheDocument();
+    expect(view).toHaveFocus();
+    expect(revoke).toHaveBeenCalledExactlyOnceWith("blob:synthetic-report");
+    expect(page.router.state.location).toBe(location);
+  } finally {
+    restore();
+    vi.unstubAllGlobals();
+  }
+});
+
+it.each([
+  ["denied", () => new Response(null, { status: 403 }), "Marley denied access to this file."],
+  ["HTML", () => new Response("<html>Sign in</html>", { headers: { "Content-Type": "text/html" } }), "This file can’t be previewed."],
+  ["SVG", () => new Response("<svg/>", { headers: { "Content-Type": "image/svg+xml" } }), "This file can’t be previewed."],
+  ["mismatched bytes", () => new Response("<html>Sign in</html>", { headers: { "Content-Type": "application/pdf" } }), "This file can’t be previewed."],
+  ["redirect", () => Response.redirect("https://example.invalid/login"), "This file can’t be previewed."],
+] as const)("does not render or auto-download %s content", async (_, response, fallback) => {
+  const restore = installDialogMethods();
+  try {
+    const { create } = previewBlobUrls();
+    const read = previewFixture(response);
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: `View ${receipt.name}` }));
+    const dialog = screen.getByRole("dialog", { name: receipt.name });
+    expect(await within(dialog).findByText(fallback)).toBeVisible();
+    expect(dialog.querySelector("iframe, object, embed, img")).toBeNull();
+    expect(create).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(within(dialog).getByRole("link", { name: `Download ${receipt.name}` })).toHaveAttribute("href", receipt.downloadUrl);
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+  } finally {
+    restore();
+    vi.unstubAllGlobals();
+  }
+});
+
+it.each(["close", "unmount"])("aborts preview on %s and ignores late file responses", async (action) => {
+  const restore = installDialogMethods();
+  try {
+    const { create } = previewBlobUrls();
+    let resolve!: (response: Response) => void;
+    const pending = new Promise<Response>((done) => { resolve = done; });
+    const read = previewFixture(() => pending);
+    const page = renderPage();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: `View ${receipt.name}` }));
+    const dialog = screen.getByRole("dialog", { name: receipt.name });
+    expect(within(dialog).getByRole("status")).toHaveTextContent("Loading preview…");
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    const signal = read.mock.calls[0]?.[0].signal;
+    expect(signal?.aborted).toBe(false);
+    if (action === "close") await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    else page.unmount();
+    expect(signal?.aborted).toBe(true);
+    await act(async () => resolve(new Response("%PDF-1.7\n", { headers: { "Content-Type": "application/pdf" } })));
+    expect(create).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: receipt.name })).not.toBeInTheDocument();
+  } finally {
+    restore();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("does not try to embed or auto-download a PDF without native inline support", async () => {
+  const restore = installDialogMethods();
+  try {
+    const { create } = previewBlobUrls(false);
+    previewFixture(() => new Response("%PDF-1.7\n", { headers: { "Content-Type": "application/pdf" } }));
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: `View ${receipt.name}` }));
+    const dialog = screen.getByRole("dialog", { name: receipt.name });
+    expect(await within(dialog).findByText("This file can’t be previewed.")).toBeVisible();
+    expect(create).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole("link", { name: `Download ${receipt.name}` })).toHaveAttribute("href", receipt.downloadUrl);
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+  } finally {
+    restore();
+    vi.unstubAllGlobals();
+  }
+});
 
 it("uploads one native appointment File from linked encounter and shows it across encounter, appointment, and expanded timeline", async () => {
   const posted = vi.fn();
@@ -230,7 +360,7 @@ it.each([
   server.use(http.get(`${METHODS}list_for_encounter`, () => status === 200 ? list() : new HttpResponse(null, { status })));
   renderPage(linked, "DOC");
   expect(await screen.findByText(message)).toBeVisible();
-  expect(screen.queryByRole("link", { name: /^View / })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^View / })).not.toBeInTheDocument();
 });
 
 it.each([
@@ -248,7 +378,7 @@ it.each([
   renderPage(linked, "DOC");
   expect(await screen.findByText("Lab reports are unavailable here.")).toBeVisible();
   expect(screen.queryByText(receipt.name)).not.toBeInTheDocument();
-  expect(screen.queryByRole("link", { name: `View ${receipt.name}` })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: `View ${receipt.name}` })).not.toBeInTheDocument();
 });
 
 it("locks a lost linked encounter upload across encounter and appointment, even if a matching File appears", async () => {
@@ -282,7 +412,7 @@ it("does not confirm an upload with a malformed receipt or expose its URL", asyn
   await userEvent.setup().click(await chooseReport());
   expect(await screen.findByText("The upload could not be confirmed. Refresh reports to check Marley; do not upload again here.")).toBeVisible();
   expect(screen.queryByText("Lab report uploaded.")).not.toBeInTheDocument();
-  expect(screen.queryByRole("link", { name: /^View / })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^View / })).not.toBeInTheDocument();
   expect(upload).toHaveBeenCalledTimes(1);
 });
 

@@ -67,6 +67,36 @@ export async function listLabReports(context: LabReportContext, offset: number, 
   return parsed.data;
 }
 
+const previewSignatures = {
+  "application/pdf": [0x25, 0x50, 0x44, 0x46, 0x2d], // %PDF-
+  "image/jpeg": [0xff, 0xd8, 0xff],
+  "image/png": [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+} as const;
+
+export async function readLabReportPreview(report: LabReport, signal: AbortSignal) {
+  if (!validDownload(report.downloadUrl, report.id)) return { state: "unavailable" } as const;
+  const response = await fetch(report.downloadUrl, {
+    mode: "same-origin",
+    credentials: "same-origin",
+    cache: "no-store",
+    redirect: "error",
+    signal,
+  });
+  if (response.status === 401 || response.status === 403) return { state: "denied" } as const;
+  const mime = response.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase();
+  if (response.status !== 200 || response.redirected || (response.url && response.url !== new URL(report.downloadUrl, location.origin).href) ||
+      (mime !== "application/pdf" && mime !== "image/jpeg" && mime !== "image/png")) {
+    return { state: "unavailable" } as const;
+  }
+  const bytes = await response.arrayBuffer();
+  const signature = previewSignatures[mime];
+  const prefix = new Uint8Array(bytes, 0, Math.min(bytes.byteLength, signature.length));
+  if (!signature.every((byte, i) => prefix[i] === byte)) return { state: "unavailable" } as const;
+  // Reapply only the validated MIME. Never navigate to a server response
+  // or embed HTML, SVG, or a generic browser-sniffed resource.
+  return { state: "ready", mime, blob: new Blob([bytes], { type: mime }) } as const;
+}
+
 export function isLabReportFile(file: File): boolean {
   return file.size > 0 && filename.safeParse(file.name).success && /\.(?:pdf|jpe?g|png)$/i.test(file.name);
 }
