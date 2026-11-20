@@ -146,6 +146,25 @@ export async function searchClinicalMaster(
   return [...new Set(parsed.data.data.map(({ name }) => name))];
 }
 
+export async function createComplaint(complaints: string): Promise<string> {
+  if (complaints.length > 100 || !id.safeParse(complaints).success) {
+    throw { code: "VALIDATION", retryable: false } satisfies AppError;
+  }
+  const token = nativeCsrfToken();
+  if (!token) throw { code: "FORBIDDEN", retryable: false } satisfies AppError;
+  const response = await fetch("/api/resource/Complaint", {
+    method: "POST", credentials: "same-origin", cache: "no-store", redirect: "error",
+    headers: { accept: "application/json", "Content-Type": "application/json", [FRAPPE_CSRF_HEADER]: token },
+    body: JSON.stringify({ complaints }),
+  });
+  // Stock Complaint is named from its complaints field. Never attach a different document.
+  const receipt = z.object({ data: z.object({
+    doctype: z.literal("Complaint"), name: z.literal(complaints), complaints: z.literal(complaints),
+  }) }).safeParse(await json(response));
+  if (!receipt.success) throw invalidLinkedEncounter;
+  return receipt.data.data.name;
+}
+
 export type PrescriptionMaster = "Item" | "Prescription Dosage" | "Prescription Duration" | "Dosage Form";
 export type PrescriptionChoice = { id: string; label: string };
 

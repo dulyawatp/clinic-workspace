@@ -10,6 +10,8 @@ import { NATIVE_BOOTSTRAP, nativeSession } from "../../test/network-spy";
 import { renderWithDataRouter } from "../../test/render";
 
 const METHODS = "/api/method/clinic_ui.api.lab_reports.";
+const APPOINTMENT_VIEW = "/api/method/clinic_ui.api.appointments.view";
+const OPEN_ENCOUNTER = "/api/method/clinic_ui.api.encounters.open_for_appointment";
 const REF = "wsa1_0123456789abcdef0123456789abcdef_0123456789abcdef_abcdefghijklmnop";
 const ENC = "ENC-LAB-TEST";
 const PAT = "PAT-LAB-TEST";
@@ -23,6 +25,11 @@ const appointment = {
 };
 const context = { appointment: "APT-NATIVE", patient: PAT, practitioner: "PRAC-REAL", status: "Closed" };
 const encounter = { id: ENC, modified: appointment.modified, docstatus: 0, symptoms: [], diagnoses: [] };
+const linkedRecord = {
+  context, encounter, notes: { state: "available", items: [], next_offset: null },
+  medications: { state: "available", complete: true, items: [] },
+};
+const realAppointment = { ...appointment, native_appointment_id: context.appointment };
 const reply = (message: unknown) => HttpResponse.json({ message });
 const list = (items: unknown[] = [], nextOffset: number | null = null) => reply({ items, nextOffset });
 const path = ROUTES.appointment(REF);
@@ -38,11 +45,8 @@ beforeEach(() => {
   localStorage.setItem(LOCALE_KEY, "en");
   sessionStorage.clear();
   server.use(
-    http.get("/api/method/clinic_ui.api.appointments.view", () => reply(appointment)),
-    http.get("/api/method/clinic_ui.api.encounters.open_for_appointment", () => reply({
-      context, encounter, notes: { state: "available", items: [], next_offset: null },
-      medications: { state: "available", complete: true, items: [] },
-    })),
+    http.get(APPOINTMENT_VIEW, () => reply(realAppointment)),
+    http.get(OPEN_ENCOUNTER, () => reply(linkedRecord)),
     http.get("/api/method/clinic_ui.api.encounters.list_for_patient", () => list([{
       id: ENC, patientId: PAT, patientName: "Native patient", practitioner: context.practitioner,
       encounterDate: appointment.appointment_date, docstatus: 0,
@@ -87,11 +91,17 @@ async function verifyReport() {
   expect(screen.getByRole("link", { name: `View ${receipt.name}` })).toHaveAttribute("href", receipt.downloadUrl);
 }
 
-it("uploads one native appointment File and shows the same report across appointment, encounter, and expanded timeline", async () => {
+it("uploads one native appointment File from linked encounter and shows it across encounter, appointment, and expanded timeline", async () => {
   const posted = vi.fn();
   const listReads = vi.fn();
+  const appointmentReads = vi.fn();
+  const downloaded = vi.fn(() => new HttpResponse(null));
   const files: typeof receipt[] = [];
   server.use(
+    http.get(APPOINTMENT_VIEW, ({ request }) => {
+      appointmentReads(new URL(request.url).searchParams.get("workspace_appointment_id"));
+      return reply(realAppointment);
+    }),
     http.get(`${METHODS}list_for_appointment`, ({ request }) => {
       const params = new URL(request.url).searchParams;
       listReads("appointment", params.get("appointment_ref"), params.get("offset"));
@@ -102,6 +112,7 @@ it("uploads one native appointment File and shows the same report across appoint
       listReads("encounter", params.get("encounter_id"), params.get("offset"));
       return list(files);
     }),
+    http.get("/private/files/:filename", downloaded),
   );
   interceptUpload(async (init) => {
     const form = init.body as FormData;
@@ -111,40 +122,42 @@ it("uploads one native appointment File and shows the same report across appoint
     files.push(receipt);
     return reply(receipt);
   });
-  const appointmentPage = renderPage();
+  const visitPage = renderPage(linked, "DOC");
   expect(await screen.findByText("No lab reports attached.")).toBeVisible();
   const button = await chooseReport();
+  expect(posted).not.toHaveBeenCalled();
   act(() => { fireEvent.click(button); fireEvent.click(button); });
   expect(await screen.findByText("Lab report uploaded.")).toBeVisible();
   await verifyReport();
   expect(posted.mock.calls).toEqual([[["appointment_ref", "file"], REF, receipt.name, "%PDF-test", "native-csrf"]]);
   expect(document.querySelector("iframe, object, embed")).toBeNull();
-  appointmentPage.unmount();
-
-  const visitPage = renderPage(linked, "DOC");
-  await verifyReport();
-  expect(screen.queryByLabelText("Lab report file")).not.toBeInTheDocument();
+  expect(appointmentReads.mock.calls).toEqual([[REF]]);
   visitPage.unmount();
+
+  const appointmentPage = renderPage();
+  await verifyReport();
+  appointmentPage.unmount();
 
   renderPage(ROUTES.patientHistory(PAT), "NUR");
   expect(await screen.findByRole("heading", { name: `Visit ${ENC}` })).toBeVisible();
   expect(screen.queryByRole("link", { name: `Visit ${ENC}` })).not.toBeInTheDocument();
   expect(screen.queryByText(receipt.name)).not.toBeInTheDocument();
-  expect(listReads.mock.calls.filter(([kind]) => kind === "encounter")).toHaveLength(1);
+  expect(listReads.mock.calls.filter(([kind]) => kind === "encounter")).toHaveLength(2);
   await userEvent.setup().click(screen.getByText("Lab reports", { selector: "summary" }));
   await verifyReport();
   expect(screen.queryByLabelText("Lab report file")).not.toBeInTheDocument();
   expect(listReads.mock.calls).toEqual([
-    ["appointment", REF, "0"], ["appointment", REF, "0"],
     ["encounter", ENC, "0"], ["encounter", ENC, "0"],
+    ["appointment", REF, "0"], ["encounter", ENC, "0"],
   ]);
   expect(posted).toHaveBeenCalledTimes(1);
+  expect(downloaded).not.toHaveBeenCalled();
 });
 
 it("does not launch or load lab reports on a known fixture appointment", async () => {
   const item = vi.fn();
   server.use(
-    http.get("/api/method/clinic_ui.api.appointments.view", () => reply({ ...appointment, is_fixture: true })),
+    http.get(APPOINTMENT_VIEW, () => reply({ ...appointment, is_fixture: true })),
     http.get(`${METHODS}list_for_appointment`, () => { item(); return list([receipt]); }),
   );
   renderPage();
@@ -152,6 +165,61 @@ it("does not launch or load lab reports on a known fixture appointment", async (
   expect(screen.queryByRole("link", { name: "Open encounter" })).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Lab report file")).not.toBeInTheDocument();
   expect(item).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["fixture", () => reply({ ...appointment, is_fixture: true })],
+  ["missing non-fixture proof", () => reply({ ...realAppointment, is_fixture: undefined, native_appointment_id: undefined })],
+  ["missing native appointment identity", () => reply(appointment)],
+  ["mismatched reference", () => reply({ ...realAppointment, appointment_id: "OTHER" })],
+  ["mismatched native appointment", () => reply({ ...realAppointment, native_appointment_id: "OTHER" })],
+  ["denied appointment", () => new HttpResponse(null, { status: 403 })],
+] as const)("keeps the linked encounter lab list read-only for %s", async (_, response) => {
+  const checked = vi.fn();
+  const upload = vi.fn(() => reply(receipt));
+  server.use(
+    http.get(APPOINTMENT_VIEW, () => { checked(); return response(); }),
+    http.get(`${METHODS}list_for_encounter`, () => list([receipt])),
+  );
+  interceptUpload(upload);
+  renderPage(linked, "DOC");
+  await verifyReport();
+  await waitFor(() => expect(checked).toHaveBeenCalledTimes(1));
+  expect(screen.queryByLabelText("Lab report file")).not.toBeInTheDocument();
+  expect(upload).not.toHaveBeenCalled();
+});
+
+it.each(["mismatched encounter", "ineligible launch"] as const)("does not load a lab uploader for %s", async (reason) => {
+  const read = vi.fn(() => list());
+  const upload = vi.fn(() => reply(receipt));
+  server.use(
+    http.get(OPEN_ENCOUNTER, () => reason === "ineligible launch" ? new HttpResponse(null, { status: 417 }) :
+      reply({ ...linkedRecord, encounter: { ...encounter, id: "OTHER" } })),
+    http.get(`${METHODS}list_for_encounter`, read),
+    http.get(`${METHODS}list_for_appointment`, read),
+  );
+  interceptUpload(upload);
+  renderPage(reason === "ineligible launch" ? ROUTES.linkedVisit(REF) : linked, "DOC");
+  expect(await screen.findByText(reason === "ineligible launch"
+    ? "Some details are invalid. Check them and try again." : "Encounter could not be loaded.")).toBeVisible();
+  expect(screen.queryByLabelText("Lab report file")).not.toBeInTheDocument();
+  expect(read).not.toHaveBeenCalled();
+  expect(upload).not.toHaveBeenCalled();
+});
+
+it.each(["unsaved", "submitted"] as const)("does not tie appointment lab upload to encounter save or submit (%s)", async (state) => {
+  const upload = vi.fn(() => reply(receipt));
+  server.use(
+    http.get(OPEN_ENCOUNTER, () => reply(state === "unsaved"
+      ? { ...linkedRecord, context: { ...context, status: "Open" }, encounter: null }
+      : { ...linkedRecord, encounter: { ...encounter, docstatus: 1 } })),
+    http.get(`${METHODS}list_for_encounter`, () => list()),
+    http.get(`${METHODS}list_for_appointment`, () => list()),
+  );
+  interceptUpload(upload);
+  renderPage(state === "unsaved" ? ROUTES.linkedVisit(REF) : linked, "DOC");
+  expect(await chooseReport()).toBeEnabled();
+  expect(upload).not.toHaveBeenCalled();
 });
 
 it.each([
@@ -183,14 +251,15 @@ it.each([
   expect(screen.queryByRole("link", { name: `View ${receipt.name}` })).not.toBeInTheDocument();
 });
 
-it("locks a lost upload, only refreshes by GET, and does not infer success from a matching list item", async () => {
+it("locks a lost linked encounter upload across encounter and appointment, even if a matching File appears", async () => {
   const saved = vi.fn();
   const reads = vi.fn();
   server.use(
-    http.get(`${METHODS}list_for_appointment`, () => { reads(); return list(saved.mock.calls.length ? [receipt] : []); }),
+    http.get(`${METHODS}list_for_encounter`, () => { reads(); return list(saved.mock.calls.length ? [receipt] : []); }),
+    http.get(`${METHODS}list_for_appointment`, () => list([receipt])),
   );
   interceptUpload(() => { saved(); throw new TypeError("request lost"); });
-  const page = renderPage();
+  const page = renderPage(linked, "DOC");
   await userEvent.setup().click(await chooseReport());
   expect(await screen.findByText("The upload could not be confirmed. Refresh reports to check Marley; do not upload again here.")).toBeVisible();
   await verifyReport();
@@ -256,9 +325,10 @@ it.each([
 ])("shows a deterministic native upload refusal (HTTP %s)", async (status, message) => {
   server.use(
     http.get(`${METHODS}list_for_appointment`, () => list()),
+    http.get(`${METHODS}list_for_encounter`, () => list()),
   );
   interceptUpload(() => new HttpResponse(null, { status }));
-  renderPage();
+  renderPage(status === 403 ? linked : path, status === 403 ? "DOC" : "REC");
   await userEvent.setup().click(await chooseReport());
   expect(await screen.findByText(message)).toBeVisible();
   expect(screen.queryByText("Lab report uploaded.")).not.toBeInTheDocument();

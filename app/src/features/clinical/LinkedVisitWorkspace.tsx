@@ -10,6 +10,7 @@ import { useLocale } from "../../i18n/LocaleProvider";
 import { type EncounterReadError, viewNativeEncounter } from "../../transport/native/encounter-read";
 import {
   completeLinkedEncounter,
+  createComplaint,
   invalidLinkedEncounter,
   type LinkedClinical,
   type LinkedEncounter,
@@ -19,6 +20,7 @@ import {
   searchClinicalMaster,
 } from "../../transport/native/linked-encounter";
 import { StatePanel } from "../../ui/StatePanel";
+import { useLiveAppointment } from "../appointments/live-appointment";
 import { EncounterLayout, EncounterReadFailure, EncounterStatus, SavedTerms } from "./ApprovedVisitWorkspace";
 import { FormattedNoteEditor, FormattedNotePreview } from "./LinkedFormattedNote";
 import { LinkedPrescriptions, prescriptionChange, type PrescriptionDraft, PrescriptionRecovery } from "./LinkedPrescriptions";
@@ -27,17 +29,22 @@ import { encodeNoteText, noteContent, notePlainText, type NoteLine, parseFormatt
 
 type Kind = "symptoms" | "diagnoses";
 
-function ClinicalMasterPicker({ kind, selected, onChange, disabled }: {
+type CreateFailure = "linkedEncounter.writeDenied" | "linkedEncounter.symptomRejected" | "linkedEncounter.symptomUnconfirmed";
+
+function ClinicalMasterPicker({ kind, selected, onChange, disabled, runCreate, creating }: {
   kind: Kind;
   selected: string[];
   onChange: (values: string[]) => void;
   disabled: boolean;
+  runCreate?: (action: (signal: AbortSignal) => Promise<void>) => void;
+  creating?: boolean;
 }) {
   const { t } = useTranslation();
   const { authGeneration } = useSession();
   const label = useId();
   const [search, setSearch] = useState("");
   const [settled, setSettled] = useState("");
+  const [failedCreates, setFailedCreates] = useState(() => new Map<string, CreateFailure>());
   const text = search.trim();
   const doctype = kind === "symptoms" ? "Complaint" : "Diagnosis";
   useEffect(() => {
@@ -53,6 +60,31 @@ function ClinicalMasterPicker({ kind, selected, onChange, disabled }: {
   });
   const loading = settled !== text || query.isFetching;
   const matches = query.data?.filter((value) => !selected.includes(value)) ?? [];
+  const nameKey = text.toLowerCase();
+  const failure = failedCreates.get(nameKey);
+  const exact = (value: string) => value.toLowerCase() === nameKey;
+  const canCreate = runCreate && !disabled && text && !loading && query.isSuccess &&
+    !failure && !query.data?.some(exact) && !selected.some(exact);
+
+  function create() {
+    if (!canCreate || !runCreate) return;
+    runCreate(async (signal) => {
+      try {
+        const name = await createComplaint(text);
+        if (signal.aborted) return;
+        onChange([...selected, name]);
+        setSearch("");
+      } catch (error) {
+        if (signal.aborted) return;
+        const code = (error as EncounterReadError | undefined)?.code;
+        const message = code === "FORBIDDEN" || code === "AUTH_EXPIRED" ? "linkedEncounter.writeDenied" :
+          code === "VALIDATION" || code === "CONFLICT_STALE" ? "linkedEncounter.symptomRejected" :
+          "linkedEncounter.symptomUnconfirmed";
+        setFailedCreates((previous) => new Map(previous).set(nameKey, message));
+      }
+    });
+  }
+
   return (
     <div className="visit-preview-stack">
       <div className="pc-field">
@@ -73,6 +105,17 @@ function ClinicalMasterPicker({ kind, selected, onChange, disabled }: {
           ))}
         </ul>
       )}
+      {creating && <p className="pc-note" role="status">{t("linkedEncounter.creatingSymptom")}</p>}
+      {canCreate && <div className="visit-preview-stack">
+        <p id={`${label}-create`} className="pc-note">{t("linkedEncounter.createSymptomHint", { name: text })}</p>
+        <div><Button aria-describedby={`${label}-create`} onClick={create}>{t("linkedEncounter.createSymptom")}</Button></div>
+      </div>}
+      {failure && !disabled && <>
+        {!query.data?.some(exact) && <p className="pc-note" role="alert">{t(failure)}</p>}
+        {failure !== "linkedEncounter.writeDenied" && !query.data?.some(exact) && <div>
+          <Button disabled={loading} onClick={() => void query.refetch()}>{t("linkedEncounter.searchAgain")}</Button>
+        </div>}
+      </>}
       {selected.length > 0 && <ul className="visit-preview-chips">
         {selected.map((value) => (
           <li key={value}>{value}<button type="button" disabled={disabled}
@@ -121,7 +164,7 @@ type NoteEdit = {
   rich?: { lines: NoteLine[]; baseline: string; html: string | null };
 };
 type Write = "save" | "submit";
-type Operation = Write | "check" | "notes";
+type Operation = Write | "check" | "notes" | "symptom";
 type Uncertain = { kind: Write; rejected?: true };
 type Recovery = { unavailable: boolean; uncertain: Uncertain | null };
 
@@ -203,6 +246,11 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
 
   const { context, encounter, notes, medications } = record;
   const encounterId = encounter?.id;
+  const appointment = useLiveAppointment(appointmentRef);
+  // Confirm the original ref resolves to the same non-fixture native appointment.
+  const labUploadRef = appointment.isFetchedAfterMount && !appointment.isError &&
+    appointment.data?.is_fixture === false && appointment.data.native_appointment_id === context.appointment
+    ? appointmentRef : undefined;
   const identity = useQuery({
     queryKey: ["linked-visit-identity", authGeneration, encounterId],
     queryFn: ({ signal }) => encounterId ? viewNativeEncounter(encounterId, signal) : null,
@@ -425,6 +473,8 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
             {(["symptoms", "diagnoses"] as const).map((kind) => readOnly
               ? <SavedTerms key={kind} kind={kind} items={clinical[kind] ?? encounter?.[kind] ?? []} />
               : <ClinicalMasterPicker key={kind} kind={kind} selected={clinical[kind] ?? encounter?.[kind] ?? []}
+                runCreate={kind === "symptoms" ? (action) => void run("symptom", action) : undefined}
+                creating={kind === "symptoms" && busy === "symptom"}
                 disabled={locked} onChange={(values) => setClinical((prev) => ({ ...prev, [kind]: values }))} />)}
           </div>
           <details className="visit-preview-details">
@@ -491,7 +541,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
           locked={locked} onChange={setPrescription} />}
         lab={<NativeLabReportPanel context={encounter
           ? { kind: "encounter", id: encounter.id }
-          : { kind: "appointment", id: appointmentRef }} />}
+          : { kind: "appointment", id: appointmentRef }} uploadAppointmentRef={labUploadRef} />}
       />
        {(feedback || !completed) && (
         <div className="visit-preview-card visit-preview-actions visit-preview-stack">

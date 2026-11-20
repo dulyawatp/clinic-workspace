@@ -160,7 +160,10 @@ function ReportList({ reports }: { reports: LabReport[] }) {
   );
 }
 
-export function NativeLabReportPanel({ context, upload = false }: { context: LabReportContext; upload?: boolean }) {
+export function NativeLabReportPanel({ context, uploadAppointmentRef }: {
+  context: LabReportContext;
+  uploadAppointmentRef?: string;
+}) {
   const { t } = useTranslation();
   const { authGeneration } = useSession();
   const key = ["native-lab-reports", authGeneration, context.kind, context.id] as const;
@@ -193,8 +196,9 @@ export function NativeLabReportPanel({ context, upload = false }: { context: Lab
           onClick={() => void query.fetchNextPage()}>{t("labReports.more")}</Button>}
         <Button disabled={query.isFetching} onClick={refresh}>{t("labReports.refresh")}</Button>
       </div>
-      {upload && context.kind === "appointment" && (
-        <AppointmentReportUpload key={JSON.stringify(key)} appointmentRef={context.id} onRefresh={refresh} />
+      {uploadAppointmentRef && (
+        <AppointmentReportUpload key={JSON.stringify([authGeneration, uploadAppointmentRef])}
+          appointmentRef={uploadAppointmentRef} onRefresh={refresh} />
       )}
     </div>
   );

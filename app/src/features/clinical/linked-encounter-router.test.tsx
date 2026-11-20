@@ -523,6 +523,116 @@ it("distinguishes a write explicitly rejected by Frappe from a lost submit respo
   expect(post).toHaveBeenCalledTimes(1);
 });
 
+it("creates a symptom once in the shared catalog and saves the combined selection only via Save draft", async () => {
+  const created = vi.fn();
+  const saved = vi.fn();
+  let finishCreate!: () => void;
+  const pending = new Promise<void>((resolve) => { finishCreate = resolve; });
+  const name = "Dry eyes";
+  server.use(
+    http.get(`${METHOD}open_for_appointment`, () => reply(draft)),
+    http.get("/api/resource/Complaint", ({ request }) => {
+      const filters = new URL(request.url).searchParams.get("filters");
+      return HttpResponse.json({ data: filters?.includes("Itching") ? [{ name: "Itching" }] : [] });
+    }),
+    http.post("/api/resource/Complaint", async ({ request }) => {
+      created(await request.json(), request.headers.get("X-Frappe-CSRF-Token"));
+      await pending;
+      return HttpResponse.json({ data: { doctype: "Complaint", name, complaints: name } });
+    }),
+    http.post(`${METHOD}save_linked`, async ({ request }) => {
+      saved(await request.json());
+      return reply({ ...draft, encounter: { ...encounter, modified: "NEW-VERSION", symptoms: ["Pain", "Itching", name] } });
+    }),
+  );
+  setup(canonical);
+  const user = userEvent.setup();
+  const input = await screen.findByRole("searchbox", { name: "Symptoms" });
+  fireEvent.change(input, { target: { value: "Itching" } });
+  await user.click(await screen.findByRole("button", { name: "Itching" }));
+  fireEvent.change(input, { target: { value: `  ${name}  ` } });
+  const create = await screen.findByRole("button", { name: "Create symptom" });
+  expect(screen.getByText(/added to the shared symptom catalog/)).toBeVisible();
+  await user.dblClick(create);
+  await waitFor(() => expect(created.mock.calls).toEqual([[{ complaints: name }, "native-csrf"]]));
+  expect(screen.getByRole("button", { name: "Save draft" })).toBeDisabled();
+  expect(saved).not.toHaveBeenCalled();
+  finishCreate();
+  expect(await screen.findByRole("button", { name: `Remove ${name}` })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Remove Pain" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Remove Itching" })).toBeVisible();
+  expect(saved).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Save draft" }));
+  await waitFor(() => expect(saved.mock.calls).toEqual([[{
+    appointment_ref: REF, expected_version: VERSION, clinical: { symptoms: ["Pain", "Itching", name] },
+  }]]));
+  expect(created).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  ["denied Complaint lookup", "Symptoms", "Dry eyes", 403, [], "Could not search clinic terms."],
+  ["already-selected exact symptom", "Symptoms", "pain", 200, [{ name: "Pain" }], "No matching terms."],
+  ["empty Diagnosis lookup", "Diagnoses", "Dry eyes", 200, [], "No matching terms."],
+] as const)("does not offer Create symptom for %s", async (_, label, text, status, data, message) => {
+  server.use(
+    http.get(`${METHOD}open_for_appointment`, () => reply(draft)),
+    http.get(`/api/resource/${label === "Symptoms" ? "Complaint" : "Diagnosis"}`, () => HttpResponse.json({ data }, { status })),
+  );
+  setup(canonical);
+  fireEvent.change(await screen.findByRole("searchbox", { name: label }), { target: { value: text } });
+  expect(await screen.findByText(message)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Create symptom" })).not.toBeInTheDocument();
+});
+
+it.each([
+  ["denied write", () => new HttpResponse(null, { status: 403 }), "Marley did not allow this action."],
+  ["validation", () => HttpResponse.json({ exc_type: "ValidationError" }, { status: 417 }), "Marley did not create this symptom."],
+  ["duplicate", () => HttpResponse.json({ exc_type: "DuplicateEntryError" }, { status: 409 }), "Marley did not create this symptom."],
+  ["lost response", () => HttpResponse.error(), "Could not confirm whether Marley created this symptom."],
+  ["wrong docname", () => HttpResponse.json({ data: { doctype: "Complaint", name: "Other", complaints: "Dry eyes" } }), "Could not confirm whether Marley created this symptom."],
+  ["wrong doctype", () => HttpResponse.json({ data: { doctype: "Diagnosis", name: "Dry eyes", complaints: "Dry eyes" } }), "Could not confirm whether Marley created this symptom."],
+  ["wrong complaints field", () => HttpResponse.json({ data: { doctype: "Complaint", name: "Dry eyes", complaints: "Other" } }), "Could not confirm whether Marley created this symptom."],
+] as const)("does not add or retry a symptom after %s", async (_, response, message) => {
+  const created = vi.fn();
+  const saved = vi.fn();
+  let catalogHasSymptom = false;
+  server.use(
+    http.get(`${METHOD}open_for_appointment`, () => reply(draft)),
+    http.get("/api/resource/Complaint", () => HttpResponse.json({ data: catalogHasSymptom ? [{ name: "Dry eyes" }] : [] })),
+    http.post("/api/resource/Complaint", () => {
+      created();
+      return response();
+    }),
+    http.post(`${METHOD}save_linked`, () => {
+      saved();
+      return reply(draft);
+    }),
+  );
+  setup(canonical);
+  const user = userEvent.setup();
+  const input = await screen.findByRole("searchbox", { name: "Symptoms" });
+  fireEvent.change(input, { target: { value: "Dry eyes" } });
+  await user.click(await screen.findByRole("button", { name: "Create symptom" }));
+  expect(await screen.findByText(message, { exact: false })).toHaveAttribute("role", "alert");
+  expect(input).toHaveValue("Dry eyes");
+  expect(screen.getByRole("button", { name: "Remove Pain" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Remove Dry eyes" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Create symptom" })).not.toBeInTheDocument();
+  if (message !== "Marley did not allow this action.") {
+    await user.click(screen.getByRole("button", { name: "Search again" }));
+    expect(await screen.findByText("No matching terms.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Create symptom" })).not.toBeInTheDocument();
+    catalogHasSymptom = true;
+    await user.click(screen.getByRole("button", { name: "Search again" }));
+    expect(await screen.findByRole("button", { name: "Dry eyes" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Remove Dry eyes" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Dry eyes" }));
+    expect(screen.getByRole("button", { name: "Remove Dry eyes" })).toBeVisible();
+  }
+  expect(created).toHaveBeenCalledTimes(1);
+  expect(saved).not.toHaveBeenCalled();
+});
+
 it("preserves coded changes and note input even when a delayed read matches the ambiguous save", async () => {
   const changedVersion = "2026-11-20 09:45:00.000001";
   const noteText = "New follow-up instructions.";

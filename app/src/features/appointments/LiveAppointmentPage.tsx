@@ -418,7 +418,8 @@ export function LiveAppointmentPage({ id }: { id: string }) {
         {appointment.is_fixture === false && (
           <section className="appointment-card" aria-labelledby="appointment-lab-reports">
             <h2 id="appointment-lab-reports">{t("labReports.title")}</h2>
-            <NativeLabReportPanel context={{ kind: "appointment", id: appointment.appointment_id }} upload />
+            <NativeLabReportPanel context={{ kind: "appointment", id: appointment.appointment_id }}
+              uploadAppointmentRef={appointment.appointment_id} />
           </section>
         )}
       </div>
