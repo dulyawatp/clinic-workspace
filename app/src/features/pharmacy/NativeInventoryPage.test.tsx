@@ -32,7 +32,7 @@ function open(path: string, withSessionChange = false) {
   return renderWithDataRouter([{
     path,
     element: <>{withSessionChange && <SessionChange />}{route.element}</>,
-  }], { path, role: "PHA" });
+  }], { initialEntries: [path], role: "PHA" });
 }
 
 function SessionChange() {
@@ -48,6 +48,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
   clearNativeCsrfToken();
   localStorage.removeItem(LOCALE_KEY);
 });
@@ -59,15 +60,30 @@ it.each([
   [ROUTES.pharmacyMovements, "Immutable ledger"],
 ])("keeps fixture content and makes no native read at %s in fixture mode", async (path, caption) => {
   vi.stubEnv("VITE_CLINIC_NATIVE", "0");
-  const read = vi.fn();
-  server.use(http.get("/api/resource/:doctype", () => {
-    read();
-    return HttpResponse.json({ data: [] });
-  }));
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  server.use(http.get("/api/resource/:doctype", () => HttpResponse.json({ data: [] })));
   open(path);
   expect(await screen.findByRole("table", { name: caption })).toBeVisible();
   expect(screen.getByText("Demo data", { exact: true })).toBeVisible();
-  expect(read).not.toHaveBeenCalled();
+  expect(fetchSpy.mock.calls.map(([url, options]) => [String(url), options?.method ?? "GET"]))
+    .toEqual([["/api/session", "GET"]]);
+});
+
+it.each([
+  [ROUTES.pharmacyItems, "Item", "Stock items"],
+  [ROUTES.pharmacyBatches, "Batch", "Batch records"],
+  [ROUTES.pharmacyBalances, "Bin", "Balances by warehouse"],
+  [ROUTES.pharmacyMovements, "Stock Ledger Entry", "Stock ledger"],
+])("makes only the expected read requests at %s in native mode", async (path, doctype, caption) => {
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  rows(doctype, []);
+  open(path);
+  expect(await screen.findByRole("table", { name: caption })).toBeVisible();
+  expect(fetchSpy.mock.calls.map(([url, options]) => [String(url).split("?")[0], options?.method ?? "GET"]))
+    .toEqual([
+      [NATIVE_BOOTSTRAP, "GET"],
+      [`/api/resource/${encodeURIComponent(doctype)}`, "GET"],
+    ]);
 });
 
 it("shows stock item master fields and never a fixture balance", async () => {
