@@ -39,12 +39,19 @@ def _read(gateway, deployment_id, lock):
     if deployment_id != DEPLOYMENT_ID or shared_sit_payment_identity(gateway) != deployment_id:
         raise SlotUnavailable("deployment identity is not approved")
     rows = gateway.frappe.db.sql(
-        f"SELECT state, actor, operation_key, receipt FROM {TABLE} "
-        "WHERE deployment_id = %s" + (" FOR UPDATE" if lock else ""),
+        f"SELECT deployment_id, state, actor, operation_key, receipt FROM {TABLE} "
+        "WHERE BINARY deployment_id = BINARY %s" + (" FOR UPDATE" if lock else ""),
         (deployment_id,),
         as_dict=True,
     )
-    if len(rows) != 1 or rows[0]["state"] not in ("available", "spent"):
+    if (
+        len(rows) != 1
+        or rows[0]["deployment_id"] != deployment_id
+        or rows[0]["state"] not in ("available", "spent")
+        or (rows[0]["state"] == "available" and any(
+            rows[0][field] is not None for field in ("actor", "operation_key", "receipt")
+        ))
+    ):
         raise SlotUnavailable("payment slot is missing or invalid")
     return rows[0]
 
@@ -69,8 +76,10 @@ def consume_slot(gateway, deployment_id, actor, operation_key, receipt):
     db = gateway.frappe.db
     db.sql(
         f"UPDATE {TABLE} SET state = 'spent', actor = %s, operation_key = %s, receipt = %s "
-        "WHERE deployment_id = %s AND state = 'available'",
+        "WHERE BINARY deployment_id = BINARY %s AND state = 'available' "
+        "AND actor IS NULL AND operation_key IS NULL AND receipt IS NULL",
         (actor, operation_key, receipt, deployment_id),
     )
-    if db._cursor.rowcount != 1:
+    rows = db.sql("SELECT ROW_COUNT()")
+    if len(rows) != 1 or len(rows[0]) != 1 or type(rows[0][0]) is not int or rows[0][0] != 1:
         raise SlotUnavailable("payment slot was not consumed")

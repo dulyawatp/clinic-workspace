@@ -66,6 +66,10 @@ Protect database writes with existing site/operator permissions; no new grants.
 Provision the private marker only for the approved deployment after review.
 
 `available` admits one transaction; `spent` permanently blocks further payment.
+An available row must have NULL actor, operation key and receipt; any populated
+value, including an empty string, is inconsistent and blocks reads and posting.
+Spent rows may have NULL legacy metadata. Deployment ID comparisons must be
+byte-exact despite the table's potentially case-insensitive or padded collation.
 Missing row, unexpected state, missing proof, wrong identity and SQL failures
 fail closed. Callers must lock slot first, before invoice and ledger locks, on
 the same Frappe transaction/connection, then consume after validating the
@@ -73,3 +77,10 @@ native payment, before the single commit. Helpers never commit. Rollback rolls
 back both payment and slot; ACK, cancellation, redeploy, or lost response never
 reset a committed slot. Investigate discrepancies manually with writers stopped;
 never reopen or recreate a spent row to recover from uncertainty.
+
+After a new-path commit or an uncertain result, **never revive legacy payment
+posting**, including after marker loss, application rollback, or redeployment:
+the legacy quota may still appear unused. Stop posting and reconcile manually;
+preserve legacy reads and ACKs. Task 2 must ensure cutover shared-site payment
+posting never falls back to the legacy writer when proof or the slot is missing,
+invalid, or uncertain. Marker loss or rollback is not authorization to revert.

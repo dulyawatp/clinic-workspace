@@ -13,14 +13,16 @@ class Database:
         self.calls = []
         self._cursor = SimpleNamespace(rowcount=0)
 
-    def sql(self, query, values, **kwargs):
+    def sql(self, query, values=None, **kwargs):
         self.calls.append((query, values))
+        if query.strip().upper() == "SELECT ROW_COUNT()":
+            return [(self._cursor.rowcount,)]
         if query.lstrip().upper().startswith("UPDATE"):
             self._cursor.rowcount = 1 if self.row and self.row["state"] == "available" else 0
             if self._cursor.rowcount:
                 self.row = dict(self.row, state="spent", actor=values[0], operation_key=values[1], receipt=values[2])
             return []
-        return [self.row.copy()] if self.row else []
+        return [dict(deployment_id=slot.DEPLOYMENT_ID, **self.row)] if self.row else []
 
 
 class SlotTests(unittest.TestCase):
@@ -87,12 +89,68 @@ class SlotTests(unittest.TestCase):
         self.db.row = {"state": "available", "actor": None, "operation_key": None, "receipt": None}
         sql = self.db.sql
 
-        def no_update(query, values, **kwargs):
+        def no_update(query, values=None, **kwargs):
             result = sql(query, values, **kwargs)
             if query.lstrip().upper().startswith("UPDATE"):
                 self.db._cursor.rowcount = 0
             return result
 
         self.db.sql = no_update
+        with self.assertRaises(slot.SlotUnavailable):
+            slot.consume_slot(self.gateway, slot.DEPLOYMENT_ID, "actor", "key", "PAY-1")
+
+    def test_available_row_with_any_metadata_is_invalid(self):
+        self.approve()
+        for field in ("actor", "operation_key", "receipt"):
+            with self.subTest(field=field):
+                self.db.row = {"state": "available", "actor": None, "operation_key": None, "receipt": None}
+                self.db.row[field] = ""
+                for action in (slot.read_slot, slot.lock_slot):
+                    with self.assertRaises(slot.SlotUnavailable):
+                        action(self.gateway, slot.DEPLOYMENT_ID)
+                with self.assertRaises(slot.SlotUnavailable):
+                    slot.consume_slot(self.gateway, slot.DEPLOYMENT_ID, "actor", "key", "PAY-1")
+
+    def test_nonexact_returned_deployment_key_is_rejected(self):
+        self.approve()
+        self.db.row = {"state": "available", "actor": None, "operation_key": None, "receipt": None}
+        sql = self.db.sql
+        for wrong in (slot.DEPLOYMENT_ID.upper(), slot.DEPLOYMENT_ID + " "):
+            def mismatched(query, values=None, **kwargs):
+                rows = sql(query, values, **kwargs)
+                if rows:
+                    rows[0]["deployment_id"] = wrong
+                return rows
+            self.db.sql = mismatched
+            with self.subTest(wrong=wrong), self.assertRaises(slot.SlotUnavailable):
+                slot.lock_slot(self.gateway, slot.DEPLOYMENT_ID)
+
+    def test_update_guards_exact_identity_and_empty_metadata(self):
+        self.approve()
+        self.db.row = {"state": "available", "actor": None, "operation_key": None, "receipt": None}
+        slot.consume_slot(self.gateway, slot.DEPLOYMENT_ID, "actor", "key", "PAY-1")
+        update = next(q for q, _ in self.db.calls if q.startswith("UPDATE"))
+        select = next(q for q, _ in self.db.calls if "FOR UPDATE" in q)
+        self.assertIn("BINARY deployment_id = BINARY %s", select)
+        self.assertIn("BINARY deployment_id = BINARY %s", update)
+        for field in ("actor", "operation_key", "receipt"):
+            self.assertIn(field + " IS NULL", update)
+
+    def test_spent_legacy_row_accepts_null_metadata(self):
+        self.approve()
+        self.db.row = {"state": "spent", "actor": None, "operation_key": None, "receipt": None}
+        self.assertEqual(slot.read_slot(self.gateway, slot.DEPLOYMENT_ID)["state"], "spent")
+
+    def test_unreadable_row_count_fails_closed(self):
+        self.approve()
+        self.db.row = {"state": "available", "actor": None, "operation_key": None, "receipt": None}
+        sql = self.db.sql
+
+        def unreadable(query, values=None, **kwargs):
+            if query == "SELECT ROW_COUNT()":
+                return [("1",)]
+            return sql(query, values, **kwargs)
+
+        self.db.sql = unreadable
         with self.assertRaises(slot.SlotUnavailable):
             slot.consume_slot(self.gateway, slot.DEPLOYMENT_ID, "actor", "key", "PAY-1")
