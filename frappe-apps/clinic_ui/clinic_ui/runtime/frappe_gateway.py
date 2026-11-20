@@ -430,6 +430,182 @@ class Gateway:
     def setting(self, key):
         return self._configuration().get(key)
 
+    def linked_resolve(self, ref):
+        """Resolve identity only; native permissions remain authoritative."""
+        from types import SimpleNamespace
+        from clinic_ui.core import config, appointment_write
+        from clinic_ui.endpoints import appointments
+
+        fixtures = config._appointment_allowlist(self.setting(config.APPOINTMENTS_KEY))
+        if fixtures is None or any(alias == ref for alias, _ in fixtures):
+            raise ValueError("invalid appointment reference")
+        if ref.startswith(appointment_write.ALIAS_PREFIX):
+            if not appointment_write.is_alias_shaped(ref):
+                raise ValueError("invalid appointment reference")
+            secret = self.setting(config.EPOCH_SECRET_KEY)
+            if not isinstance(secret, str) or len(secret.encode("utf-8")) < 32:
+                raise ValueError("invalid appointment reference")
+            settings = SimpleNamespace(epoch_secret=secret.encode("utf-8"))
+            matches = [item for item in appointments.discover_booked(self, settings)
+                       if item.workspace_appointment_id == ref]
+            if len(matches) != 1:
+                raise ValueError("invalid appointment reference")
+            return matches[0].native_appointment_id
+        return ref
+
+    def _linked_fields(self, doctype, fields, ptype="read", parent_meta=None):
+        meta = self.frappe.get_meta(doctype)
+        authority = parent_meta or meta
+        levels = set(authority.get_permlevel_access(ptype, user=self.frappe.session.user))
+        masks = meta.get_masked_fields()
+        if masks is None:
+            raise ValueError("field access unavailable")
+        masked = {getattr(item, "fieldname", None) for item in masks}
+        for field in fields:
+            definition = meta.get_field(field)
+            if definition is None or definition.permlevel not in levels or field in masked:
+                raise ValueError("field access denied")
+        return meta
+
+    def linked_context(self, ref):
+        doc = self.frappe.get_doc("Patient Appointment", ref)
+        doc.check_permission("read")
+        self._linked_fields("Patient Appointment", (
+            "patient", "practitioner", "status", "procedure_template",
+            "therapy_type", "template_dt",
+        ))
+        if not doc.patient or not doc.practitioner:
+            raise ValueError("appointment missing clinical identity")
+        self.frappe.get_doc("Patient", doc.patient).check_permission("read")
+        return {
+            "appointment": doc.name,
+            "patient": doc.patient,
+            "practitioner": doc.practitioner,
+            "status": doc.status,
+            "_alternative": bool(doc.procedure_template or doc.therapy_type
+                                 or doc.template_dt in ("Therapy Type", "Clinical Procedure Template", "Observation Template")),
+        }
+
+    def _linked_doc(self, context, encounter_id):
+        doc = self.frappe.get_doc("Patient Encounter", encounter_id)
+        doc.check_permission("read")
+        self._linked_fields("Patient Encounter", ("appointment", "patient", "practitioner"))
+        if (doc.appointment != context["appointment"] or doc.patient != context["patient"]
+                or doc.practitioner != context["practitioner"]):
+            raise ValueError("encounter identity mismatch")
+        return doc
+
+    def _linked_map(self, context):
+        from healthcare.healthcare.doctype.patient_appointment.patient_appointment import make_encounter
+        doc = make_encounter(context["appointment"])
+        if (doc.appointment != context["appointment"] or doc.patient != context["patient"]
+                or doc.practitioner != context["practitioner"]):
+            raise ValueError("mapped identity mismatch")
+        return doc
+
+    def linked_find(self, context):
+        rows = self.frappe.get_all("Patient Encounter", filters={
+            "appointment": context["appointment"], "docstatus": ["!=", 2],
+        }, fields=["name"], limit_page_length=2)
+        if len(rows) > 1:
+            raise ValueError("ambiguous linked encounter")
+        if not rows:
+            if context["status"] not in ("Open", "Checked In", "Confirmed", "Scheduled") or context["_alternative"]:
+                raise ValueError("appointment not eligible")
+            self._linked_map(context)
+            return None
+        doc = self._linked_doc(context, rows[0]["name"])
+        return {"id": doc.name, "modified": str(doc.modified), "docstatus": int(doc.docstatus)}
+
+    def _linked_note(self, context, encounter_id):
+        rows = self.frappe.get_all("Clinical Note", filters={
+            "reference_doc": "Patient Encounter", "reference_name": encounter_id,
+        }, fields=["name"], limit_page_length=2)
+        if len(rows) > 1:
+            raise ValueError("ambiguous linked note")
+        if not rows:
+            return None
+        note = self.frappe.get_doc("Clinical Note", rows[0]["name"])
+        note.check_permission("read")
+        self._linked_fields("Clinical Note", ("patient", "practitioner", "reference_doc", "reference_name", "note"))
+        if (note.patient != context["patient"] or note.practitioner != context["practitioner"]
+                or note.reference_doc != "Patient Encounter" or note.reference_name != encounter_id):
+            raise ValueError("note identity mismatch")
+        return note
+
+    def linked_project(self, context, encounter):
+        public_context = {key: value for key, value in context.items() if not key.startswith("_")}
+        if encounter is None:
+            return {"context": public_context, "encounter": None, "note": None}
+        doc = self._linked_doc(context, encounter["id"])
+        meta = self.frappe.get_meta("Patient Encounter")
+        symptoms = self._encounter_read_children(doc, meta, "symptoms", "Patient Encounter Symptom", "complaint")
+        diagnoses = self._encounter_read_children(doc, meta, "diagnosis", "Patient Encounter Diagnosis", "diagnosis")
+        if symptoms is None or diagnoses is None:
+            raise ValueError("clinical fields unavailable")
+        note = self._linked_note(context, doc.name)
+        return {
+            "context": public_context,
+            "encounter": {**encounter, "symptoms": symptoms, "diagnoses": diagnoses},
+            "note": None if note is None else {"id": note.name, "modified": str(note.modified), "text": note.note},
+        }
+
+    def linked_save(self, context, encounter, clinical):
+        if encounter is None:
+            doc = self._linked_map(context)
+        else:
+            doc = self._linked_doc(context, encounter["id"])
+            if str(doc.modified) != encounter["modified"] or int(doc.docstatus) != 0:
+                raise ValueError("stale encounter")
+            doc.check_permission("write")
+        for key, table, child, field in (
+            ("symptoms", "symptoms", "Patient Encounter Symptom", "complaint"),
+            ("diagnoses", "diagnosis", "Patient Encounter Diagnosis", "diagnosis"),
+        ):
+            if key in clinical:
+                meta = self._linked_fields("Patient Encounter", (table,), "write")
+                self._linked_fields(child, (field,), "write", meta)
+                doc.set(table, [])
+                for value in clinical[key]:
+                    doc.append(table, {field: value})
+        self._linked_fields("Patient Encounter", ("submit_orders_on_save",), "write")
+        doc.submit_orders_on_save = 0
+        if encounter is None:
+            doc.insert()
+        else:
+            doc.save()
+        if "note" in clinical:
+            incoming = clinical["note"]
+            note = self._linked_note(context, doc.name)
+            if note is None:
+                if incoming["id"] is not None:
+                    raise ValueError("stale note")
+                self._linked_fields("Clinical Note", ("patient", "practitioner", "reference_doc", "reference_name", "note"), "write")
+                note = self.frappe.new_doc("Clinical Note")
+                note.patient = context["patient"]
+                note.practitioner = context["practitioner"]
+                note.reference_doc = "Patient Encounter"
+                note.reference_name = doc.name
+                note.note = incoming["text"]
+                note.insert()
+            else:
+                if note.name != incoming["id"] or str(note.modified) != incoming["modified"]:
+                    raise ValueError("stale note")
+                note.check_permission("write")
+                self._linked_fields("Clinical Note", ("note",), "write")
+                note.note = incoming["text"]
+                note.save()
+        return {"id": doc.name, "modified": str(doc.modified), "docstatus": int(doc.docstatus)}
+
+    def linked_complete(self, context, encounter):
+        doc = self._linked_doc(context, encounter["id"])
+        if str(doc.modified) != encounter["modified"] or int(doc.docstatus) != 0:
+            raise ValueError("stale encounter")
+        self._linked_fields("Patient Encounter", ("submit_orders_on_save",), "write")
+        doc.submit_orders_on_save = 0
+        doc.submit()
+        return {"id": doc.name, "modified": str(doc.modified), "docstatus": int(doc.docstatus)}
+
     @property
     def current_session(self):
         from clinic_ui.core.policy import SessionView

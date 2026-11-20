@@ -24,7 +24,30 @@ are narrower than a generic Frappe resource read.
 import frappe
 
 from clinic_ui.api.patients import _body
+from clinic_ui.endpoints import linked_encounter
 from clinic_ui.runtime.frappe_gateway import Gateway
+
+
+def _linked_call(method, *args):
+    try:
+        return method(Gateway(), *args)
+    except ValueError as exc:
+        frappe.throw(str(exc), frappe.ValidationError)
+
+
+@frappe.whitelist(methods=["GET"])
+def open_for_appointment(appointment_ref=None):
+    return _linked_call(linked_encounter.open_for_appointment, appointment_ref)
+
+
+@frappe.whitelist(methods=["POST"])
+def save_linked(**form):
+    return _linked_call(linked_encounter.save_linked, _body(form))
+
+
+@frappe.whitelist(methods=["POST"])
+def complete_linked(**form):
+    return _linked_call(linked_encounter.complete_linked, _body(form))
 
 
 @frappe.whitelist(methods=["POST"])
