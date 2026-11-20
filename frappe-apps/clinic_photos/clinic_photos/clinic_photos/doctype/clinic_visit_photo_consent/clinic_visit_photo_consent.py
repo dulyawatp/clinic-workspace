@@ -1,5 +1,6 @@
 import frappe
 from frappe.model.document import Document
+from clinic_photos.access import checkin_witness
 
 class ClinicVisitPhotoConsent(Document):
     def validate(self):
@@ -16,7 +17,7 @@ class ClinicVisitPhotoConsent(Document):
         if self.is_new():
             if not isinstance(self.get("evidence"), str) or not self.get("evidence").strip():
                 frappe.throw("Consent evidence is required.")
-            if any(self.get(field) for field in ("granted_by", "granted_at", "revoked", "revoked_by", "revoked_at", "checked_in_at")):
+            if any(self.get(field) for field in ("granted_by", "granted_at", "revoked", "revoked_by", "revoked_at", "checked_in_at", "checkin_witness_at")):
                 frappe.throw("Consent audit fields are server controlled.")
             self.granted_by = frappe.session.user
             self.granted_at = frappe.utils.now_datetime()
@@ -24,7 +25,7 @@ class ClinicVisitPhotoConsent(Document):
 
         previous = self.get_doc_before_save()
         fields = ("appointment", "patient", "evidence", "granted_by", "granted_at")
-        stored_fields = (*fields, "revoked", "revoked_by", "revoked_at", "checked_in_at")
+        stored_fields = (*fields, "revoked", "revoked_by", "revoked_at", "checked_in_at", "checkin_witness_at")
         current = frappe.db.get_value(
             "Clinic Visit Photo Consent", self.name, list(stored_fields),
             as_dict=True, for_update=True,
@@ -46,6 +47,10 @@ class ClinicVisitPhotoConsent(Document):
         before = getattr(previous, "checked_in_at", None)
         if self.get("checked_in_at") != before:
             frappe.throw("Check-in observation is unavailable.")
+        prior_witness = getattr(previous, "checkin_witness_at", None)
+        if self.get("checkin_witness_at") != prior_witness:
+            if prior_witness or self.get("revoked") or not checkin_witness.is_witnessing(self):
+                frappe.throw("Check-in witness is server controlled.")
 
     def on_trash(self):
         frappe.throw("Consent records cannot be deleted.")

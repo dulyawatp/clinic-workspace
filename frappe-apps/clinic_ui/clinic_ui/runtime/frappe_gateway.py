@@ -470,6 +470,11 @@ class Gateway:
             raise LinkedEncounterError("invalid appointment configuration")
         return {native for _, native in fixtures}
 
+    def schedule_checkin_observation(self, appointment, patient):
+        from clinic_ui.endpoints.checkin_observer import schedule
+
+        schedule(self.frappe, appointment, patient)
+
     def insert_lab_report(self, values):
         doc = self.frappe.get_doc(values)
         doc.insert()

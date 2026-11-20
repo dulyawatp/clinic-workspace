@@ -56,3 +56,7 @@ scheduler_events = {
         ],
     },
 }
+
+clinic_native_checkin_observer = [
+    "clinic_photos.access.checkin_witness.observe",
+]

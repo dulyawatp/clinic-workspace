@@ -32,4 +32,5 @@ def checkin(gateway, payload):
     queue = result.position_in_queue
     if result.status != "Checked In" or isinstance(queue, bool) or not isinstance(queue, int) or queue <= 0:
         raise ValueError("Native check-in was not verified")
+    gateway.schedule_checkin_observation(name, identity[1])
     return {"appointment": name, "status": result.status, "modified": str(result.modified)}

@@ -26,6 +26,7 @@ class Gateway:
         self.fixtures = ()
         self.resolve = "A"
         self.reads = []
+        self.events = []
 
     def get_doc(self, doctype, name, **kwargs):
         self.reads.append((doctype, name, kwargs))
@@ -41,6 +42,9 @@ class Gateway:
 
     def _linked_fields(self, *args):
         pass
+
+    def schedule_checkin_observation(self, appointment, patient):
+        self.events.append((appointment, patient))
 
     def _native_check_in_function(self):
         def call(name):
@@ -60,6 +64,7 @@ class NativeCheckinTests(unittest.TestCase):
     def test_native_action_and_no_replay(self):
         self.assertEqual(self.action()["status"], "Checked In")
         self.assertEqual(self.gateway.calls, 1)
+        self.assertEqual(self.gateway.events, [("A", "P")])
         self.assertEqual(self.gateway.reads.count(("Patient Appointment", "A", {"for_update": True})), 2)
         with self.assertRaises(ValueError):
             self.action()
@@ -93,6 +98,7 @@ class NativeCheckinTests(unittest.TestCase):
             self.gateway._native_check_in_function = lambda: native
             with self.assertRaises(ValueError):
                 self.action()
+            self.assertEqual(self.gateway.events, [])
 
     def test_rejects_already_checked_in_even_with_positive_queue(self):
         self.gateway.doc.status = "Checked In"

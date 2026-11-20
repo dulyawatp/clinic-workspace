@@ -67,7 +67,7 @@ class ConsentTests(unittest.TestCase):
     def test_grant_derives_audit_and_rejects_wrong_patient_or_client_observation(self):
         self.doc.validate()
         self.assertEqual((self.doc.granted_by, self.doc.granted_at), ("doctor", "server-time"))
-        for values in ({"patient": "other"}, {"evidence": " "}, {"checked_in_at": "forged"}):
+        for values in ({"patient": "other"}, {"evidence": " "}, {"checked_in_at": "forged"}, {"checkin_witness_at": "forged"}):
             with self.assertRaises(ValidationError):
                 consent(**values).validate()
 
@@ -109,6 +109,10 @@ class ConsentTests(unittest.TestCase):
         self.doc.name = "C"
         frappe.db.current = vars(self.doc.previous)
         self.doc.checked_in_at = "forged"
+        with self.assertRaises(ValidationError):
+            self.doc.validate()
+        self.doc.checked_in_at = None
+        self.doc.checkin_witness_at = "forged"
         with self.assertRaises(ValidationError):
             self.doc.validate()
 
