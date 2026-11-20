@@ -57,6 +57,10 @@ class SuccessUncertain(Exception):
     """The native write committed but the success response could not be built."""
 
 
+class CommitUncertain(patient_write.WriteUncertain):
+    """The native commit may have succeeded despite a failed response."""
+
+
 class ManualInvestigationRequired(RuntimeError):
     """Neither the site latch nor the operation fallback could be persisted."""
 
@@ -485,7 +489,10 @@ def _post_shared_sit_payment(gateway, payload, actor, deployment_id, reauthorize
         sit_payment_slot.consume_slot(
             gateway, deployment_id, actor, payload["operation_key"], receipt
         )
-        gateway.commit()
+        try:
+            gateway.commit()
+        except Exception as exc:
+            raise CommitUncertain() from exc
         return reference, receipt, expected
     except BaseException:
         _rollback_or_raise(gateway)
@@ -801,6 +808,56 @@ def submit_invoice(gateway, body, csrf_token=None):
             "total": facts["grand_total"],
         },
     )
+
+
+def _receive_shared_sit_payment(gateway, body, csrf_token=None):
+    """Prepare a shared-slot payment without routing public requests."""
+    settings, view, _role = _shared_sit_payment_gate(gateway, csrf_token)
+    try:
+        payload = finance_contract.validate_payment(body)
+    except finance_contract.FinanceContractError:
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+    if gateway.native_finance_settlement_verified() is not True:
+        return _locked_response(gateway)
+    deployment_id = sit_payment_slot.shared_sit_payment_identity(gateway)
+    if deployment_id != sit_payment_slot.DEPLOYMENT_ID:
+        return _locked_response(gateway)
+    actor = view.user
+
+    def reauthorize():
+        _settings, current_view, _current_role = _shared_sit_payment_gate(
+            gateway, csrf_token
+        )
+        if sit_payment_slot.shared_sit_payment_identity(gateway) != deployment_id:
+            raise patient_write.WriteUncertain()
+        return current_view.user
+
+    try:
+        reference, receipt, expected = _post_shared_sit_payment(
+            gateway, payload, actor, deployment_id, reauthorize,
+            read_detail=lambda: gateway.shared_sit_finance_payment_detail(payload),
+        )
+    except CommitUncertain:
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
+    except (
+        finance_contract.FinanceTargetNotEligible,
+        finance_contract.FinanceBudgetExhausted,
+        sit_payment_slot.SlotUnavailable,
+        patient_write.WriteLocked,
+        patient_write.WriteConflict,
+        patient_write.StoreUnavailable,
+        patient_write.WriteUncertain,
+    ):
+        return _locked_response(gateway)
+
+    try:
+        token = finance_contract.ack_token(
+            settings.epoch_secret, gateway.site, actor,
+            finance_contract.PAYMENT_KIND, payload["operation_key"], receipt,
+        )
+        return _success(gateway, payload, reference, token, expected)
+    except (SuccessUncertain, finance_contract.FinanceContractError):
+        return _respond_error(gateway, HTTP_CONFLICT, UNCERTAIN_CODE)
 
 
 def receive_payment(gateway, body, csrf_token=None):

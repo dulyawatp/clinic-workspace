@@ -112,8 +112,9 @@ class SharedPaymentTransactionTests(unittest.TestCase):
 
     def test_commit_exception_never_returns_success(self):
         self.gateway.commit.side_effect = RuntimeError("commit response lost")
-        with self.assertRaisesRegex(RuntimeError, "commit response lost"):
+        with self.assertRaises(finance_write.CommitUncertain) as error:
             self.run_transaction()
+        self.assertEqual(str(error.exception.__cause__), "commit response lost")
         self.assertIn("consume", self.events)
         self.assertIn("rollback", self.events)
 
