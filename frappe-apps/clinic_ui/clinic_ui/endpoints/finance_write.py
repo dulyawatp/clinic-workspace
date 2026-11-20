@@ -892,11 +892,43 @@ def receive_payment(gateway, body, csrf_token=None):
 def acknowledge(gateway, body, csrf_token=None):
     """One-shot acknowledgement of a committed finance operation."""
 
-    settings, view, _role = common.authorize_finance_write(
+    common._authorize_finance_base(
         gateway, INVOICE_ROLE_CODES | PAYMENT_ROLE_CODES, csrf_token
     )
     try:
         payload = finance_contract.validate_ack(body)
+    except finance_contract.FinanceContractError:
+        if sit_payment_slot.payment_lane(gateway) == "shared_slot_v1":
+            _shared_sit_payment_gate(gateway, csrf_token)
+        else:
+            common.authorize_finance_write(
+                gateway, INVOICE_ROLE_CODES | PAYMENT_ROLE_CODES, csrf_token
+            )
+        return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
+
+    if (
+        payload["kind"] == finance_contract.PAYMENT_KIND
+        and sit_payment_slot.payment_lane(gateway) == "shared_slot_v1"
+    ):
+        settings, view, _role = _shared_sit_payment_gate(gateway, csrf_token)
+        try:
+            status = sit_payment_slot.verify_slot_ack(
+                gateway, sit_payment_slot.DEPLOYMENT_ID, settings.epoch_secret,
+                view.user, payload["operation_key"], payload["ack_token"],
+            )
+        except sit_payment_slot.SlotUnavailable:
+            return _locked_response(gateway)
+        if status == "acked":
+            return gateway.respond_write(HTTP_OK, {"acknowledged": True})
+        if status == "invalid":
+            return _respond_error(gateway, HTTP_CONFLICT, CONFLICT_CODE)
+        if status != "not_owned":
+            return _locked_response(gateway)
+
+    settings, view, _role = common.authorize_finance_write(
+        gateway, INVOICE_ROLE_CODES | PAYMENT_ROLE_CODES, csrf_token
+    )
+    try:
         status = gateway.acknowledge_finance_write(
             settings.epoch_secret,
             view.user,
