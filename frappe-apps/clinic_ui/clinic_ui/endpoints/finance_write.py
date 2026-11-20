@@ -399,6 +399,39 @@ def _success(gateway, payload, reference, ack_token, expected):
         raise SuccessUncertain() from exc
 
 
+def _prepare_locked_payment_settlement(gateway, current, payload, prepared, kind):
+    if gateway.native_finance_settlement_verified() is not True:
+        raise finance_contract.FinanceTargetNotEligible()
+    settlement = gateway.payment_settlement_facts(
+        payload["invoice"], (current.get("mode") or {}).get("account"),
+        payload["amount"], payload["allocations"][0]["amount"],
+        payload["mode_of_payment"],
+    )
+    if (
+        not isinstance(settlement, dict)
+        or settlement.get("company") != current.get("company")
+        or settlement.get("currency") != current.get("currency")
+        or settlement.get("customer") != (current.get("invoice") or {}).get("customer")
+    ):
+        raise finance_contract.FinanceTargetNotEligible()
+    settlement["reference_no"] = payload.get("reference_no") or ""
+    settlement["reference_date"] = current.get("today")
+    prepared.update({
+        "company": settlement["company"],
+        "currency": settlement["currency"],
+        "party": settlement["customer"],
+        "paid_from": settlement["receivable_account"],
+        "paid_to": settlement["mode_account"],
+        "paid_amount": float(settlement["outstanding"]),
+        "received_amount": float(settlement["outstanding"]),
+    })
+    prepared["references"][0]["allocated_amount"] = float(settlement["outstanding"])
+    prepared["references"][0]["outstanding_amount"] = float(settlement["outstanding"])
+    if finance_contract.prepared_problem(kind, prepared) is not None:
+        raise finance_contract.FinanceTargetNotEligible()
+    return settlement
+
+
 def _perform(
     gateway,
     body,
@@ -508,35 +541,9 @@ def _perform(
                 if finance_contract.prepared_problem(kind, prepared) is not None:
                     raise finance_contract.FinanceTargetNotEligible()
                 if kind == finance_contract.PAYMENT_KIND:
-                    if gateway.native_finance_settlement_verified() is not True:
-                        raise finance_contract.FinanceTargetNotEligible()
-                    settlement = gateway.payment_settlement_facts(
-                        payload["invoice"], (current.get("mode") or {}).get("account"),
-                        payload["amount"], payload["allocations"][0]["amount"],
-                        payload["mode_of_payment"],
+                    settlement = _prepare_locked_payment_settlement(
+                        gateway, current, payload, prepared, kind
                     )
-                    if (
-                        not isinstance(settlement, dict)
-                        or settlement.get("company") != current.get("company")
-                        or settlement.get("currency") != current.get("currency")
-                        or settlement.get("customer") != (current.get("invoice") or {}).get("customer")
-                    ):
-                        raise finance_contract.FinanceTargetNotEligible()
-                    settlement["reference_no"] = payload.get("reference_no") or ""
-                    settlement["reference_date"] = current.get("today")
-                    prepared.update({
-                        "company": settlement["company"],
-                        "currency": settlement["currency"],
-                        "party": settlement["customer"],
-                        "paid_from": settlement["receivable_account"],
-                        "paid_to": settlement["mode_account"],
-                        "paid_amount": float(settlement["outstanding"]),
-                        "received_amount": float(settlement["outstanding"]),
-                    })
-                    prepared["references"][0]["allocated_amount"] = float(settlement["outstanding"])
-                    prepared["references"][0]["outstanding_amount"] = float(settlement["outstanding"])
-                    if finance_contract.prepared_problem(kind, prepared) is not None:
-                        raise finance_contract.FinanceTargetNotEligible()
                     claim = held.dispatch()
                 reference = mutate(gateway, prepared)
                 if kind == finance_contract.PAYMENT_KIND:
