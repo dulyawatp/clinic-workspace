@@ -23,7 +23,10 @@ const ENABLED_STOCK = {
 } as const;
 
 function serve(caps: Record<string, string>, role: "PHA" | "ADM" = "PHA") {
-  server.use(http.get(NATIVE_BOOTSTRAP, () => nativeSession(role, caps)));
+  server.use(
+    http.get(NATIVE_BOOTSTRAP, () => nativeSession(role, caps)),
+    http.get("/api/resource/Stock%20Ledger%20Entry", () => HttpResponse.json({ data: [] })),
+  );
 }
 
 function ack() {
@@ -171,7 +174,7 @@ it("sends native reconciliation fields and shows server validation", async () =>
   const form = await screen.findByRole("region", {
     name: "กระทบยอดสินค้าบนเซิร์ฟเวอร์",
   });
-  expect(screen.getAllByText(/แบบฟอร์มนี้เก็บข้อมูลตัวอย่างในเบราว์เซอร์เท่านั้น/).length).toBeGreaterThan(0);
+  expect(screen.queryByText(/แบบฟอร์มนี้เก็บข้อมูลตัวอย่างในเบราว์เซอร์เท่านั้น/)).not.toBeInTheDocument();
   expect(within(form).getByText(/ส่งรายการกระทบยอดไปยังเซิร์ฟเวอร์และเปลี่ยนสต็อก/)).toBeTruthy();
   expect(within(form).getByRole("option", { name: "รายการปรับปรุง" })).toBeTruthy();
   await user.type(within(form).getByLabelText("รหัสสินค้า"), "ITEM-1");

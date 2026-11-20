@@ -10,6 +10,7 @@ import {
 } from "../../design/components";
 import { opsData } from "../../fixtures/data-ops";
 import { useLocale } from "../../i18n/LocaleProvider";
+import { nativeTransportEnabled } from "../../transport/native/flag";
 import { useOpsCopy } from "../operations/ops-copy";
 import { itemName, warehouseName } from "../operations/ops-model";
 import {
@@ -21,9 +22,14 @@ import {
   SourceNote,
   useOpsFormat,
 } from "../operations/ops-ui";
+import { NativeInventoryPage } from "./NativeInventoryPage";
 
 const STATES = ["all", "stocked", "low", "out"] as const;
 type StockState = (typeof STATES)[number];
+
+export function PharmacyBalancesPage() {
+  return nativeTransportEnabled() ? <NativeInventoryPage kind="balances" /> : <FixtureBalancesPage />;
+}
 
 /**
  * PHA-04 balances and the immutable ledger. Balances are per item–location from
@@ -31,7 +37,7 @@ type StockState = (typeof STATES)[number];
  * thresholds are explicit or unavailable — never an implicit zero). The ledger
  * tab reads the core sample ledger in its stored chronological order.
  */
-export function PharmacyBalancesPage() {
+function FixtureBalancesPage() {
   const copy = useOpsCopy();
   const { locale } = useLocale();
   const { dateTime } = useOpsFormat();

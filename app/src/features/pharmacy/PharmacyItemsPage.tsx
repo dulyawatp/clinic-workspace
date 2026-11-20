@@ -11,6 +11,7 @@ import {
 } from "../../design/components";
 import { opsData } from "../../fixtures/data-ops";
 import { useLocale } from "../../i18n/LocaleProvider";
+import { nativeTransportEnabled } from "../../transport/native/flag";
 import { useOpsCopy } from "../operations/ops-copy";
 import {
   FilterBar,
@@ -20,9 +21,14 @@ import {
   useOpsFormat,
 } from "../operations/ops-ui";
 import { itemStockByWarehouse, itemTotals, warehouseName } from "../operations/ops-model";
+import { NativeInventoryPage } from "./NativeInventoryPage";
 
 const GROUP_FILTERS = ["all", "stock", "service"] as const;
 type GroupFilter = (typeof GROUP_FILTERS)[number];
+
+export function PharmacyItemsPage() {
+  return nativeTransportEnabled() ? <NativeInventoryPage kind="items" /> : <FixtureItemsPage />;
+}
 
 /**
  * PHA-02 item catalogue. The detail drawer reports stock per warehouse from the
@@ -30,7 +36,7 @@ type GroupFilter = (typeof GROUP_FILTERS)[number];
  * excluded, per the helper), and that location's configured reorder threshold —
  * never the item master's single `reorder` number.
  */
-export function PharmacyItemsPage() {
+function FixtureItemsPage() {
   const copy = useOpsCopy();
   const { locale } = useLocale();
   const { money } = useOpsFormat();
