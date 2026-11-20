@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from clinic_ui.runtime.frappe_gateway import Gateway
 
@@ -9,19 +9,25 @@ class Denied(Exception):
     pass
 
 
+class Missing(Exception):
+    pass
+
+
 class Meta:
     def __init__(self, fields, masked=()):
         self.fields = fields
         self.masked = masked
+        self.levels = {}
+        self.accessible = [0]
 
     def get_field(self, name):
-        return SimpleNamespace(permlevel=0, options=self.fields[name]) if name in self.fields else None
+        return SimpleNamespace(permlevel=self.levels.get(name, 0), options=self.fields[name]) if name in self.fields else None
 
     def get_permlevel_access(self, ptype, user=None):
-        return [0]
+        return self.accessible
 
     def get_masked_fields(self):
-        return [SimpleNamespace(fieldname=name) for name in self.masked]
+        return None if self.masked is None else [SimpleNamespace(fieldname=name) for name in self.masked]
 
 
 class Frappe:
@@ -32,6 +38,7 @@ class Frappe:
         self.local = SimpleNamespace(site="any-site")
         self.allowed = True
         self.patient_allowed = True
+        self.denied_docs = set()
         self.rows = [
             {"name": f"ENC-{n:02}", "patient": "PAT-1", "practitioner": "DR-1",
              "encounter_date": "2026-01-01", "docstatus": 0}
@@ -45,30 +52,44 @@ class Frappe:
             "Patient Encounter Diagnosis": Meta({"diagnosis": None}),
             "Patient": Meta({"patient_name": None}),
         }
-        self.db = SimpleNamespace(get_value=lambda doctype, name, field: "Patient One")
+        self.db = SimpleNamespace(get_value=lambda doctype, name, field: "Patient One",
+                                  set_value=Mock(), sql=Mock(), commit=Mock(), rollback=Mock())
+        self.insert = Mock()
+        self.save = Mock()
+        self.delete_doc = Mock()
+        self.document_writes = []
         self.queries = []
 
     def get_meta(self, doctype):
         return self.meta[doctype]
 
     def has_permission(self, doctype, ptype="read", doc=None, user=None):
-        return self.patient_allowed if doctype == "Patient" else self.allowed
+        if doctype == "Patient":
+            return self.patient_allowed
+        name = getattr(doc, "name", doc)
+        return self.allowed and name not in self.denied_docs
 
     def get_list(self, doctype, **kwargs):
         self.queries.append((doctype, kwargs))
         if not self.allowed:
             raise Denied()
-        rows = [row for row in self.rows if row["patient"] == kwargs["filters"]["patient"]]
+        rows = [row for row in self.rows if row["patient"] == kwargs["filters"]["patient"]
+                and row["name"] not in self.denied_docs]
+        rows.sort(key=lambda row: (row["encounter_date"], row["name"]), reverse=True)
         start = kwargs["start"]
-        return rows[start:start + kwargs["page_length"]]
+        return [{field: row[field] for field in kwargs["fields"]}
+                for row in rows[start:start + kwargs["page_length"]]]
 
     def get_doc(self, doctype, name):
         row = next((r for r in self.rows if r["name"] == name), None)
         if row is None:
-            raise Denied()
-        return SimpleNamespace(**row, symptoms=[SimpleNamespace(complaint="Pain", note="secret")],
+            raise Missing()
+        save, insert, delete = Mock(), Mock(), Mock()
+        self.document_writes.extend((save, insert, delete))
+        return SimpleNamespace(**{**row, "clinical_note": "secret"}, symptoms=[SimpleNamespace(complaint="Pain", note="secret")],
                                diagnosis=[SimpleNamespace(diagnosis="D1", note="secret")],
-                               clinical_note="secret")
+                               save=save, insert=insert, delete=delete,
+                               )
 
     def throw(self, message, exc):
         raise exc(message)
@@ -85,7 +106,7 @@ class EncounterReadTests(unittest.TestCase):
         self.assertEqual(len(result["items"]), 20)
         self.assertEqual(result["nextOffset"], 20)
         self.assertEqual(result["items"][0], {
-            "id": "ENC-00", "patientId": "PAT-1", "patientName": "Patient One",
+            "id": "ENC-24", "patientId": "PAT-1", "patientName": "Patient One",
             "practitioner": "DR-1", "encounterDate": "2026-01-01", "docstatus": 0,
         })
         self.assertEqual(self.frappe.queries[0][1]["page_length"], 21)
@@ -169,3 +190,74 @@ class EncounterReadTests(unittest.TestCase):
         for encounter in ("", "\n", None):
             with self.subTest(encounter=encounter), self.assertRaises(Denied):
                 self.gateway.view_patient_encounter(encounter)
+
+    def test_offset_boundary_never_returns_an_unusable_continuation(self):
+        with patch.object(self.frappe, "get_list", return_value=self.frappe.rows[:21]):
+            self.assertEqual(self.gateway.list_patient_encounters("PAT-1", 1000000)["nextOffset"], None)
+            self.assertEqual(self.gateway.list_patient_encounters("PAT-1", 999980)["nextOffset"], 1000000)
+            self.assertEqual(self.gateway.list_patient_encounters("PAT-1", 999999)["nextOffset"], None)
+
+    def test_document_permissions_order_projection_and_no_writes(self):
+        self.frappe.rows[0]["clinical_note"] = "secret"
+        self.frappe.rows[1]["encounter_date"] = "2027-01-01"
+        self.frappe.denied_docs.add("ENC-24")
+        result = self.gateway.list_patient_encounters("PAT-1", 0)
+        ids = [item["id"] for item in result["items"]]
+        self.assertEqual(ids[:3], ["ENC-01", "ENC-23", "ENC-22"])
+        self.assertNotIn("ENC-24", ids)
+        self.assertNotIn("secret", str(result))
+        self.assertEqual(self.frappe.queries[0][1]["fields"],
+                         ["name", "patient", "practitioner", "encounter_date", "docstatus"])
+        with self.assertRaises(Denied):
+            self.gateway.view_patient_encounter("ENC-24")
+        self.gateway.view_patient_encounter("ENC-00")
+        for call in (self.frappe.insert, self.frappe.save, self.frappe.delete_doc,
+                     self.frappe.db.set_value, self.frappe.db.sql,
+                     self.frappe.db.commit, self.frappe.db.rollback,
+                     *self.frappe.document_writes):
+            call.assert_not_called()
+
+    def test_order_is_stable_across_pages_with_equal_dates(self):
+        first = self.gateway.list_patient_encounters("PAT-1", 0)
+        second = self.gateway.list_patient_encounters("PAT-1", first["nextOffset"])
+        ids = [item["id"] for item in first["items"] + second["items"]]
+        self.assertEqual(ids, [f"ENC-{n:02}" for n in reversed(range(25))])
+        self.assertIsNone(second["nextOffset"])
+
+    def test_missing_and_denied_detail_are_distinct(self):
+        with self.assertRaises(Missing):
+            self.gateway.view_patient_encounter("missing")
+        self.frappe.denied_docs.add("ENC-00")
+        with self.assertRaises(Denied):
+            self.gateway.view_patient_encounter("ENC-00")
+
+    def test_child_sections_fail_closed_on_restricted_masked_or_unknown_metadata(self):
+        parent = self.frappe.meta["Patient Encounter"]
+        child = self.frappe.meta["Patient Encounter Symptom"]
+        for target, attr, value in (
+            (parent, "masked", ("symptoms",)),
+            (parent, "levels", {"symptoms": 1}),
+            (child, "masked", ("complaint",)),
+            (child, "levels", {"complaint": 1}),
+            (parent, "masked", None),
+            (child, "masked", None),
+            (child, "fields", {}),
+        ):
+            with self.subTest(target=target, attr=attr, value=value):
+                original = getattr(target, attr)
+                setattr(target, attr, value)
+                self.assertIsNone(self.gateway.view_patient_encounter("ENC-00")["symptoms"])
+                setattr(target, attr, original)
+        with patch.object(parent, "get_masked_fields", return_value=[SimpleNamespace()]):
+            self.assertIsNone(self.gateway.view_patient_encounter("ENC-00")["symptoms"])
+        diagnosis = self.frappe.meta["Patient Encounter Diagnosis"]
+        diagnosis.levels = {"diagnosis": 1}
+        self.assertIsNone(self.gateway.view_patient_encounter("ENC-00")["diagnoses"])
+        diagnosis.levels = {}
+        diagnosis.masked = ("diagnosis",)
+        self.assertIsNone(self.gateway.view_patient_encounter("ENC-00")["diagnoses"])
+        diagnosis.masked = ()
+        with patch.object(diagnosis, "get_masked_fields", side_effect=RuntimeError):
+            self.assertIsNone(self.gateway.view_patient_encounter("ENC-00")["diagnoses"])
+        parent.fields["diagnosis"] = "Wrong Child"
+        self.assertIsNone(self.gateway.view_patient_encounter("ENC-00")["diagnoses"])

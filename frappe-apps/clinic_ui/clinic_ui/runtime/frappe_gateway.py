@@ -1007,18 +1007,28 @@ class Gateway:
         )
         return {
             "items": [self._encounter_summary(row) for row in rows[:20]],
-            "nextOffset": offset + 20 if len(rows) > 20 else None,
+            "nextOffset": offset + 20 if len(rows) > 20 and offset + 20 <= 1000000 else None,
         }
 
     def _encounter_read_children(self, doc, meta, table, doctype, field):
         try:
             definition = meta.get_field(table)
-            if not definition or definition.options != doctype or not self._fields_readable(meta, (table,)):
+            parent_masks = meta.get_masked_fields()
+            if (
+                not definition
+                or definition.options != doctype
+                or parent_masks is None
+                or any(not getattr(item, "fieldname", None) for item in parent_masks)
+                or not self._fields_readable(meta, (table,))
+            ):
                 return None
             child_meta = self.frappe.get_meta(doctype)
             child_field = child_meta.get_field(field)
             accessible = meta.get_permlevel_access("read", user=self.frappe.session.user)
-            masked = {item.fieldname for item in (child_meta.get_masked_fields() or ())}
+            masked_fields = child_meta.get_masked_fields()
+            if masked_fields is None:
+                return None
+            masked = {item.fieldname for item in masked_fields}
             if not child_field or child_field.permlevel not in accessible or field in masked:
                 return None
             rows = getattr(doc, table)
