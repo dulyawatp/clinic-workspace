@@ -187,10 +187,21 @@ async function loadBootstrap(): Promise<{
  * every other failure is an error state, never an anonymous session.
  */
 export async function fetchNativeSession(): Promise<SessionDTO | null> {
+  return fetchValidatedNativeSession(false);
+}
+
+async function fetchValidatedNativeSession(requireClinicIdentity: boolean): Promise<SessionDTO | null> {
   const call = ++bootstrapGeneration;
   let result: { session: SessionDTO; csrfToken: string } | null;
   try {
     result = await loadBootstrap();
+    if (
+      requireClinicIdentity &&
+      result !== null &&
+      (!result.session.user.id.trim() ||
+        !result.session.user.displayName.trim() ||
+        result.session.user.roles.length !== 1)
+    ) throw unavailable();
   } catch (cause) {
     // A rejected or malformed newest bootstrap leaves no verified session, so
     // the earlier accepted credential must not be kept. A superseded call that
@@ -222,9 +233,10 @@ export async function nativeLogin(
   if (response.status === 401) throw { code: "FORBIDDEN", retryable: false };
   if (!response.ok) throw mapHttpError(response.status, body);
 
-  if (!isRecord(body) || body.message !== "Logged In") throw unavailable();
+  if (!isRecord(body) || (body.message !== "Logged In" && body.message !== "No App"))
+    throw unavailable();
 
-  const session = await fetchNativeSession();
+  const session = await fetchValidatedNativeSession(body.message === "No App");
   if (session === null) throw unavailable();
   return session;
 }

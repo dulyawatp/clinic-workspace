@@ -607,6 +607,46 @@ describe("native forbidden classification", () => {
 });
 
 describe("native login", () => {
+  it("accepts No App only after a same-origin Clinic bootstrap", async () => {
+    let credentials: RequestCredentials | undefined;
+    server.use(
+      http.post(LOGIN, () => HttpResponse.json({ message: "No App" })),
+      http.get(BOOTSTRAP, ({ request }) => {
+        credentials = request.credentials;
+        return HttpResponse.json({ message: liveMessage() });
+      }),
+    );
+    const session = await nativeLogin("u", "p");
+    expect(session.user.id).toBe("native|u1");
+    expect(credentials).toBe("same-origin");
+    expect(nativeCsrfToken()).toBe(TOKEN);
+  });
+
+  it.each([
+    ["blank identity", liveMessage({ user: { id: " ", displayName: "User", roles: ["DOC"] } })],
+    ["blank display name", liveMessage({ user: { id: "u", displayName: " ", roles: ["DOC"] } })],
+    ["no role", liveMessage({ user: { id: "u", displayName: "User", roles: [] } })],
+    ["multiple roles", liveMessage({ user: { id: "u", displayName: "User", roles: ["DOC", "REC"] } })],
+    ["invalid role", liveMessage({ user: { id: "u", displayName: "User", roles: ["System Manager"] } })],
+    ["malformed bootstrap", {}],
+  ])("rejects No App with %s before committing credentials", async (_name, message) => {
+    server.use(
+      http.post(LOGIN, () => HttpResponse.json({ message: "No App" })),
+      http.get(BOOTSTRAP, () => HttpResponse.json({ message })),
+    );
+    await expect(nativeLogin("u", "p")).rejects.toMatchObject({ code: "UPSTREAM_UNAVAILABLE" });
+    expect(nativeCsrfToken()).toBeNull();
+  });
+
+  it.each([401, 403])("rejects No App when bootstrap returns %s", async (status) => {
+    server.use(
+      http.post(LOGIN, () => HttpResponse.json({ message: "No App" })),
+      http.get(BOOTSTRAP, () => new HttpResponse(null, { status })),
+    );
+    await expect(nativeLogin("u", "p")).rejects.toBeDefined();
+    expect(nativeCsrfToken()).toBeNull();
+  });
+
   it("posts JSON credentials to the Frappe login method and returns the bootstrapped session", async () => {
     const received: Request[] = [];
     server.use(
@@ -652,7 +692,7 @@ describe("native login", () => {
     });
   });
 
-  it.each([[{ message: "ok" }], [{}], [{ message: { mode: "live" } }]])(
+  it.each([[{ message: "ok" }], [{ message: "No App " }], [{}], [{ message: { mode: "live" } }]])(
     "rejects an unrecognised login body %j",
     async (body) => {
       server.use(
