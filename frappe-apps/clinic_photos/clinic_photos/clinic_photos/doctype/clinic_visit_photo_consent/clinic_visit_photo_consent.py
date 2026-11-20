@@ -23,8 +23,6 @@ class ClinicVisitPhotoConsent(Document):
                 frappe.throw("Consent audit fields are server controlled.")
             self.granted_by = frappe.session.user
             self.granted_at = frappe.utils.now_datetime()
-            if visit_observation.checked_in(appointment["status"], appointment["position_in_queue"]):
-                self.checked_in_at = frappe.utils.now_datetime()
             return
 
         previous = self.get_doc_before_save()

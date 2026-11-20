@@ -91,12 +91,12 @@ class ConsentTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.doc.validate()
 
-    def test_live_checked_in_is_recorded_only_with_positive_queue(self):
-        for status, queue, expected in (("Checked In", 1, "server-time"), ("Checked In", 0, None), ("Closed", 2, None)):
+    def test_grant_never_infers_observation_from_current_appointment(self):
+        for status, queue in (("Checked In", 1), ("Checked In", 0), ("Closed", 2)):
             frappe.db.appointment.update(status=status, position_in_queue=queue)
             doc = consent()
             doc.validate()
-            self.assertEqual(doc.get("checked_in_at"), expected)
+            self.assertIsNone(doc.get("checked_in_at"))
 
     def test_grant_denied_without_native_appointment_or_patient_read(self):
         for denied in ("Patient Appointment", "Patient"):
@@ -105,7 +105,7 @@ class ConsentTests(unittest.TestCase):
                 consent().validate()
 
     def test_hook_requires_transition_existing_consent_and_permission(self):
-        old = types.SimpleNamespace(status="Open")
+        old = types.SimpleNamespace(name="A", patient="P", status="Open", position_in_queue=0)
         appt = types.SimpleNamespace(name="A", patient="P", status="Checked In", position_in_queue=3,
                                      get_doc_before_save=lambda: old)
         self.doc.validate()
@@ -134,7 +134,7 @@ class ConsentTests(unittest.TestCase):
             self.doc.validate()
 
     def test_hook_refuses_unverified_or_unrelated_visits(self):
-        old = types.SimpleNamespace(status="Open")
+        old = types.SimpleNamespace(name="A", patient="P", status="Open", position_in_queue=0)
         self.doc.validate()
         self.doc.previous = types.SimpleNamespace(**vars(self.doc))
         self.doc.name = "C"
@@ -145,6 +145,21 @@ class ConsentTests(unittest.TestCase):
         self.doc.save = lambda: self.doc.validate()
         for status, queue, patient in (("Closed", 1, "P"), ("Checked In", 0, "P"), ("Checked In", 1, "Q")):
             appt = types.SimpleNamespace(name="A", patient=patient, status=status, position_in_queue=queue,
+                                         get_doc_before_save=lambda: old)
+            observer.appointment_updated(appt, None)
+            self.assertIsNone(self.doc.get("checked_in_at"))
+
+    def test_hook_rejects_retained_queue_and_no_transition(self):
+        self.doc.validate()
+        self.doc.previous = types.SimpleNamespace(**vars(self.doc))
+        self.doc.name = "C"
+        frappe.db.consent = True
+        frappe.db.current = vars(self.doc.previous)
+        frappe.get_doc = lambda *args: self.doc
+        self.doc.save = lambda: self.doc.validate()
+        for status, queue, patient in (("Open", 3, "P"), ("Checked In", 0, "P"), ("Open", 0, "Q")):
+            old = types.SimpleNamespace(name="A", patient=patient, status=status, position_in_queue=queue)
+            appt = types.SimpleNamespace(name="A", patient="P", status="Checked In", position_in_queue=3,
                                          get_doc_before_save=lambda: old)
             observer.appointment_updated(appt, None)
             self.assertIsNone(self.doc.get("checked_in_at"))

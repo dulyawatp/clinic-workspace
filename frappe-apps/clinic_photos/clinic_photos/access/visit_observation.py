@@ -17,7 +17,14 @@ def is_observing(doc):
 
 def appointment_updated(doc, method=None):
     previous = doc.get_doc_before_save()
-    if not previous or previous.status == "Checked In" or not checked_in(doc.status, doc.position_in_queue):
+    if (
+        not previous
+        or previous.status == "Checked In"
+        or previous.name != doc.name
+        or previous.patient != doc.patient
+        or previous.position_in_queue not in (None, 0)
+        or not checked_in(doc.status, doc.position_in_queue)
+    ):
         return
     row = frappe.db.get_value("Clinic Visit Photo Consent", {"appointment": doc.name}, ["name"], as_dict=True, for_update=True)
     if not row:
