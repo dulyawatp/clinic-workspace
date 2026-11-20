@@ -32,6 +32,7 @@ from clinic_ui.core import finance_contract, patient_write
 from clinic_ui.core.policy import INVOICE_ROLE_CODES, PAYMENT_ROLE_CODES
 from clinic_ui.core.text import is_valid_text
 from clinic_ui.endpoints import aliases, common
+from clinic_ui.runtime import sit_payment_slot
 
 HTTP_OK = 200
 HTTP_REFUSED = finance_contract.HTTP_REFUSED
@@ -430,6 +431,49 @@ def _prepare_locked_payment_settlement(gateway, current, payload, prepared, kind
     if finance_contract.prepared_problem(kind, prepared) is not None:
         raise finance_contract.FinanceTargetNotEligible()
     return settlement
+
+
+def _post_shared_sit_payment(gateway, payload, actor, deployment_id, reauthorize, *, read_detail):
+    """Post under the slot lock; caller supplies authorized, fence-free detail."""
+    try:
+        lock_profile = gateway.finance_payment_lock_profile()
+        gateway.reset_native_read_snapshot()
+        sit_payment_slot.lock_slot(gateway, deployment_id)
+        gateway.lock_finance_invoice(payload["invoice"])
+        gateway.lock_finance_payment_ledger_ranges(payload["invoice"], lock_profile)
+        if reauthorize() != actor:
+            raise patient_write.WriteUncertain()
+        if (
+            gateway.native_finance_can_write(finance_contract.PAYMENT_DOCTYPE) is not True
+            or gateway.native_finance_can_submit(finance_contract.PAYMENT_DOCTYPE) is not True
+            or gateway.native_finance_can_read_invoice(payload["invoice"]) is not True
+        ):
+            raise finance_contract.FinanceTargetNotEligible()
+        current = read_detail()
+        if current is None or finance_contract.payment_problems(current, payload):
+            raise finance_contract.FinanceTargetNotEligible()
+        expected = finance_contract.expected_payment(current, payload)
+        prepared = _prepare_payment(current, payload)
+        kind = finance_contract.PAYMENT_KIND
+        if finance_contract.prepared_problem(kind, prepared) is not None:
+            raise finance_contract.FinanceTargetNotEligible()
+        settlement = _prepare_locked_payment_settlement(
+            gateway, current, payload, prepared, kind
+        )
+        reference = gateway.create_native_payment_entry(prepared)
+        if gateway.verify_full_payment_effects(reference, settlement) is not True:
+            raise patient_write.WriteUncertain()
+        receipt = finance_contract.encode_receipt(
+            **_receipt_kwargs(payload, reference, expected, prepared)
+        )
+        sit_payment_slot.consume_slot(
+            gateway, deployment_id, actor, payload["operation_key"], receipt
+        )
+        gateway.commit()
+        return reference, receipt, expected
+    except BaseException:
+        _rollback_or_raise(gateway)
+        raise
 
 
 def _perform(
