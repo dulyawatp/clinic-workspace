@@ -547,8 +547,17 @@ class Gateway:
             for row in rows[:20]:
                 note = self._linked_note(context, encounter_id, row["name"])
                 items.append({"id": note.name, "modified": str(note.modified), "text": note.note})
+            next_offset = None
+            if len(rows) > 20:
+                try:
+                    self._linked_note(context, encounter_id, rows[20]["name"])
+                except (self.frappe.PermissionError, self.frappe.DoesNotExistError,
+                        LinkedFieldAccessError, LinkedNoteMismatch):
+                    pass
+                else:
+                    next_offset = offset + 20
             return {"state": "available", "items": items,
-                    "next_offset": offset + 20 if len(rows) > 20 else None}
+                    "next_offset": next_offset}
         except (self.frappe.PermissionError, self.frappe.DoesNotExistError,
                 LinkedFieldAccessError, LinkedNoteMismatch):
             return unavailable

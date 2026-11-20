@@ -4,7 +4,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from clinic_ui.endpoints import linked_encounter
-from clinic_ui.runtime.frappe_gateway import Gateway as NativeGateway, LinkedFieldAccessError
+from clinic_ui.runtime.frappe_gateway import (
+    Gateway as NativeGateway, LinkedFieldAccessError, LinkedNoteMismatch,
+)
 
 
 class Gateway:
@@ -410,6 +412,48 @@ class NativeModelFlowTests(unittest.TestCase):
         self.frappe.denied.add(("Clinical Note", "read", "N1"))
         denied = self.request(linked_encounter.open_for_appointment, "A1")
         self.assertEqual(denied["notes"], {"state": "unavailable", "items": [], "next_offset": None})
+
+    def test_denied_lookahead_does_not_disclose_continuation(self):
+        self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": None,
+            "clinical": {"note": {"id": None, "modified": None, "text": "one"}}})
+        original = self.frappe.docs[("Clinical Note", "N1")]
+        for index in range(2, 22):
+            name = f"N{index}"
+            self.frappe.docs[("Clinical Note", name)] = dict(original, name=name)
+        self.frappe.denied.add(("Clinical Note", "read", "N21"))
+        result = self.request(linked_encounter.open_for_appointment, "A1")
+        self.assertEqual(len(result["notes"]["items"]), 20)
+        self.assertIsNone(result["notes"]["next_offset"])
+        self.assertNotIn("N21", [note["id"] for note in result["notes"]["items"]])
+
+    def test_lookahead_missing_or_mismatched_hides_continuation_but_other_errors_propagate(self):
+        self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": None,
+            "clinical": {"note": {"id": None, "modified": None, "text": "one"}}})
+        original_note = self.frappe.docs[("Clinical Note", "N1")]
+        for index in range(2, 22):
+            name = f"N{index}"
+            self.frappe.docs[("Clinical Note", name)] = dict(original_note, name=name)
+        original = self.gateway._linked_note
+        for error in (KeyError("missing"), LinkedNoteMismatch("mismatch"),
+                      LinkedFieldAccessError("masked")):
+            def read(context, encounter_id, note_id, failure=error):
+                if note_id == "N21":
+                    raise failure
+                return original(context, encounter_id, note_id)
+            self.gateway._linked_note = read
+            with self.subTest(error=error):
+                result = self.request(linked_encounter.open_for_appointment, "A1")
+                self.assertEqual(len(result["notes"]["items"]), 20)
+                self.assertIsNone(result["notes"]["next_offset"])
+        def broken(context, encounter_id, note_id):
+            if note_id == "N21":
+                raise RuntimeError("unexpected")
+            return original(context, encounter_id, note_id)
+        self.gateway._linked_note = broken
+        with self.assertRaisesRegex(RuntimeError, "unexpected"):
+            self.request(linked_encounter.open_for_appointment, "A1")
 
     def test_unexpected_note_list_failure_propagates(self):
         self.request(linked_encounter.save_linked, {
