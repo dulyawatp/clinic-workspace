@@ -38,7 +38,8 @@ export async function readCheckInAppointment(id: string, signal?: AbortSignal): 
   const body = await readJson(response);
   const doc = record(body) ? body.data : null;
   if (!record(doc) || doc.name !== id || !text(doc.status) ||
-      !(doc.practitioner === null || doc.practitioner === "" || text(doc.practitioner)))
+      !(doc.practitioner === undefined || doc.practitioner === null ||
+        doc.practitioner === "" || text(doc.practitioner)))
     throw new NativeCheckInError("unavailable");
   const flag = doc.appointment_based_on_check_in;
   if (flag !== 0 && flag !== 1 && typeof flag !== "boolean")

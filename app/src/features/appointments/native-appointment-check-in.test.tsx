@@ -24,7 +24,6 @@ const NATIVE_DOC = {
   name: NATIVE_ID,
   status: "Open",
   appointment_based_on_check_in: 1,
-  practitioner: null,
   service_unit: "Exam 3",
 };
 const DETAIL = {
