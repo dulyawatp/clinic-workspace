@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -337,8 +337,13 @@ it("starts from appointment detail, saves, reopens the same draft, and completes
   await user.click(await screen.findByRole("button", { name: "Pain" }));
   await user.type(screen.getByRole("searchbox", { name: "Diagnoses" }), "D-1");
   await user.click(await screen.findByRole("button", { name: "D-1" }));
-  await user.click(screen.getByRole("button", { name: "Add clinical note" }));
-  await user.type(screen.getByRole("textbox", { name: "Visit narrative" }), note.text);
+  const composer = screen.getByRole("textbox", { name: "Visit narrative" });
+  expect(composer).toHaveAccessibleDescription(/History.*Examination.*Plan.*Follow-up/);
+  expect(screen.getByText("More details").closest("details")).not.toHaveAttribute("open");
+  expect(screen.queryByRole("textbox", { name: /encounter comment/i })).not.toBeInTheDocument();
+  expect(screen.getByRole("searchbox", { name: "Symptoms" }).closest(".visit-preview-fields"))
+    .toBe(screen.getByRole("searchbox", { name: "Diagnoses" }).closest(".visit-preview-fields"));
+  await user.type(composer, note.text);
   await user.click(screen.getByRole("button", { name: "Save draft" }));
   expect(await screen.findByText(note.text)).toBeVisible();
   expect(saved).toHaveBeenCalledWith({
@@ -875,6 +880,7 @@ it("opens the same read-only patient timeline from Patient History and the encou
       return reply({ items: [row, { ...row, id: "ENC-OLDER" }], nextOffset: null });
     }),
     http.get(`${METHOD}open_for_appointment`, () => reply(completed)),
+    http.get(`${METHOD}view`, () => reply({ ...row, symptoms: [], diagnoses: [] })),
   );
   const posts = postSpy();
   try {
@@ -882,10 +888,29 @@ it("opens the same read-only patient timeline from Patient History and the encou
     const user = userEvent.setup();
     for (const entry of [ROUTES.patient(PAT), canonical]) {
       await act(async () => page.router.navigate(entry));
+      if (entry === canonical) {
+        expect(await screen.findByRole("heading", { name: row.patientName })).toBeVisible();
+        expect(screen.getByText("20/11/2026")).toBeVisible();
+        expect(screen.queryByRole("textbox", { name: "Visit narrative" })).not.toBeInTheDocument();
+      }
       await user.click(await screen.findByRole("link", { name: "Patient History" }));
       expect(await screen.findByRole("heading", { name: `Visit ${ENC}` })).toBeVisible();
+      expect(screen.getByRole("heading", { name: row.patientName })).toBeVisible();
       expect(screen.getByRole("heading", { name: "Visit ENC-OLDER" })).toBeVisible();
       expect(screen.queryByRole("link", { name: `Visit ${ENC}` })).not.toBeInTheDocument();
+      const card = screen.getByRole("article", { name: `Visit ${ENC}` });
+      const [lab, photo, narrative] = Array.from(card.querySelectorAll(
+        ".visit-history-report, .visit-history-evidence, .visit-history-narrative",
+      ));
+      expect(lab).toHaveTextContent("Lab reports");
+      expect(photo).toHaveTextContent("Same-visit photo status is not available here.");
+      expect(narrative).toHaveTextContent("Read visit note");
+      const detail = narrative?.querySelector("details");
+      expect(detail).not.toHaveAttribute("open");
+      await user.click(within(card).getByText("Read visit note"));
+      expect(detail).toHaveAttribute("open");
+      expect(within(card).getByText("Clinical notes are not available here.")).toBeVisible();
+      expect(within(card).queryByRole("textbox")).not.toBeInTheDocument();
     }
     expect(listed.mock.calls).toEqual([[PAT], [PAT]]);
     expect(posts.posts).toEqual([]);

@@ -5,7 +5,9 @@ import { Link, Navigate, useBeforeUnload, useNavigate } from "react-router-dom";
 import { ROUTES } from "../../app/routes";
 import { useSession } from "../../app/SessionProvider";
 import { Badge, Button } from "../../design/components";
-import type { EncounterReadError } from "../../transport/native/encounter-read";
+import { formatDate } from "../../i18n/format";
+import { useLocale } from "../../i18n/LocaleProvider";
+import { type EncounterReadError, viewNativeEncounter } from "../../transport/native/encounter-read";
 import {
   completeLinkedEncounter,
   invalidLinkedEncounter,
@@ -185,6 +187,8 @@ function deskEncounterHref(id: string): string | null {
 
 function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; appointmentRef: string }) {
   const { t } = useTranslation();
+  const { locale } = useLocale();
+  const { authGeneration } = useSession();
   const navigate = useNavigate();
   const [record, setRecord] = useState(initial);
   const [clinical, setClinical] = useState<LinkedClinical>({});
@@ -201,6 +205,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   const inFlight = useRef(false);
   const readLifetime = useRef<AbortController | null>(null);
   const confirmLabel = useId();
+  const notePrompts = useId();
   const confirmation = useRef<HTMLDivElement>(null);
   const patientHeading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
@@ -213,6 +218,16 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   }, [submitKey, initial.encounter?.docstatus]);
 
   const { context, encounter, notes, medications } = record;
+  const encounterId = encounter?.id;
+  const identity = useQuery({
+    queryKey: ["linked-visit-identity", authGeneration, encounterId],
+    queryFn: ({ signal }) => encounterId ? viewNativeEncounter(encounterId, signal) : null,
+    enabled: Boolean(encounterId),
+    retry: false,
+    gcTime: 0,
+  });
+  const detail = identity.isFetchedAfterMount && !identity.isError && identity.data?.patientId === context.patient
+    ? identity.data : null;
   const completed = encounter?.docstatus === 1;
   const canReviewPrescriptions = medications.state === "available" && medications.complete;
   const deskHref = encounter && !canReviewPrescriptions ? deskEncounterHref(encounter.id) : null;
@@ -224,6 +239,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   const readLocked = Boolean(busy || uncertain || confirm);
   const locked = readLocked || recoveryUnavailable;
   const readOnly = completed || recoveryUnavailable;
+  const showEmptyComposer = !readOnly && notes.state === "available" && !notes.items.length && notes.next_offset === null;
   const hasClinicalChanges = Object.keys(clinical).length > 0;
   const dirty = hasClinicalChanges || edit !== null || prescription !== null;
   const medication = prescription ? prescriptionChange(prescription, medications) : null;
@@ -401,7 +417,8 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
         <div className="visit-preview-head">
           <div className="visit-identity-heading">
             <span className="visit-avatar" aria-hidden="true">✚</span>
-            <div><p>{t("clinical.patient")}</p><h2 ref={patientHeading} tabIndex={-1}>{context.patient}</h2></div>
+            <div><p>{t("clinical.patient")}{detail ? ` · ${context.patient}` : ""}</p>
+              <h2 ref={patientHeading} tabIndex={-1}>{detail?.patientName ?? context.patient}</h2></div>
           </div>
           <Link className="pc-button pc-button--secondary" to={ROUTES.patientHistory(context.patient)}>
             {t("workspace.patientHistory")}
@@ -410,6 +427,9 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
         <dl>
           <div><dt>{t("liveAppointments.reference")}</dt><dd>{context.appointment}</dd></div>
           <div><dt>{t("clinical.practitioner")}</dt><dd>{context.practitioner}</dd></div>
+          {detail?.encounterDate && <div><dt>{t("clinical.started")}</dt><dd>
+            <time dateTime={detail.encounterDate}>{formatDate(detail.encounterDate, locale)}</time>
+          </dd></div>}
           {encounter && <div><dt>{t("clinical.encounterId")}</dt><dd>{encounter.id}</dd></div>}
         </dl>
       </header>
@@ -417,14 +437,24 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
         status={encounter ? <EncounterStatus status={encounter.docstatus} /> :
           <Badge tone="warning">{t("linkedEncounter.unsaved")}</Badge>}
         details={<div className="visit-preview-stack">
-          {(["symptoms", "diagnoses"] as const).map((kind) => readOnly
-            ? <SavedTerms key={kind} kind={kind} items={clinical[kind] ?? encounter?.[kind] ?? []} />
-            : <ClinicalMasterPicker key={kind} kind={kind} selected={clinical[kind] ?? encounter?.[kind] ?? []}
-              disabled={locked} onChange={(values) => setClinical((prev) => ({ ...prev, [kind]: values }))} />)}
+          <div className="visit-preview-fields">
+            {(["symptoms", "diagnoses"] as const).map((kind) => readOnly
+              ? <SavedTerms key={kind} kind={kind} items={clinical[kind] ?? encounter?.[kind] ?? []} />
+              : <ClinicalMasterPicker key={kind} kind={kind} selected={clinical[kind] ?? encounter?.[kind] ?? []}
+                disabled={locked} onChange={(values) => setClinical((prev) => ({ ...prev, [kind]: values }))} />)}
+          </div>
+          <details className="visit-preview-details">
+            <summary>{t("workspace.moreDetails")}</summary>
+            <p className="pc-note">{t("nativeEncounter.commentUnavailable")}</p>
+          </details>
         </div>}
         note={notes.state === "unavailable" ? <p className="pc-note">{t("workspace.savedNoteUnavailable")}</p> :
           <div className="visit-preview-stack">
-            {!notes.items.length && <p className="pc-note">{t("linkedEncounter.noNotes")}</p>}
+            {!readOnly && <>
+              <p className="pc-note">{t("linkedEncounter.noteSaveHint")}</p>
+              <p id={notePrompts} className="visit-preview-prompts">{t("workspace.notePrompts")}</p>
+            </>}
+            {!notes.items.length && !showEmptyComposer && <p className="pc-note">{t("linkedEncounter.noNotes")}</p>}
             {notes.items.map((item) => {
               const content = noteContent(item.text);
               const lines = content.rich ? parseFormattedNote(item.text) : null;
@@ -450,22 +480,24 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
             {notes.next_offset !== null && <div><Button variant="secondary" disabled={readLocked || edit !== null} onClick={loadNotes}>
               {t(busy === "notes" ? "common.loading" : "linkedEncounter.moreNotes")}
             </Button></div>}
-            {!completed && (edit ? (
+            {!completed && (edit || showEmptyComposer ? (
               <div className="pc-field">
-                {edit.rich ? <FormattedNoteEditor lines={edit.rich.lines} disabled={locked} onChange={(value) => {
+                {edit?.rich ? <FormattedNoteEditor lines={edit.rich.lines} disabled={locked} onChange={(value) => {
                   setEdit((previous) => previous?.rich ? {
                     ...previous, text: value?.text ?? previous.text, rich: { ...previous.rich, html: value?.html ?? null },
                   } : previous);
                 }} /> : <label>{t("workspace.narrative")}
-                  <textarea value={edit.text} readOnly={recoveryUnavailable} disabled={readLocked}
-                    onChange={(event) => setEdit({ ...edit, text: event.target.value })} />
+                  <textarea rows={6} aria-describedby={!readOnly ? notePrompts : undefined}
+                    value={edit?.text ?? ""} readOnly={recoveryUnavailable} disabled={readLocked}
+                    onChange={(event) => {
+                      const text = event.target.value;
+                      setEdit(showEmptyComposer && text === "" ? null : edit ? { ...edit, text } : { original: null, text });
+                    }} />
                 </label>}
-                {!recoveryUnavailable && <>
-                  <p className="pc-note">{t("linkedEncounter.noteSaveHint")}</p>
+                {edit && !recoveryUnavailable &&
                   <div><Button variant="secondary" disabled={locked} onClick={() => setEdit(null)}>
                     {t("linkedEncounter.discardNote")}
-                  </Button></div>
-                </>}
+                  </Button></div>}
               </div>
             ) : !recoveryUnavailable && <div><Button variant="secondary" disabled={locked} onClick={() => setEdit({ original: null, text: "" })}>
               {t("linkedEncounter.addNote")}

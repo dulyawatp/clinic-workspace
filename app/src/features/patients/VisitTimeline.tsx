@@ -33,10 +33,23 @@ export function NativeVisitTimeline({ patientRef }: { patientRef: string }) {
   const loading = query.isPending || !query.isFetchedAfterMount || (query.isFetching && !query.isFetchingNextPage);
 
   return (
-    <section className="visit-workspace visit-preview" aria-labelledby="visit-timeline-heading">
+    <section className="visit-workspace visit-preview" aria-label={t("workspace.history")}>
+      {!loading && !query.isError && patient && (
+        <header className="visit-identity visit-preview-identity">
+          <div className="visit-preview-head">
+            <div className="visit-identity-heading">
+              <span className="visit-avatar" aria-hidden="true">✚</span>
+              <div><p>{t("clinical.patient")}</p><h2>{patient.patientName}</h2></div>
+            </div>
+            <Badge tone="info">{t("clinical.historyReadOnly")}</Badge>
+          </div>
+        </header>
+      )}
       <div className="visit-preview-head visit-history-heading">
-        <h2 id="visit-timeline-heading">{t("workspace.history")}</h2>
-        {!loading && !query.isError && patient && <p className="pc-note">{patient.patientName}</p>}
+        <div>
+          <p>{t("workspace.history")}</p>
+          <h2 id="visit-timeline-heading">{t("workspace.timeline")}</h2>
+        </div>
       </div>
       {query.isError ? (
         <EncounterReadFailure error={query.error} onRetry={() => void query.refetch()} />
@@ -56,13 +69,28 @@ export function NativeVisitTimeline({ patientRef }: { patientRef: string }) {
                     <span className="visit-history-date">{t("common.unavailable")}</span>
                   )}
                   <div className="visit-history-spine" aria-hidden="true" />
-                  <article className="visit-preview-card visit-native-history-card">
-                    <div className="visit-preview-head">
-                      <h3>{t("workspace.historyVisit", { id: visit.id })}</h3>
-                      <EncounterStatus status={visit.docstatus} />
+                  <article className="visit-preview-card visit-history-card visit-native-history-card"
+                    aria-labelledby={`native-history-${visit.id}`}>
+                    <div className="visit-history-intro visit-preview-stack">
+                      <div className="visit-preview-head">
+                        <h3 id={`native-history-${visit.id}`}>{t("workspace.historyVisit", { id: visit.id })}</h3>
+                        <EncounterStatus status={visit.docstatus} />
+                      </div>
+                      <p className="pc-note">{t("clinical.practitioner")}: {visit.practitioner || t("common.unavailable")}</p>
                     </div>
-                    <p className="pc-note">{t("clinical.practitioner")}: {visit.practitioner || t("common.unavailable")}</p>
-                    <LabReportDisclosure encounterId={visit.id} />
+                    <div className="visit-history-report">
+                      <LabReportDisclosure encounterId={visit.id} />
+                    </div>
+                    <div className="visit-history-evidence visit-preview-stack">
+                      <h4>{t("workspace.photos")}</h4>
+                      <p className="pc-note">{t("workspace.nativePhotosUnavailable")}</p>
+                    </div>
+                    <div className="visit-history-narrative visit-preview-stack">
+                      <details className="visit-preview-details">
+                        <summary>{t("workspace.readNote")}</summary>
+                        <p className="pc-note">{t("workspace.savedNoteUnavailable")}</p>
+                      </details>
+                    </div>
                   </article>
                 </li>
               ))}
