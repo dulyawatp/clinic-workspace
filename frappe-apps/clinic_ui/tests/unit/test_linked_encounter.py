@@ -250,6 +250,9 @@ class ModelFrappe:
             ("Prescription Dosage", "DOS-2"): dict(name="DOS-2"),
             ("Prescription Duration", "PER-1"): dict(name="PER-1"),
             ("Dosage Form", "FORM-1"): dict(name="FORM-1"),
+            ("Medication Request", "REQ-1"): dict(name="REQ-1"),
+            ("UOM", "UOM-1"): dict(name="UOM-1"),
+            ("Code Value", "CV-1"): dict(name="CV-1"),
         }
 
     def get_doc(self, doctype, name):
@@ -260,10 +263,16 @@ class ModelFrappe:
 
     def get_meta(self, doctype):
         return SimpleNamespace(
-            fields=[SimpleNamespace(fieldname=name, fieldtype="Link" if name in {
-                "drug_code", "dosage", "period", "dosage_form"} else "Data", options={
+            fields=[SimpleNamespace(fieldname=name, fieldtype={
+                "drug_code": "Link", "dosage": "Link", "period": "Link", "dosage_form": "Link",
+                "strength_uom": "Link", "intent": "Link", "priority": "Link",
+                "comment": "Small Text", "interval": "Int", "interval_uom": "Select",
+                "strength": "Float", "dosage_by_interval": "Check", "number_of_repeats_allowed": "Float",
+                "update_schedule": "Check",
+                }.get(name, "Data"), options={
                     "drug_code": "Item", "dosage": "Prescription Dosage",
                     "period": "Prescription Duration", "dosage_form": "Dosage Form",
+                    "strength_uom": "UOM", "intent": "Code Value", "priority": "Code Value",
                 }.get(name)) for name in (
                 "drug_code", "drug_name", "dosage", "period", "dosage_form",
                 "medication", "medication_request", "update_schedule",
@@ -425,6 +434,112 @@ class NativeModelFlowTests(unittest.TestCase):
         result = self.request(linked_encounter.open_for_appointment, "A1")
         self.assertEqual(result["medications"], {"state": "unavailable", "items": [], "complete": False})
         self.assertNotIn("ITEM-1", repr(result["medications"]))
+
+    def test_denied_medication_master_hides_section_and_blocks_edit(self):
+        self.request(linked_encounter.save_linked, {"appointment_ref": "A1", "expected_version": None,
+            "clinical": {"symptoms": ["Pain"], "note": {"id": None, "modified": None, "text": "note"},
+                         "medications": {"add": [{"drug_code": "ITEM-1", "dosage": "DOS-1", "period": "PER-1", "dosage_form": "FORM-1"}], "edit": []}}})
+        self.frappe.denied.add(("Item", "read", "ITEM-1"))
+        result = self.request(linked_encounter.open_for_appointment, "A1")
+        self.assertEqual(result["medications"], {"state": "unavailable", "items": [], "complete": False})
+        self.assertEqual(result["encounter"]["symptoms"], ["Pain"])
+        self.assertEqual(result["notes"]["items"][0]["text"], "note")
+        before = copy.deepcopy(self.frappe.docs)
+        with self.assertRaises(ValueError):
+            self.request(linked_encounter.save_linked, {"appointment_ref": "A1", "expected_version": "1",
+                "clinical": {"medications": {"add": [], "edit": [{"id": "DRUG-1", "dosage": "DOS-2", "period": "PER-1", "dosage_form": "FORM-1"}]}}})
+        self.assertEqual(self.frappe.docs, before)
+
+    def test_denied_request_and_detail_links_hide_medications(self):
+        self.request(linked_encounter.save_linked, {"appointment_ref": "A1", "expected_version": None,
+            "clinical": {"medications": {"add": [{"drug_code": "ITEM-1", "dosage": "DOS-1", "period": "PER-1", "dosage_form": "FORM-1"}], "edit": []}}})
+        row = self.frappe.docs[("Patient Encounter", "E1")]["drug_prescription"][0]
+        for field, value, doctype in (("medication_request", "REQ-1", "Medication Request"),
+                                      ("strength_uom", "UOM-1", "UOM"),
+                                      ("intent", "CV-1", "Code Value"),
+                                      ("priority", "CV-1", "Code Value")):
+            row[field] = value
+            self.frappe.denied.add((doctype, "read", value))
+            result = self.request(linked_encounter.open_for_appointment, "A1")
+            with self.subTest(field=field):
+                self.assertEqual(result["medications"]["state"], "unavailable")
+                self.assertNotIn(value, repr(result["medications"]))
+            self.frappe.denied.clear()
+            row[field] = None
+
+    def test_denied_standard_links_hide_medications(self):
+        self.request(linked_encounter.save_linked, {"appointment_ref": "A1", "expected_version": None,
+            "clinical": {"medications": {"add": [{"drug_code": "ITEM-1", "dosage": "DOS-1", "period": "PER-1", "dosage_form": "FORM-1"}], "edit": []}}})
+        for doctype, name in (("Prescription Dosage", "DOS-1"), ("Prescription Duration", "PER-1"), ("Dosage Form", "FORM-1")):
+            self.frappe.denied.add((doctype, "read", name))
+            with self.subTest(doctype=doctype):
+                result = self.request(linked_encounter.open_for_appointment, "A1")
+                self.assertEqual(result["medications"]["state"], "unavailable")
+                self.assertNotIn(name, repr(result["medications"]))
+            self.frappe.denied.clear()
+
+    def test_derived_drug_name_is_not_projected(self):
+        self.request(linked_encounter.save_linked, {"appointment_ref": "A1", "expected_version": None,
+            "clinical": {"medications": {"add": [{"drug_code": "ITEM-1", "dosage": "DOS-1", "period": "PER-1", "dosage_form": "FORM-1"}], "edit": []}}})
+        self.frappe.docs[("Patient Encounter", "E1")]["drug_prescription"][0]["drug_name"] = "SECRET NAME"
+        result = self.request(linked_encounter.open_for_appointment, "A1")
+        self.assertNotIn("SECRET NAME", repr(result))
+        self.assertNotIn("drug_name", result["medications"]["items"][0]["details"])
+
+    def test_stale_detail_link_schema_makes_medications_unavailable(self):
+        self.request(linked_encounter.save_linked, {"appointment_ref": "A1", "expected_version": None,
+            "clinical": {"medications": {"add": [{"drug_code": "ITEM-1", "dosage": "DOS-1", "period": "PER-1", "dosage_form": "FORM-1"}], "edit": []}}})
+        original = self.frappe.get_meta
+        def meta(doctype):
+            result = original(doctype)
+            if doctype == "Drug Prescription":
+                for field in result.fields:
+                    if field.fieldname == "strength_uom":
+                        field.options = "OTHER"
+            return result
+        self.frappe.get_meta = meta
+        self.assertEqual(self.request(linked_encounter.open_for_appointment, "A1")["medications"]["state"], "unavailable")
+
+    def test_malformed_prescription_metadata_is_unavailable(self):
+        self.request(linked_encounter.save_linked, {"appointment_ref": "A1", "expected_version": None,
+            "clinical": {"medications": {"add": [{"drug_code": "ITEM-1", "dosage": "DOS-1", "period": "PER-1", "dosage_form": "FORM-1"}], "edit": []}}})
+        original = self.frappe.get_meta
+        def meta(doctype):
+            result = original(doctype)
+            if doctype == "Drug Prescription":
+                result.fields = None
+            return result
+        self.frappe.get_meta = meta
+        self.assertEqual(self.request(linked_encounter.open_for_appointment, "A1")["medications"]["state"], "unavailable")
+
+    def test_unexpected_reference_failure_propagates(self):
+        self.request(linked_encounter.save_linked, {"appointment_ref": "A1", "expected_version": None,
+            "clinical": {"medications": {"add": [{"drug_code": "ITEM-1", "dosage": "DOS-1", "period": "PER-1", "dosage_form": "FORM-1"}], "edit": []}}})
+        original = self.frappe.get_doc
+        def get_doc(doctype, name):
+            if doctype == "Item":
+                raise RuntimeError("unexpected native failure")
+            return original(doctype, name)
+        self.frappe.get_doc = get_doc
+        with self.assertRaisesRegex(RuntimeError, "unexpected native failure"):
+            self.request(linked_encounter.open_for_appointment, "A1")
+
+    def test_duplicate_references_checked_once_per_projection(self):
+        self.request(linked_encounter.save_linked, {"appointment_ref": "A1", "expected_version": None,
+            "clinical": {"medications": {"add": [{"drug_code": "ITEM-1", "dosage": "DOS-1", "period": "PER-1", "dosage_form": "FORM-1"}], "edit": []}}})
+        rows = self.frappe.docs[("Patient Encounter", "E1")]["drug_prescription"]
+        rows.append(dict(rows[0], name="DRUG-2"))
+        self.frappe.get_doc = Mock(wraps=self.frappe.get_doc)
+        result = self.request(linked_encounter.open_for_appointment, "A1")
+        self.assertEqual(len(result["medications"]["items"]), 2)
+        self.assertEqual(self.frappe.get_doc.call_args_list.count(unittest.mock.call("Item", "ITEM-1")), 1)
+
+    def test_missing_request_is_unavailable_not_unissued(self):
+        self.request(linked_encounter.save_linked, {"appointment_ref": "A1", "expected_version": None,
+            "clinical": {"medications": {"add": [{"drug_code": "ITEM-1", "dosage": "DOS-1", "period": "PER-1", "dosage_form": "FORM-1"}], "edit": []}}})
+        self.frappe.docs[("Patient Encounter", "E1")]["drug_prescription"][0]["medication_request"] = "MISSING"
+        self.assertEqual(self.request(linked_encounter.open_for_appointment, "A1")["medications"],
+                         {"state": "unavailable", "items": [], "complete": False})
 
     def test_medication_projection_signals_incomplete_at_limit(self):
         self.request(linked_encounter.save_linked, {"appointment_ref": "A1", "expected_version": None,

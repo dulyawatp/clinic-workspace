@@ -569,15 +569,37 @@ class Gateway:
             raise LinkedFieldAccessError("medication table unavailable")
         meta = self.frappe.get_meta("Drug Prescription")
         layout = {"Section Break", "Column Break", "Tab Break", "HTML", "Heading"}
-        fields = [field.fieldname for field in meta.fields
-                  if field.fieldname and field.fieldtype not in layout]
-        required = {"drug_code", "dosage", "period", "dosage_form", "medication_request"}
-        if not required.issubset(fields):
+        definitions = getattr(meta, "fields", None)
+        if not isinstance(definitions, (list, tuple)):
+            raise LinkedFieldAccessError("medication schema unavailable")
+        if any(getattr(field, "fieldname", None) and not isinstance(getattr(field, "fieldtype", None), str)
+               for field in definitions):
+            raise LinkedFieldAccessError("medication schema unavailable")
+        fields = [field.fieldname for field in definitions
+                  if getattr(field, "fieldname", None) and getattr(field, "fieldtype", None) not in layout]
+        expected = {
+            "drug_code": ("Link", "Item"),
+            "dosage": ("Link", "Prescription Dosage"),
+            "period": ("Link", "Prescription Duration"),
+            "dosage_form": ("Link", "Dosage Form"),
+            "medication_request": ("Data", None),
+            "strength_uom": ("Link", "UOM"),
+            "intent": ("Link", "Code Value"),
+            "priority": ("Link", "Code Value"),
+            "comment": ("Small Text", None),
+            "interval": ("Int", None),
+            "interval_uom": ("Select", None),
+            "strength": ("Float", None),
+            "dosage_by_interval": ("Check", None),
+            "number_of_repeats_allowed": ("Float", None),
+            "update_schedule": ("Check", None),
+        }
+        if not set(expected).issubset(fields):
             raise LinkedFieldAccessError("medication fields unavailable")
-        links = {"drug_code": "Item", "dosage": "Prescription Dosage",
-                 "period": "Prescription Duration", "dosage_form": "Dosage Form"}
-        if any(not any(field.fieldname == key and field.fieldtype == "Link" and field.options == target
-                       for field in meta.fields) for key, target in links.items()):
+        if any(len([field for field in definitions if getattr(field, "fieldname", None) == key
+                    and getattr(field, "fieldtype", None) == kind
+                    and (target is None or getattr(field, "options", None) == target)]) != 1
+               or fields.count(key) != 1 for key, (kind, target) in expected.items()):
             raise LinkedFieldAccessError("medication link schema unavailable")
         self._linked_fields("Drug Prescription", fields, "read", parent)
         if ptype == "write":
@@ -600,23 +622,40 @@ class Gateway:
         unavailable = {"state": "unavailable", "items": [], "complete": False}
         try:
             fields = self._linked_medication_schema()
-        except (self.frappe.PermissionError, LinkedFieldAccessError):
+            rows = doc.drug_prescription
+            items = []
+            checked = set()
+            references = {
+                "drug_code": "Item", "dosage": "Prescription Dosage",
+                "period": "Prescription Duration", "dosage_form": "Dosage Form",
+                "medication_request": "Medication Request", "strength_uom": "UOM",
+                "intent": "Code Value", "priority": "Code Value",
+            }
+            for row in rows[:100]:
+                for field, doctype in references.items():
+                    value = self._row_value(row, field)
+                    if value in (None, ""):
+                        continue
+                    if not isinstance(value, str) or not value.strip():
+                        raise LinkedFieldAccessError("medication reference unavailable")
+                    ref = (doctype, value)
+                    if ref not in checked:
+                        self.frappe.get_doc(doctype, value).check_permission("read")
+                        checked.add(ref)
+                items.append({
+                    "id": self._row_value(row, "name"),
+                    **{key: self._row_value(row, key) for key in
+                       ("drug_code", "dosage", "period", "dosage_form", "medication_request")},
+                    "details": {key: self._row_value(row, key) for key in (
+                        "comment", "interval", "interval_uom", "strength",
+                        "strength_uom", "dosage_by_interval", "number_of_repeats_allowed",
+                        "intent", "priority", "update_schedule",
+                    )},
+                    "supported": self._linked_medication_supported(row, fields),
+                })
+            return {"state": "available", "items": items, "complete": len(rows) <= 100}
+        except (self.frappe.PermissionError, self.frappe.DoesNotExistError, LinkedFieldAccessError):
             return unavailable
-        rows = doc.drug_prescription
-        items = []
-        for row in rows[:100]:
-            items.append({
-                "id": self._row_value(row, "name"),
-                **{key: self._row_value(row, key) for key in
-                   ("drug_code", "dosage", "period", "dosage_form", "medication_request")},
-                "details": {key: self._row_value(row, key) for key in (
-                    "drug_name", "comment", "interval", "interval_uom", "strength",
-                    "strength_uom", "dosage_by_interval", "number_of_repeats_allowed",
-                    "intent", "priority", "update_schedule",
-                ) if key in fields},
-                "supported": self._linked_medication_supported(row, fields),
-            })
-        return {"state": "available", "items": items, "complete": len(rows) <= 100}
 
     def linked_project(self, context, encounter, note_offset=0):
         public_context = {key: value for key, value in context.items() if not key.startswith("_")}
@@ -660,6 +699,13 @@ class Gateway:
             operations = clinical["medications"]
             if encounter is None and operations["edit"]:
                 raise LinkedEncounterError("medication edit requires a persisted draft")
+            if operations["edit"]:
+                projected = self._linked_medications(doc)
+                if projected["state"] != "available":
+                    raise LinkedEncounterError("medication row unavailable or unsupported")
+                visible = {row["id"] for row in projected["items"] if row["supported"]}
+                if any(edit["id"] not in visible for edit in operations["edit"]):
+                    raise LinkedEncounterError("medication row unavailable or unsupported")
             for edit in operations["edit"]:
                 matches = [row for row in doc.drug_prescription if self._row_value(row, "name") == edit["id"]]
                 if len(matches) != 1 or not self._linked_medication_supported(matches[0], fields):
