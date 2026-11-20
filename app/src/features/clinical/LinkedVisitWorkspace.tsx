@@ -23,7 +23,7 @@ import { EncounterLayout, EncounterReadFailure, EncounterStatus, SavedTerms } fr
 import { FormattedNoteEditor, FormattedNotePreview } from "./LinkedFormattedNote";
 import { LinkedPrescriptions, prescriptionChange, type PrescriptionDraft, PrescriptionRecovery } from "./LinkedPrescriptions";
 import { NativeLabReportPanel } from "./NativeLabReports";
-import { encodeNoteText, notePlainText, type NoteLine, parseFormattedNote, serializeFormattedNote } from "./linked-note-format";
+import { encodeNoteText, noteContent, notePlainText, type NoteLine, parseFormattedNote, serializeFormattedNote } from "./linked-note-format";
 
 type Kind = "symptoms" | "diagnoses";
 
@@ -113,22 +113,6 @@ export function LinkedVisitWorkspace({ appointmentRef, encounterId }: {
     return <Navigate replace to={ROUTES.linkedVisit(appointmentRef, query.data.encounter.id)} />;
   }
   return <LinkedVisit initial={query.data} appointmentRef={appointmentRef} />;
-}
-
-// Template contents are inert and never inserted into the document. Render only
-// text, not native HTML, and don't offer a plain-text replacement for markup.
-function noteContent(source: string) {
-  const template = document.createElement("template");
-  template.innerHTML = source;
-  const rich = /<[a-z!/]/i.test(source);
-  function readable(node: Node): string {
-    if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
-    if (node.nodeType === Node.ELEMENT_NODE &&
-        /^(script|style|template|noscript|iframe|object|svg)$/i.test(node.nodeName)) return "";
-    const children = Array.from(node.childNodes, readable).join("");
-    return /^(br|div|p|li|tr|h[1-6])$/i.test(node.nodeName) ? `${children}\n` : children;
-  }
-  return { text: rich ? readable(template.content).trim() : template.content.textContent ?? "", rich };
 }
 
 type NoteEdit = {

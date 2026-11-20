@@ -124,6 +124,21 @@ export function noteLines(delta: Delta): NoteLine[] | null {
   return lines.length && !runs.length ? lines : null;
 }
 
+// Parse in an inert template. Unsupported formatting is shown as text only.
+export function noteContent(source: string) {
+  const template = document.createElement("template");
+  template.innerHTML = source;
+  const rich = /<[a-z!/]/i.test(source);
+  function readable(node: Node): string {
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
+    if (node.nodeType === Node.ELEMENT_NODE &&
+        /^(script|style|template|noscript|iframe|object|svg)$/i.test(node.nodeName)) return "";
+    const children = Array.from(node.childNodes, readable).join("");
+    return /^(br|div|p|li|tr|h[1-6])$/i.test(node.nodeName) ? `${children}\n` : children;
+  }
+  return { text: rich ? readable(template.content).trim() : template.content.textContent ?? "", rich };
+}
+
 export function encodeNoteText(text: string): string {
   return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }

@@ -11,6 +11,8 @@ import { renderWithDataRouter } from "../../test/render";
 import type { LinkedMedication } from "../../transport/native/linked-encounter";
 
 const METHOD = "/api/method/clinic_ui.api.encounters.";
+const NOTES_LIST = "/api/method/frappe.client.get_list";
+const NOTE_READ = "/api/method/frappe.client.get";
 const REF = "wsa1_0123456789abcdef0123456789abcdef_0123456789abcdef_abcdefghijklmnop";
 const APT = "APT-REAL";
 const PAT = "PAT-REAL";
@@ -881,6 +883,7 @@ it("opens the same read-only patient timeline from Patient History and the encou
     }),
     http.get(`${METHOD}open_for_appointment`, () => reply(completed)),
     http.get(`${METHOD}view`, () => reply({ ...row, symptoms: [], diagnoses: [] })),
+    http.get(NOTES_LIST, () => new HttpResponse(null, { status: 503 })),
   );
   const posts = postSpy();
   try {
@@ -909,7 +912,7 @@ it("opens the same read-only patient timeline from Patient History and the encou
       expect(detail).not.toHaveAttribute("open");
       await user.click(within(card).getByText("Read visit note"));
       expect(detail).toHaveAttribute("open");
-      expect(within(card).getByText("Clinical notes are not available here.")).toBeVisible();
+      expect(await within(card).findByText("Clinical notes are not available here.")).toBeVisible();
       expect(within(card).queryByRole("textbox")).not.toBeInTheDocument();
     }
     expect(listed.mock.calls).toEqual([[PAT], [PAT]]);
@@ -917,6 +920,93 @@ it("opens the same read-only patient timeline from Patient History and the encou
   } finally {
     posts.stop();
   }
+});
+
+const historyRow = { id: ENC, patientId: PAT, patientName: "Native patient", practitioner: null, encounterDate: null, docstatus: 1 };
+const historyNote = (name: string, text: string) => ({
+  doctype: "Clinical Note", name, patient: PAT, reference_doc: "Patient Encounter", reference_name: ENC, note: text,
+});
+
+it("reads exact native names lazily, rechecks each note, renders safely and paginates without editor controls", async () => {
+  const lists = vi.fn();
+  const reads = vi.fn();
+  const names = Array.from({ length: 11 }, (_, index) => `NOTE-${index.toString().padStart(2, "0")}`);
+  server.use(
+    http.get(`${METHOD}list_for_patient`, () => reply({ items: [historyRow], nextOffset: null })),
+    http.get(NOTES_LIST, ({ request }) => {
+      const params = new URL(request.url).searchParams;
+      const offset = params.get("limit_start");
+      lists(params.get("doctype"), JSON.parse(params.get("filters") ?? ""), params.get("fields"),
+        params.get("order_by"), params.get("limit_page_length"), offset);
+      return reply((offset === "0" ? names : names.slice(10)).map((name) => ({ name })));
+    }),
+    http.get(NOTE_READ, ({ request }) => {
+      const params = new URL(request.url).searchParams;
+      const name = params.get("name") ?? "";
+      reads(params.get("doctype"), name);
+      const text = name === names[0] ? '<div class="ql-editor read-mode"><p><strong>Formatted follow-up</strong></p></div>' :
+        name === names[1] ? '<p>Fallback note</p><img src="/unexpected-file"><script>unsafe payload</script>' :
+          `Narrative ${name}`;
+      return reply(historyNote(name, text));
+    }),
+  );
+  const posts = postSpy();
+  try {
+    // Route is a workspace alias, not the native patient identity used in the filter.
+    setup(ROUTES.patientHistory("workspace-alias"));
+    const summary = await screen.findByText("Read visit note");
+    expect(lists).not.toHaveBeenCalled();
+    expect(reads).not.toHaveBeenCalled();
+    const user = userEvent.setup();
+    await user.click(summary);
+    const supported = await screen.findByText("Formatted follow-up", { selector: "strong" });
+    expect(supported).toBeVisible();
+    expect(screen.getByText("Fallback note")).toBeVisible();
+    expect(screen.queryByText("unsafe payload")).not.toBeInTheDocument();
+    expect(document.querySelector('img[src="/unexpected-file"]')).toBeNull();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(reads.mock.calls).toEqual(names.slice(0, 10).map((name) => ["Clinical Note", name]));
+    await user.click(screen.getByRole("button", { name: "Load more notes" }));
+    expect(await screen.findByText(`Narrative ${names[10]}`)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Load more notes" })).not.toBeInTheDocument();
+    expect(lists.mock.calls).toEqual(["0", "10"].map((offset) => [
+      "Clinical Note", { reference_doc: "Patient Encounter", reference_name: ENC, patient: PAT },
+      '["name"]', "name asc", "11", offset,
+    ]));
+    expect(reads).toHaveBeenLastCalledWith("Clinical Note", names[10]);
+    expect(posts.posts).toEqual([]);
+  } finally {
+    posts.stop();
+  }
+});
+
+it.each([
+  ["denied list", 403, null, "Permission denied"],
+  ["denied document", 200, 403, "Permission denied"],
+  ["empty", 200, null, "No clinical notes to display."],
+  ["mismatched patient", 200, { patient: "OTHER" }, "Clinical notes are not available here."],
+  ["mismatched encounter", 200, { reference_name: "OTHER" }, "Clinical notes are not available here."],
+  ["wrong reference doctype", 200, { reference_doc: "Patient Appointment" }, "Clinical notes are not available here."],
+  ["masked note", 200, { note: "XXXXXXXX" }, "Clinical notes are not available here."],
+  ["stripped note", 200, { note: undefined }, "Clinical notes are not available here."],
+  ["unavailable list", 503, null, "Clinical notes are not available here."],
+] as const)("shows the correct timeline note state: %s", async (_, status, document, message) => {
+  const read = vi.fn();
+  server.use(
+    http.get(`${METHOD}list_for_patient`, () => reply({ items: [historyRow], nextOffset: null })),
+    http.get(NOTES_LIST, () => status !== 200 ? new HttpResponse(null, { status }) :
+      reply(document === null ? [] : [{ name: "NOTE-PRIVATE" }])),
+    http.get(NOTE_READ, () => {
+      read();
+      return typeof document === "number" ? new HttpResponse(null, { status: document }) :
+        reply({ ...historyNote("NOTE-PRIVATE", "Private note must not render"), ...document });
+    }),
+  );
+  setup(ROUTES.patientHistory(PAT));
+  await userEvent.setup().click(await screen.findByText("Read visit note"));
+  expect(await screen.findByText(message)).toBeVisible();
+  expect(screen.queryByText("Private note must not render")).not.toBeInTheDocument();
+  expect(read).toHaveBeenCalledTimes(document === null ? 0 : 1);
 });
 
 it("does not expose the standalone unlinked draft in staff navigation or the router", async () => {
