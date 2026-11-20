@@ -1005,8 +1005,21 @@ class Gateway:
             start=offset,
             page_length=21,
         )
+        items = []
+        for row in rows[:20]:
+            try:
+                doc = self.frappe.get_doc(ENCOUNTER_DOCTYPE, self._row_value(row, "name"))
+                if not self.frappe.has_permission(
+                    ENCOUNTER_DOCTYPE, ptype="read", doc=doc, user=self.frappe.session.user
+                ):
+                    continue
+                if self._row_value(doc, "patient") != patient:
+                    continue
+            except (self.frappe.PermissionError, self.frappe.DoesNotExistError):
+                continue
+            items.append(self._encounter_summary(doc))
         return {
-            "items": [self._encounter_summary(row) for row in rows[:20]],
+            "items": items,
             "nextOffset": offset + 20 if len(rows) > 20 and offset + 20 <= 1000000 else None,
         }
 

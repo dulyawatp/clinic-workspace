@@ -32,6 +32,7 @@ class Meta:
 
 class Frappe:
     PermissionError = Denied
+    DoesNotExistError = Missing
 
     def __init__(self):
         self.session = SimpleNamespace(user="doctor")
@@ -39,6 +40,7 @@ class Frappe:
         self.allowed = True
         self.patient_allowed = True
         self.denied_docs = set()
+        self.query_denied_docs = set()
         self.rows = [
             {"name": f"ENC-{n:02}", "patient": "PAT-1", "practitioner": "DR-1",
              "encounter_date": "2026-01-01", "docstatus": 0}
@@ -74,7 +76,7 @@ class Frappe:
         if not self.allowed:
             raise Denied()
         rows = [row for row in self.rows if row["patient"] == kwargs["filters"]["patient"]
-                and row["name"] not in self.denied_docs]
+                and row["name"] not in self.query_denied_docs]
         rows.sort(key=lambda row: (row["encounter_date"], row["name"]), reverse=True)
         start = kwargs["start"]
         return [{field: row[field] for field in kwargs["fields"]}
@@ -216,6 +218,66 @@ class EncounterReadTests(unittest.TestCase):
                      self.frappe.db.commit, self.frappe.db.rollback,
                      *self.frappe.document_writes):
             call.assert_not_called()
+
+    def test_document_denial_does_not_leak_and_sparse_page_continues(self):
+        self.frappe.denied_docs = {f"ENC-{n:02}" for n in range(5, 25)}
+        first = self.gateway.list_patient_encounters("PAT-1", 0)
+        self.assertEqual(first, {"items": [], "nextOffset": 20})
+        second = self.gateway.list_patient_encounters("PAT-1", first["nextOffset"])
+        self.assertEqual([item["id"] for item in second["items"]],
+                         ["ENC-04", "ENC-03", "ENC-02", "ENC-01", "ENC-00"])
+        self.assertIsNone(second["nextOffset"])
+
+    def test_candidate_missing_or_denied_is_skipped_unexpected_error_propagates(self):
+        original = self.frappe.get_doc
+        def load(doctype, name):
+            if name == "ENC-24":
+                raise Missing()
+            if name == "ENC-23":
+                raise Denied()
+            return original(doctype, name)
+        with patch.object(self.frappe, "get_doc", side_effect=load):
+            result = self.gateway.list_patient_encounters("PAT-1", 0)
+        self.assertEqual(result["items"][0]["id"], "ENC-22")
+        self.assertEqual(result["nextOffset"], 20)
+        with patch.object(self.frappe, "get_doc", side_effect=RuntimeError("unexpected")):
+            with self.assertRaisesRegex(RuntimeError, "unexpected"):
+                self.gateway.list_patient_encounters("PAT-1", 0)
+
+    def test_query_filter_and_document_hook_are_independent(self):
+        self.frappe.query_denied_docs.add("ENC-24")
+        original = self.frappe.has_permission
+        def check(doctype, ptype="read", doc=None, user=None):
+            if getattr(doc, "name", None) == "ENC-23":
+                raise Denied()
+            return original(doctype, ptype=ptype, doc=doc, user=user)
+        with patch.object(self.frappe, "has_permission", side_effect=check):
+            result = self.gateway.list_patient_encounters("PAT-1", 0)
+        self.assertEqual(result["items"][0]["id"], "ENC-22")
+        self.assertNotIn("ENC-23", str(result))
+        self.assertNotIn("ENC-24", str(result))
+        def broken(doctype, ptype="read", doc=None, user=None):
+            if getattr(doc, "name", None) == "ENC-23":
+                raise RuntimeError("hook failed")
+            return original(doctype, ptype=ptype, doc=doc, user=user)
+        with patch.object(self.frappe, "has_permission", side_effect=broken):
+            with self.assertRaisesRegex(RuntimeError, "hook failed"):
+                self.gateway.list_patient_encounters("PAT-1", 0)
+
+    def test_actual_document_patient_and_fields_override_candidate(self):
+        original = self.frappe.get_doc
+        def load(doctype, name):
+            doc = original(doctype, name)
+            if name == "ENC-24":
+                doc.patient = "PAT-OTHER"
+            if name == "ENC-23":
+                doc.practitioner = "ACTUAL-DOCTOR"
+            return doc
+        with patch.object(self.frappe, "get_doc", side_effect=load):
+            result = self.gateway.list_patient_encounters("PAT-1", 0)
+        self.assertEqual(result["items"][0]["id"], "ENC-23")
+        self.assertEqual(result["items"][0]["practitioner"], "ACTUAL-DOCTOR")
+        self.assertNotIn("ENC-24", str(result))
 
     def test_order_is_stable_across_pages_with_equal_dates(self):
         first = self.gateway.list_patient_encounters("PAT-1", 0)
