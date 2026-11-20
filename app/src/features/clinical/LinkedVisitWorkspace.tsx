@@ -19,6 +19,7 @@ import {
 import { StatePanel } from "../../ui/StatePanel";
 import { EncounterLayout, EncounterReadFailure, EncounterStatus, SavedTerms } from "./ApprovedVisitWorkspace";
 import { FormattedNoteEditor, FormattedNotePreview } from "./LinkedFormattedNote";
+import { LinkedPrescriptions, prescriptionChange, type PrescriptionDraft, PrescriptionRecovery } from "./LinkedPrescriptions";
 import { encodeNoteText, notePlainText, type NoteLine, parseFormattedNote, serializeFormattedNote } from "./linked-note-format";
 
 type Kind = "symptoms" | "diagnoses";
@@ -176,6 +177,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   const [record, setRecord] = useState(initial);
   const [clinical, setClinical] = useState<LinkedClinical>({});
   const [edit, setEdit] = useState<NoteEdit | null>(null);
+  const [prescription, setPrescription] = useState<PrescriptionDraft | null>(null);
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState<Operation | null>(null);
   const saveKey = pendingKey("save", initial.context.appointment);
@@ -198,7 +200,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
     if (submitKey && initial.encounter?.docstatus === 1) clearPending(submitKey);
   }, [submitKey, initial.encounter?.docstatus]);
 
-  const { context, encounter, notes } = record;
+  const { context, encounter, notes, medications } = record;
   const completed = encounter?.docstatus === 1;
   useEffect(() => {
     if (confirm) confirmation.current?.focus();
@@ -209,17 +211,19 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   const locked = readLocked || recoveryUnavailable;
   const readOnly = completed || recoveryUnavailable;
   const hasClinicalChanges = Object.keys(clinical).length > 0;
-  const dirty = hasClinicalChanges || edit !== null;
+  const dirty = hasClinicalChanges || edit !== null || prescription !== null;
+  const medication = prescription ? prescriptionChange(prescription, medications) : null;
   const noteChanged = edit && (edit.rich ? edit.rich.html !== null && edit.rich.html !== edit.rich.baseline :
     edit.text !== (edit.original ? noteContent(edit.original.text).text : ""));
   const saveInput: LinkedClinical = {
     ...clinical,
+    ...(medication?.changes && { medications: medication.changes }),
     ...(noteChanged && { note: {
       id: edit.original?.id ?? null, modified: edit.original?.modified ?? null,
       text: edit.rich?.html ?? encodeNoteText(edit.text),
     } }),
   };
-  const cannotSave = (encounter !== null && !hasClinicalChanges && !noteChanged) ||
+  const cannotSave = medication?.invalid || (encounter !== null && !hasClinicalChanges && !noteChanged && !medication?.changes) ||
     Boolean(edit && ((!edit.rich && !edit.text.trim()) || edit.rich?.html === null || (noteChanged && !edit.text.trim())));
   useBeforeUnload((event) => {
     if ((uncertain?.kind === "save" || busy === "save") && dirty) {
@@ -246,6 +250,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
     setRecovery({ unavailable: false, uncertain: null });
     setClinical({});
     setEdit(null);
+    setPrescription(null);
     setPageError(false);
     setRecord(next);
     if (next.encounter && (!encounter || next.encounter.docstatus === 1)) {
@@ -368,6 +373,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
             {edit && <div className="pc-field">
               <label>{t("workspace.narrative")}<textarea readOnly value={edit.text} /></label>
             </div>}
+            {prescription && <PrescriptionRecovery draft={prescription} />}
           </div>
         )}
       </div>
@@ -451,15 +457,18 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
               {t("linkedEncounter.addNote")}
             </Button></div>)}
           </div>}
-        medications={<p className="pc-note">{t("workspace.savedMedicationsUnavailable")}</p>}
+        medications={<LinkedPrescriptions medications={medications} draft={prescription} editable={!readOnly}
+          locked={locked} onChange={setPrescription} />}
       />
        {(feedback || !completed) && (
         <div className="visit-preview-card visit-preview-actions visit-preview-stack">
           {recoveryUnavailable && <p role="alert">{t("linkedEncounter.recoveryUnavailable")}</p>}
           {feedback && <p role={feedback === "linkedEncounter.saved" ? "status" : "alert"}>{t(feedback)}</p>}
           {confirm ? (
-            <div role="group" aria-labelledby={confirmLabel} className="visit-preview-stack" ref={confirmation} tabIndex={-1}>
+            <div role="group" aria-labelledby={confirmLabel} aria-describedby={`${confirmLabel}-orders`}
+              className="visit-preview-stack" ref={confirmation} tabIndex={-1}>
               <p id={confirmLabel}>{t("linkedEncounter.confirmHint")}</p>
+              <p id={`${confirmLabel}-orders`} className="pc-note">{t("linkedRx.submitWarning")}</p>
               <div className="pc-row">
                 <Button variant="primary" disabled={Boolean(busy)} onClick={() => persist("submit")}>{t("linkedEncounter.confirm")}</Button>
                 <Button variant="secondary" disabled={Boolean(busy)} onClick={() => setConfirm(false)}>{t("linkedEncounter.back")}</Button>
