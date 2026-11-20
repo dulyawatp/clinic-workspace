@@ -8,6 +8,7 @@ SITE = "marley-sit.local"
 DEPLOYMENT_ID = "clinic-shared-sit-payment-v1"
 PROOF_DIRECTORY = "clinic_ui_sit_payment_proof"
 TABLE = "`tabClinic UI SIT Payment Slot`"
+PROFILE_SETTING = "clinic_ui_payment_deployment_profile"
 
 
 class SlotUnavailable(Exception):
@@ -24,6 +25,28 @@ def shared_sit_payment_identity(gateway):
     except (deployment_marker.MarkerError, OSError, TypeError):
         return None
     return DEPLOYMENT_ID
+
+
+def payment_lane(gateway):
+    """Select from operator-owned site_config.json, never request input.
+
+    The trusted operator must protect the site configuration from untrusted
+    modification independently of the private deployment proof.
+    """
+    if gateway.site != SITE:
+        return "legacy"
+    try:
+        profile = gateway.setting(PROFILE_SETTING)
+        if profile == "legacy":
+            return "legacy"
+        if (
+            profile == "shared_slot_v1"
+            and shared_sit_payment_identity(gateway) == DEPLOYMENT_ID
+        ):
+            return "shared_slot_v1"
+    except Exception:
+        pass
+    return "blocked"
 
 
 def initial_state(history):

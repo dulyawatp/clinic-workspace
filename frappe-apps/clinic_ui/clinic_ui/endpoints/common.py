@@ -250,6 +250,17 @@ def authorize_purchase_draft_write(gateway, allowed_codes, csrf_token=None):
     return settings, view, role
 
 
+def _authorize_finance_base(gateway, allowed_codes, csrf_token=None):
+    settings, view, role = authorize(gateway, allowed_codes)
+    if view.user == write_fence.LATCH_ACTOR:
+        gateway.deny()
+    if not gateway.csrf_token_valid(csrf_token):
+        gateway.deny()
+    if not settings.finance_write_enabled:
+        gateway.deny()
+    return settings, view, role
+
+
 def authorize_finance_write(gateway, allowed_codes, csrf_token=None):
     """Read gate, explicit CSRF, and the separate finance-write gate.
 
@@ -260,13 +271,7 @@ def authorize_finance_write(gateway, allowed_codes, csrf_token=None):
     configuration value is authority on its own.
     """
 
-    settings, view, role = authorize(gateway, allowed_codes)
-    if view.user == write_fence.LATCH_ACTOR:
-        gateway.deny()
-    if not gateway.csrf_token_valid(csrf_token):
-        gateway.deny()
-    if not settings.finance_write_enabled:
-        gateway.deny()
+    settings, view, role = _authorize_finance_base(gateway, allowed_codes, csrf_token)
     if not gateway.write_deployment_approved():
         gateway.deny()
     return settings, view, role

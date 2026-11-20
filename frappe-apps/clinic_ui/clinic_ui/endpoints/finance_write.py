@@ -187,6 +187,22 @@ def _shared_gate(gateway, csrf_token, allowed_codes):
     return settings, view, role
 
 
+def _shared_sit_payment_gate(gateway, csrf_token):
+    gateway.refresh_site_config()
+    settings, view, role = common._authorize_finance_base(
+        gateway, PAYMENT_ROLE_CODES, csrf_token
+    )
+    if role not in PAYMENT_ROLE_CODES:
+        gateway.deny()
+    if sit_payment_slot.payment_lane(gateway) != "shared_slot_v1":
+        gateway.deny()
+    if gateway.native_finance_boundary_problem() is not None:
+        gateway.deny()
+    if gateway.native_finance_payment_install_problem() is not None:
+        gateway.deny()
+    return settings, view, role
+
+
 def _invoice_gate(gateway, csrf_token):
     """Converted invoice gate: session, CSRF, exact site, flag, role, preflight.
 

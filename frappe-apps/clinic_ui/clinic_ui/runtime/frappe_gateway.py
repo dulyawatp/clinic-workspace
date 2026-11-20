@@ -8265,7 +8265,13 @@ class Gateway:
 
     def native_finance_payment_detail(self, payload):
         """Read the pre-fence payment decision fields."""
+        return self._native_finance_payment_detail(payload, include_legacy=True)
 
+    def shared_sit_finance_payment_detail(self, payload):
+        """Read payment fields without consulting the legacy fence."""
+        return self._native_finance_payment_detail(payload, include_legacy=False)
+
+    def _native_finance_payment_detail(self, payload, *, include_legacy):
         try:
             company, _currency = self._purchase_company_currency()
             defaults = self._finance_company_defaults(company)
@@ -8280,8 +8286,9 @@ class Gateway:
                 "mode": self._finance_mode_of_payment(
                     payload["mode_of_payment"], company
                 ),
-                "payment_exists": self._finance_payment_recorded(
-                    payload["invoice"]
+                "payment_exists": (
+                    self._finance_payment_recorded(payload["invoice"])
+                    if include_legacy else False
                 ),
                 "receivable_account": (
                     invoice.get("debit_to") or ""
