@@ -928,6 +928,132 @@ class Gateway:
         except Exception:
             return False
 
+    def _encounter_read_denied(self):
+        self.frappe.throw("Not permitted", self.frappe.PermissionError)
+
+    def _resolve_encounter_alias(self, ref):
+        from clinic_ui.core.policy import PATIENT_VIEW_ROLE_CODES
+        from clinic_ui.endpoints import aliases, common
+
+        settings, session, role = common.authorize(self, PATIENT_VIEW_ROLE_CODES)
+        resolved = aliases.resolve_read(self, settings, session.user, role, ref)
+        return resolved.native_patient_id
+
+    def _encounter_patient_ref(self, ref):
+        from clinic_ui.core import config, patient_alias
+        from clinic_ui.core.text import is_valid_identifier, normalize_identifier
+
+        ref = normalize_identifier(ref)
+        if not is_valid_identifier(ref):
+            self._encounter_read_denied()
+        if ref.startswith(patient_alias.PREFIX) and patient_alias.ALIAS_RE.fullmatch(ref) is None:
+            self._encounter_read_denied()
+        configured = self.setting(config.ALLOWLIST_KEY)
+        is_static = isinstance(configured, (list, tuple)) and any(
+            isinstance(item, dict) and item.get("workspace_patient_id") == ref
+            for item in configured
+        )
+        if is_static or ref.startswith(patient_alias.PREFIX):
+            ref = self._resolve_encounter_alias(ref)
+        if not ref or not self.native_patient_can_read(ref):
+            self._encounter_read_denied()
+        return ref
+
+    def _encounter_read_meta(self):
+        meta = self.frappe.get_meta(ENCOUNTER_DOCTYPE)
+        if not self._fields_readable(meta, ("patient", "practitioner", "encounter_date")):
+            self._encounter_read_denied()
+        return meta
+
+    def _encounter_summary(self, row):
+        patient = self._row_value(row, "patient")
+        if not patient or not self.native_patient_can_read(patient):
+            self._encounter_read_denied()
+        name = self.native_patient_display_name(patient)
+        if name is None:
+            self._encounter_read_denied()
+        return {
+            "id": self._row_value(row, "name"),
+            "patientId": patient,
+            "patientName": name,
+            "practitioner": self._text_value(self._row_value(row, "practitioner")),
+            "encounterDate": self._text_value(self._row_value(row, "encounter_date")),
+            "docstatus": self._row_value(row, "docstatus"),
+        }
+
+    def list_patient_encounters(self, patient_ref, offset=0):
+        self.mark_no_store()
+        self.suppress_traceback()
+        patient = self._encounter_patient_ref(patient_ref)
+        if isinstance(offset, bool) or not (
+            isinstance(offset, int)
+            or isinstance(offset, str)
+            and len(offset) <= 7
+            and offset.isascii()
+            and offset.isdecimal()
+        ):
+            self._encounter_read_denied()
+        offset = int(offset)
+        if offset < 0 or offset > 1000000:
+            self._encounter_read_denied()
+        self._encounter_read_meta()
+        rows = self.frappe.get_list(
+            ENCOUNTER_DOCTYPE,
+            filters={"patient": patient},
+            fields=["name", "patient", "practitioner", "encounter_date", "docstatus"],
+            order_by="encounter_date desc, name desc",
+            start=offset,
+            page_length=21,
+        )
+        return {
+            "items": [self._encounter_summary(row) for row in rows[:20]],
+            "nextOffset": offset + 20 if len(rows) > 20 else None,
+        }
+
+    def _encounter_read_children(self, doc, meta, table, doctype, field):
+        try:
+            definition = meta.get_field(table)
+            if not definition or definition.options != doctype or not self._fields_readable(meta, (table,)):
+                return None
+            child_meta = self.frappe.get_meta(doctype)
+            child_field = child_meta.get_field(field)
+            accessible = meta.get_permlevel_access("read", user=self.frappe.session.user)
+            masked = {item.fieldname for item in (child_meta.get_masked_fields() or ())}
+            if not child_field or child_field.permlevel not in accessible or field in masked:
+                return None
+            rows = getattr(doc, table)
+            if not isinstance(rows, (list, tuple)):
+                return None
+            values = [self._row_value(row, field) for row in rows]
+            if any(not isinstance(value, str) for value in values):
+                return None
+            return values
+        except Exception:
+            return None
+
+    def view_patient_encounter(self, encounter_id):
+        from clinic_ui.core.text import is_valid_identifier, normalize_identifier
+
+        self.mark_no_store()
+        self.suppress_traceback()
+        encounter_id = normalize_identifier(encounter_id)
+        if not is_valid_identifier(encounter_id):
+            self._encounter_read_denied()
+        doc = self.frappe.get_doc(ENCOUNTER_DOCTYPE, encounter_id)
+        if not self.frappe.has_permission(
+            ENCOUNTER_DOCTYPE, ptype="read", doc=doc, user=self.frappe.session.user
+        ):
+            self._encounter_read_denied()
+        meta = self._encounter_read_meta()
+        result = self._encounter_summary(doc)
+        result["symptoms"] = self._encounter_read_children(
+            doc, meta, "symptoms", "Patient Encounter Symptom", "complaint"
+        )
+        result["diagnoses"] = self._encounter_read_children(
+            doc, meta, "diagnosis", "Patient Encounter Diagnosis", "diagnosis"
+        )
+        return result
+
     def native_doctype_can_read(self, doctype, doc=None):
         """Current-user native read authority for one linked DocType/document."""
 
