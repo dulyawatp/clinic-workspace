@@ -883,7 +883,7 @@ it("opens the same read-only patient timeline from Patient History and the encou
     }),
     http.get(`${METHOD}open_for_appointment`, () => reply(completed)),
     http.get(`${METHOD}view`, () => reply({ ...row, symptoms: [], diagnoses: [] })),
-    http.get(NOTES_LIST, () => new HttpResponse(null, { status: 503 })),
+    http.post(NOTES_LIST, () => new HttpResponse(null, { status: 503 })),
   );
   const posts = postSpy();
   try {
@@ -916,7 +916,7 @@ it("opens the same read-only patient timeline from Patient History and the encou
       expect(within(card).queryByRole("textbox")).not.toBeInTheDocument();
     }
     expect(listed.mock.calls).toEqual([[PAT], [PAT]]);
-    expect(posts.posts).toEqual([]);
+    expect(posts.posts.map((url) => new URL(url).pathname)).toEqual([NOTES_LIST, NOTES_LIST]);
   } finally {
     posts.stop();
   }
@@ -927,23 +927,29 @@ const historyNote = (name: string, text: string) => ({
   doctype: "Clinical Note", name, patient: PAT, reference_doc: "Patient Encounter", reference_name: ENC, note: text,
 });
 
+async function historyRpcBody(request: Request, path: string) {
+  const url = new URL(request.url);
+  expect(url.href).toBe(new URL(path, window.location.origin).href);
+  expect(request.headers.get("Content-Type")).toBe("application/json");
+  expect(request.headers.get("X-Frappe-CSRF-Token")).toBe("native-csrf");
+  return request.json();
+}
+
 it("reads exact native names lazily, rechecks each note, renders safely and paginates without editor controls", async () => {
   const lists = vi.fn();
   const reads = vi.fn();
-  const names = Array.from({ length: 11 }, (_, index) => `NOTE-${index.toString().padStart(2, "0")}`);
+  const names = Array.from({ length: 11 }, (_, index) => `${PAT}-${ENC}-${index.toString().padStart(5, "0")}`);
   server.use(
     http.get(`${METHOD}list_for_patient`, () => reply({ items: [historyRow], nextOffset: null })),
-    http.get(NOTES_LIST, ({ request }) => {
-      const params = new URL(request.url).searchParams;
-      const offset = params.get("limit_start");
-      lists(params.get("doctype"), JSON.parse(params.get("filters") ?? ""), params.get("fields"),
-        params.get("order_by"), params.get("limit_page_length"), offset);
-      return reply((offset === "0" ? names : names.slice(10)).map((name) => ({ name })));
+    http.post(NOTES_LIST, async ({ request }) => {
+      const body = await historyRpcBody(request, NOTES_LIST);
+      lists(body);
+      return reply((body.limit_start === 0 ? names : names.slice(10)).map((name) => ({ name })));
     }),
-    http.get(NOTE_READ, ({ request }) => {
-      const params = new URL(request.url).searchParams;
-      const name = params.get("name") ?? "";
-      reads(params.get("doctype"), name);
+    http.post(NOTE_READ, async ({ request }) => {
+      const body = await historyRpcBody(request, NOTE_READ);
+      reads(body);
+      const { name } = body;
       const text = name === names[0] ? '<div class="ql-editor read-mode"><p><strong>Formatted follow-up</strong></p></div>' :
         name === names[1] ? '<p>Fallback note</p><img src="/unexpected-file"><script>unsafe payload</script>' :
           `Narrative ${name}`;
@@ -965,16 +971,18 @@ it("reads exact native names lazily, rechecks each note, renders safely and pagi
     expect(screen.queryByText("unsafe payload")).not.toBeInTheDocument();
     expect(document.querySelector('img[src="/unexpected-file"]')).toBeNull();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    expect(reads.mock.calls).toEqual(names.slice(0, 10).map((name) => ["Clinical Note", name]));
+    expect(reads.mock.calls).toEqual(names.slice(0, 10).map((name) => [{ doctype: "Clinical Note", name }]));
     await user.click(screen.getByRole("button", { name: "Load more notes" }));
     expect(await screen.findByText(`Narrative ${names[10]}`)).toBeVisible();
     expect(screen.queryByRole("button", { name: "Load more notes" })).not.toBeInTheDocument();
-    expect(lists.mock.calls).toEqual(["0", "10"].map((offset) => [
-      "Clinical Note", { reference_doc: "Patient Encounter", reference_name: ENC, patient: PAT },
-      '["name"]', "name asc", "11", offset,
-    ]));
-    expect(reads).toHaveBeenLastCalledWith("Clinical Note", names[10]);
-    expect(posts.posts).toEqual([]);
+    expect(lists.mock.calls).toEqual([0, 10].map((offset) => [{
+      doctype: "Clinical Note", filters: { reference_doc: "Patient Encounter", reference_name: ENC, patient: PAT },
+      fields: ["name"], order_by: "name asc", limit_page_length: 11, limit_start: offset,
+    }]));
+    expect(reads).toHaveBeenLastCalledWith({ doctype: "Clinical Note", name: names[10] });
+    expect(posts.posts.map((url) => new URL(url).pathname)).toEqual([
+      NOTES_LIST, ...Array<string>(10).fill(NOTE_READ), NOTES_LIST, NOTE_READ,
+    ]);
   } finally {
     posts.stop();
   }
@@ -994,9 +1002,9 @@ it.each([
   const read = vi.fn();
   server.use(
     http.get(`${METHOD}list_for_patient`, () => reply({ items: [historyRow], nextOffset: null })),
-    http.get(NOTES_LIST, () => status !== 200 ? new HttpResponse(null, { status }) :
+    http.post(NOTES_LIST, () => status !== 200 ? new HttpResponse(null, { status }) :
       reply(document === null ? [] : [{ name: "NOTE-PRIVATE" }])),
-    http.get(NOTE_READ, () => {
+    http.post(NOTE_READ, () => {
       read();
       return typeof document === "number" ? new HttpResponse(null, { status: document }) :
         reply({ ...historyNote("NOTE-PRIVATE", "Private note must not render"), ...document });

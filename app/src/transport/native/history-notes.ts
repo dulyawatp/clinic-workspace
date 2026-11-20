@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { mapHttpError } from "../error-map";
 import type { EncounterReadError } from "./encounter-read";
-import { frappeRequest } from "./frappe";
-import { classifyNativeForbidden } from "./session";
+import { frappeRequest, FRAPPE_CSRF_HEADER } from "./frappe";
+import { classifyNativeForbidden, nativeCsrfToken } from "./session";
 
 const doctype = "Clinical Note";
 const reference = "Patient Encounter";
@@ -25,9 +25,14 @@ export type HistoryNotePage = {
   nextOffset: number | null;
 };
 
-async function read(path: "get" | "get_list", params: Record<string, string>, signal: AbortSignal): Promise<unknown> {
-  const response = await frappeRequest(`frappe.client.${path}?${new URLSearchParams({ doctype, ...params })}`, {
-    method: "GET", redirect: "error", signal,
+async function read(path: "get" | "get_list", params: object, signal: AbortSignal): Promise<unknown> {
+  const token = nativeCsrfToken();
+  if (!token) throw { code: "FORBIDDEN", retryable: false } satisfies EncounterReadError;
+  // These RPCs only read. Use POST to keep patient-derived identifiers out of URLs.
+  const response = await frappeRequest(`frappe.client.${path}`, {
+    method: "POST", redirect: "error", signal,
+    headers: { "Content-Type": "application/json", [FRAPPE_CSRF_HEADER]: token },
+    body: JSON.stringify({ doctype, ...params }),
   });
   if (response.status === 403) throw await classifyNativeForbidden(signal);
   if (!response.ok) throw mapHttpError(response.status, null);
@@ -42,11 +47,11 @@ export async function listHistoryNotes(
   if (!name.safeParse(encounterId).success || !name.safeParse(patientId).success ||
       !Number.isSafeInteger(offset + pageSize) || offset < 0) throw malformed;
   const parsed = names.safeParse(await read("get_list", {
-    filters: JSON.stringify({ reference_doc: reference, reference_name: encounterId, patient: patientId }),
-    fields: JSON.stringify(["name"]),
+    filters: { reference_doc: reference, reference_name: encounterId, patient: patientId },
+    fields: ["name"],
     order_by: "name asc",
-    limit_start: String(offset),
-    limit_page_length: String(pageSize + 1),
+    limit_start: offset,
+    limit_page_length: pageSize + 1,
   }, signal));
   if (!parsed.success || new Set(parsed.data.map((row) => row.name)).size !== parsed.data.length) throw malformed;
 
