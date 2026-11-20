@@ -45,6 +45,7 @@ def write_settings(**overrides):
         clinic_ui_synthetic_site=SITE,
         clinic_ui_native_finance_write_enabled=1,
         clinic_ui_native_finance_write_site=SITE,
+        clinic_ui_payment_deployment_profile="legacy",
         clinic_ui_role_map={
             "CAS": ["Accounts User"],
             "MGR": ["Accounts Manager"],
@@ -744,6 +745,52 @@ class InvoiceReadTests(unittest.TestCase):
 
 
 class PaymentReceiveTests(unittest.TestCase):
+    def test_payment_route_selects_shared_or_legacy_once(self):
+        fake = gateway()
+        for lane, target in (
+            ("shared_slot_v1", "_receive_shared_sit_payment"),
+            ("legacy", "_perform"),
+        ):
+            with self.subTest(lane=lane), \
+                 mock.patch.object(finance_write.sit_payment_slot, "payment_lane", return_value=lane) as select, \
+                 mock.patch.object(finance_write, "_receive_shared_sit_payment", return_value="slot") as shared, \
+                 mock.patch.object(finance_write, "_perform", return_value="old") as legacy:
+                result = finance_write.receive_payment(fake, payment_body(), CSRF)
+                self.assertEqual(result, "slot" if target == "_receive_shared_sit_payment" else "old")
+                select.assert_called_once_with(fake)
+                (shared if lane == "legacy" else legacy).assert_not_called()
+
+    def test_blocked_or_missing_proof_never_uses_either_writer(self):
+        for profile in (None, "shared_slot_v1", "invalid"):
+            with self.subTest(profile=profile):
+                fake = gateway()
+                fake._settings["clinic_ui_payment_deployment_profile"] = profile
+                with mock.patch.object(finance_write, "_perform") as legacy, \
+                     mock.patch.object(finance_write, "_receive_shared_sit_payment") as shared:
+                    with self.assertRaises(Denied):
+                        finance_write.receive_payment(fake, payment_body(), CSRF)
+                    legacy.assert_not_called()
+                    shared.assert_not_called()
+
+    def test_shared_route_still_refuses_with_release_closed(self):
+        fake = gateway()
+        fake._settings["clinic_ui_payment_deployment_profile"] = "shared_slot_v1"
+        fake.finance_settlement_verified = False
+        with mock.patch.object(
+            finance_write.sit_payment_slot, "shared_sit_payment_identity",
+            return_value=finance_write.sit_payment_slot.DEPLOYMENT_ID,
+        ), mock.patch.object(finance_write, "_perform") as legacy, \
+             mock.patch.object(finance_write, "_post_shared_sit_payment") as post:
+            self.assertEqual(finance_write.receive_payment(fake, payment_body(), CSRF)["code"], finance_write.LOCKED_CODE)
+            legacy.assert_not_called()
+            post.assert_not_called()
+
+    def test_other_site_selects_legacy_writer(self):
+        fake = gateway(site="other.local")
+        with mock.patch.object(finance_write, "_perform", return_value="legacy") as legacy:
+            self.assertEqual(finance_write.receive_payment(fake, payment_body(), CSRF), "legacy")
+            legacy.assert_called_once()
+
     def test_ledger_ranges_are_locked_before_gate_recheck_and_dispatch(self):
         fake = gateway()
         finance_write.receive_payment(fake, payment_body(), CSRF)

@@ -863,6 +863,12 @@ def _receive_shared_sit_payment(gateway, body, csrf_token=None):
 def receive_payment(gateway, body, csrf_token=None):
     """Receive one payment against one submitted invoice."""
 
+    lane = sit_payment_slot.payment_lane(gateway)
+    if lane == "shared_slot_v1":
+        return _receive_shared_sit_payment(gateway, body, csrf_token)
+    if lane != "legacy":
+        gateway.deny()
+
     return _perform(
         gateway,
         body,
