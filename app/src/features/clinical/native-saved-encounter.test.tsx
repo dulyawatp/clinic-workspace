@@ -122,6 +122,25 @@ it("opens native patient history and reopens its saved encounter with GET only",
   }
 });
 
+it("loads more history after Frappe filters every encounter on the first page", async () => {
+  const offsets = vi.fn();
+  setup(`${ROUTES.patient(ref)}?view=history`);
+  server.use(http.get(list, ({ request }) => {
+    const offset = new URL(request.url).searchParams.get("offset");
+    offsets(offset);
+    return offset === "0"
+      ? reply({ items: [], nextOffset: 20 })
+      : reply({ items: [row], nextOffset: null });
+  }));
+
+  const more = await screen.findByRole("button", { name: "Load more visits" });
+  expect(screen.queryByText("No visits found.")).not.toBeInTheDocument();
+  await userEvent.setup().click(more);
+  expect(await screen.findByRole("link", { name: `Visit ${id}` })).toHaveAttribute("href", ROUTES.visit(id));
+  expect(screen.queryByRole("button", { name: "Load more visits" })).not.toBeInTheDocument();
+  expect(offsets.mock.calls).toEqual([["0"], ["20"]]);
+});
+
 it.each([
   [403, "Permission denied"],
   [404, "Visit not found"],

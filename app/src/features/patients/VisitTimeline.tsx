@@ -41,29 +41,31 @@ export function NativeVisitTimeline({ patientRef }: { patientRef: string }) {
         <EncounterReadFailure error={query.error} onRetry={() => void query.refetch()} />
       ) : loading ? (
         <StatePanel kind="loading" title={t("common.loading")} />
-      ) : !visits.length ? (
+      ) : !visits.length && !query.hasNextPage ? (
         <StatePanel kind="empty" title={t("workspace.nativeHistoryEmpty")} />
       ) : (
         <>
-          <ol role="list" className="visit-history-list" aria-labelledby="visit-timeline-heading">
-            {visits.map((visit) => (
-              <li key={visit.id} className="visit-history-entry">
-                {visit.encounterDate ? (
-                  <time className="visit-history-date" dateTime={visit.encounterDate}>{formatDate(visit.encounterDate, locale)}</time>
-                ) : (
-                  <span className="visit-history-date">{t("common.unavailable")}</span>
-                )}
-                <div className="visit-history-spine" aria-hidden="true" />
-                <article className="visit-preview-card visit-native-history-card">
-                  <div className="visit-preview-head">
-                    <h3><Link to={ROUTES.visit(visit.id)}>{t("workspace.historyVisit", { id: visit.id })}</Link></h3>
-                    <EncounterStatus status={visit.docstatus} />
-                  </div>
-                  <p className="pc-note">{t("clinical.practitioner")}: {visit.practitioner || t("common.unavailable")}</p>
-                </article>
-              </li>
-            ))}
-          </ol>
+          {visits.length > 0 && (
+            <ol role="list" className="visit-history-list" aria-labelledby="visit-timeline-heading">
+              {visits.map((visit) => (
+                <li key={visit.id} className="visit-history-entry">
+                  {visit.encounterDate ? (
+                    <time className="visit-history-date" dateTime={visit.encounterDate}>{formatDate(visit.encounterDate, locale)}</time>
+                  ) : (
+                    <span className="visit-history-date">{t("common.unavailable")}</span>
+                  )}
+                  <div className="visit-history-spine" aria-hidden="true" />
+                  <article className="visit-preview-card visit-native-history-card">
+                    <div className="visit-preview-head">
+                      <h3><Link to={ROUTES.visit(visit.id)}>{t("workspace.historyVisit", { id: visit.id })}</Link></h3>
+                      <EncounterStatus status={visit.docstatus} />
+                    </div>
+                    <p className="pc-note">{t("clinical.practitioner")}: {visit.practitioner || t("common.unavailable")}</p>
+                  </article>
+                </li>
+              ))}
+            </ol>
+          )}
           {query.hasNextPage && (
             <div className="pc-row">
               <Button variant="secondary" disabled={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>
