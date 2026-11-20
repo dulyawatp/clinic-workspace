@@ -35,9 +35,10 @@ never infer no payment from a missing or broken fence.
 `initial_state("confirmed_empty")` means complete reviewed evidence proves no
 legacy payment committed; only then may the row start `available`.
 `initial_state("confirmed_payment")` means at least one payment committed and
-the row must start `spent`, preserving the existing one-payment budget. Record
-confirmed actor, operation key and native Payment Entry receipt when known;
-unknown historical metadata may remain NULL, but must never reopen the slot.
+the row must start `spent`, preserving the existing one-payment budget. Seed
+actor, operation key and receipt all NULL, even when historical values are known.
+Historical acknowledgements remain solely on the legacy ledger. Preserve the
+reviewed history as operator evidence, not as slot-owned receipt metadata.
 All other outcomes are rejected. This function is a classification guard, not
 an inventory tool: operators must supply truthful, reviewed evidence.
 
@@ -52,14 +53,14 @@ CREATE TABLE `tabClinic UI SIT Payment Slot` (
   state VARCHAR(16) NOT NULL,
   actor VARCHAR(255) NULL,
   operation_key VARCHAR(255) NULL,
-  receipt VARCHAR(255) NULL,
+  receipt TEXT CHARACTER SET utf8mb4 NULL,
   PRIMARY KEY (deployment_id)
 ) ENGINE=InnoDB;
 ```
 
 Verify engine, primary key, database, identity and reconciliation evidence.
 Insert exactly one row with the approved fixed deployment ID and the reviewed
-state, plus any known legacy metadata. Do not use `INSERT IGNORE`, upserts,
+state, with all metadata NULL. Do not use `INSERT IGNORE`, upserts,
 automatic initialization, or replace an existing row. If schema or row already
 exists, stop and investigate rather than resetting or modifying its state.
 Protect database writes with existing site/operator permissions; no new grants.
@@ -68,7 +69,10 @@ Provision the private marker only for the approved deployment after review.
 `available` admits one transaction; `spent` permanently blocks further payment.
 An available row must have NULL actor, operation key and receipt; any populated
 value, including an empty string, is inconsistent and blocks reads and posting.
-Spent rows may have NULL legacy metadata. Deployment ID comparisons must be
+Spent rows must have either all metadata NULL (legacy seed) or all metadata
+present and valid (new slot payment); partial or malformed metadata is invalid.
+Never seed non-NULL historical metadata. No migration is authorized here.
+Deployment ID comparisons must be
 byte-exact despite the table's potentially case-insensitive or padded collation.
 Missing row, unexpected state, missing proof, wrong identity and SQL failures
 fail closed. Callers must lock slot first, before invoice and ledger locks, on
@@ -77,6 +81,13 @@ native payment, before the single commit. Helpers never commit. Rollback rolls
 back both payment and slot; ACK, cancellation, redeploy, or lost response never
 reset a committed slot. Investigate discrepancies manually with writers stopped;
 never reopen or recreate a spent row to recover from uncertainty.
+
+Receipt storage must preserve the finance codec's full 1024-character maximum
+including multibyte UTF-8 without relying on SQL mode. On an independently
+approved disposable native deployment, test a valid near-limit multibyte receipt
+through insert, exact readback, commit and ACK, plus truncation rejection and
+rollback. The helper checks exact stored readback before commit; fake tests do
+not establish installed database behavior.
 
 After a new-path commit or an uncertain result, **never revive legacy payment
 posting**, including after marker loss, application rollback, or redeployment:

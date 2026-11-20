@@ -4,6 +4,7 @@ import hmac
 import os
 
 from clinic_ui.core import deployment_marker, finance_contract
+from clinic_ui.core.text import is_valid_text
 
 SITE = "marley-sit.local"
 DEPLOYMENT_ID = "clinic-shared-sit-payment-v1"
@@ -77,7 +78,22 @@ def _read(gateway, deployment_id, lock):
         ))
     ):
         raise SlotUnavailable("payment slot is missing or invalid")
-    return rows[0]
+    row = rows[0]
+    metadata = (row["actor"], row["operation_key"], row["receipt"])
+    if row["state"] == "spent" and any(value is not None for value in metadata):
+        _validate_metadata(*metadata)
+    return row
+
+
+def _validate_metadata(actor, operation_key, receipt):
+    try:
+        if not is_valid_text(actor, finance_contract.MAX_ACTOR_LENGTH):
+            raise finance_contract.FinanceContractError("invalid actor")
+        finance_contract.require_operation_key(operation_key)
+        if finance_contract.decode_receipt(receipt).kind != finance_contract.PAYMENT_KIND:
+            raise finance_contract.FinanceContractError("invalid payment receipt")
+    except (finance_contract.FinanceContractError, TypeError, ValueError) as exc:
+        raise SlotUnavailable("payment slot metadata is invalid") from exc
 
 
 def read_slot(gateway, deployment_id):
@@ -124,8 +140,7 @@ def consume_slot(gateway, deployment_id, actor, operation_key, receipt):
     # Caller must acquire this lock before invoice/ledger locks and posting.
     # Reacquire on the same connection to ensure the update itself is locked.
     lock_slot(gateway, deployment_id)
-    if not all(isinstance(value, str) and value.strip() for value in (actor, operation_key, receipt)):
-        raise SlotUnavailable("payment slot receipt is invalid")
+    _validate_metadata(actor, operation_key, receipt)
     db = gateway.frappe.db
     db.sql(
         f"UPDATE {TABLE} SET state = 'spent', actor = %s, operation_key = %s, receipt = %s "
@@ -136,3 +151,11 @@ def consume_slot(gateway, deployment_id, actor, operation_key, receipt):
     rows = db.sql("SELECT ROW_COUNT()")
     if len(rows) != 1 or len(rows[0]) != 1 or type(rows[0][0]) is not int or rows[0][0] != 1:
         raise SlotUnavailable("payment slot was not consumed")
+    stored = read_slot(gateway, deployment_id)
+    if (
+        stored["state"] != "spent"
+        or stored["actor"] != actor
+        or stored["operation_key"] != operation_key
+        or stored["receipt"] != receipt
+    ):
+        raise SlotUnavailable("payment slot did not retain exact receipt")
