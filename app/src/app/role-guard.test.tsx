@@ -92,8 +92,9 @@ describe("designed surface matrix", () => {
     expect(canAccessSurface("DOC-01", [])).toBe(false);
   });
 
-  it("routes every authenticated surface behind a role guard", () => {
-    const guarded = protectedChildren()
+  it("wraps authenticated surfaces except DOC-02, which guards legacy branches internally", () => {
+    const children = protectedChildren();
+    const guarded = children
       .filter((route) => {
         const element = route.element as { type?: unknown } | null;
         return element?.type === RoleGuard;
@@ -102,8 +103,13 @@ describe("designed surface matrix", () => {
         (route) =>
           (route.element as { props: { surface: SurfaceId } }).props.surface,
       );
-    const designed = SURFACE_ROUTES.map((route) => route.surface);
+    const designed = SURFACE_ROUTES.filter((route) => route.surface !== "DOC-02")
+      .map((route) => route.surface);
     expect(guarded.slice(0, designed.length)).toEqual(designed);
+    const visit = SURFACE_ROUTES.find((route) => route.surface === "DOC-02");
+    expect(visit?.path).toBe(ROUTES.visitPattern);
+    expect(children.find((route) => route.path === ROUTES.visitPattern)?.element)
+      .toBe(visit?.element);
     // Legacy addresses are guarded too, against the designed surface they alias.
     for (const extra of guarded.slice(designed.length))
       expect(designed, extra).toContain(extra);
