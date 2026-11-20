@@ -152,6 +152,13 @@
 .visit-preview-note textarea { min-height: 8.75rem; resize: vertical; }
 .visit-linked-note + .visit-linked-note { border-top: 1px solid var(--border); padding-top: 0.75rem; }
 .visit-linked-note-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.visit-linked-formatted { white-space: pre-wrap; overflow-wrap: anywhere; }
+.visit-linked-formatted :is(ul, ol) { padding-inline-start: 1.5rem; }
+.visit-linked-formatted-editor .ql-editor { min-height: 8.75rem; background: var(--surface); border: 1px solid var(--border); }
+.visit-linked-format-toolbar { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 0.5rem; }
+.visit-linked-format-toolbar[hidden] { display: none; }
+.visit-linked-format-toolbar button { min-height: 2.75rem; padding-inline: 0.6rem; color: inherit; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+.visit-linked-format-toolbar button[aria-pressed="true"] { border-color: currentColor; font-weight: 700; }
 .visit-preview-actions { margin-top: 1rem; padding: 1rem; }
 .visit-preview .pc-field :is(input, textarea, select) {
   font-size: .875rem;

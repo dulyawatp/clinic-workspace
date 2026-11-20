@@ -477,6 +477,132 @@ it("paginates clinical notes and updates only the explicitly selected note and v
   }]]);
 });
 
+const formattedNote = {
+  ...note,
+  text: '<div class="ql-editor read-mode"><h2>Plan</h2><p><strong>Return</strong> &nbsp;<em>soon</em>.</p><ul><li data-list="bullet"><span class="ql-ui" contenteditable="false"></span><u>Review</u></li></ul></div>',
+};
+
+it.each([200, 403, 417])("edits a formatted note with its version and preserves unrelated marks (HTTP %s)", async (status) => {
+  const save = vi.fn();
+  server.use(
+    http.get(`${METHOD}open_for_appointment`, () => reply({ ...draft, notes: { ...notes, items: [formattedNote] } })),
+    http.post(`${METHOD}save_linked`, async ({ request }) => {
+      const body = await request.json() as { clinical: { note: typeof formattedNote } };
+      save(body);
+      return status === 200
+        ? reply({ ...draft, notes: { ...notes, items: [{ ...formattedNote, text: body.clinical.note.text }] } })
+        : new HttpResponse(null, { status });
+    }),
+  );
+  setup(canonical);
+  const user = userEvent.setup();
+  expect(await screen.findByText("Return", { selector: "strong" })).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Edit note NOTE-1" }));
+  const editor = screen.getByRole("textbox", { name: "Visit narrative" });
+  expect(screen.getByRole("button", { name: "Save draft" })).toBeDisabled();
+  expect(save).not.toHaveBeenCalled();
+  await act(async () => {
+    const editableMark = editor.querySelector("strong")?.firstChild;
+    if (!editableMark) throw new Error("Formatted editor lost the bold run");
+    editableMark.textContent = "Return next week";
+    fireEvent.input(editor);
+  });
+  await user.click(screen.getByRole("button", { name: "Save draft" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save).toHaveBeenCalledWith({
+    appointment_ref: REF, expected_version: VERSION, clinical: { note: {
+      id: note.id, modified: note.modified,
+      text: '<div class="ql-editor read-mode"><h2>Plan</h2><p><strong>Return next week</strong> &nbsp;<em>soon</em>.</p><ul><li data-list="bullet"><span class="ql-ui" contenteditable="false"></span><u>Review</u></li></ul></div>',
+    } },
+  });
+  if (status === 200) {
+    expect(await screen.findByText("Draft saved.")).toBeVisible();
+    expect(screen.getByText("soon", { selector: "em" })).toBeVisible();
+  } else {
+    expect(await screen.findByText(status === 403 ? "Marley did not allow this action." :
+      "Marley rejected this change. Check the current record before trying again.")).toBeVisible();
+    expect(editor).toHaveTextContent("Return next week");
+  }
+});
+
+it.each(["unchanged", "unsupported"] as const)("does not send a note update for %s formatted content", async (kind) => {
+  const original = kind === "unchanged" ? formattedNote : {
+    ...formattedNote,
+    text: '<div class="ql-editor read-mode"><p><strong>Visible</strong><img src="/no-note-image" onerror="alert(1)"><a href="javascript:alert(1)">link</a><script>HIDDEN</script></p></div>',
+  };
+  const projected = { ...draft, notes: { ...notes, items: [original] } };
+  const save = vi.fn();
+  server.use(
+    http.get(`${METHOD}open_for_appointment`, () => reply(projected)),
+    http.post(`${METHOD}save_linked`, async ({ request }) => {
+      save(await request.json());
+      return reply(projected);
+    }),
+  );
+  setup(canonical);
+  const user = userEvent.setup();
+  const remove = await screen.findByRole("button", { name: "Remove Pain" });
+  if (kind === "unchanged") {
+    await user.click(screen.getByRole("button", { name: "Edit note NOTE-1" }));
+    expect(screen.getByRole("textbox", { name: "Visit narrative" })).toHaveTextContent("Review");
+    expect(screen.getByRole("button", { name: "Save draft" })).toBeDisabled();
+  } else {
+    expect(screen.getByText("Formatted note shown as text. Edit it in Marley to preserve formatting.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Edit note NOTE-1" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "link" })).not.toBeInTheDocument();
+    expect(screen.queryByText("HIDDEN")).not.toBeInTheDocument();
+    expect(document.querySelector('img[src="/no-note-image"]')).toBeNull();
+  }
+  await user.click(remove);
+  await user.click(screen.getByRole("button", { name: "Save draft" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save).toHaveBeenCalledWith({ appointment_ref: REF, expected_version: VERSION, clinical: { symptoms: [] } });
+});
+
+it("inserts only plain clipboard text and refuses dropped or pasted files in the formatted editor", async () => {
+  const save = vi.fn();
+  const projected = { ...draft, notes: { ...notes, items: [formattedNote] } };
+  server.use(
+    http.get(`${METHOD}open_for_appointment`, () => reply(projected)),
+    http.post(`${METHOD}save_linked`, async ({ request }) => {
+      save(await request.json());
+      return reply(projected);
+    }),
+  );
+  setup(canonical);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Edit note NOTE-1" }));
+  const editor = screen.getByRole("textbox", { name: "Visit narrative" });
+  const paragraph = editor.querySelector("p")?.lastChild;
+  if (!paragraph) throw new Error("Missing paragraph");
+  editor.focus();
+  const range = document.createRange();
+  range.setStart(paragraph, paragraph.textContent?.length ?? 0);
+  range.collapse(true);
+  window.getSelection()?.removeAllRanges();
+  window.getSelection()?.addRange(range);
+  const read = vi.fn((type: string) => type === "text/plain" ? " <pasted>" : '<a href="javascript:alert(1)">HTML Only</a>');
+  await act(async () => {
+    fireEvent.paste(editor, { clipboardData: { files: [], getData: read } });
+  });
+  expect(read.mock.calls).toEqual([["text/plain"]]);
+  expect(editor).toHaveTextContent("<pasted>");
+  expect(editor.querySelector("a")).toBeNull();
+  const write = vi.fn();
+  fireEvent.copy(editor, { clipboardData: { setData: write } });
+  expect(write.mock.calls.map(([mime]) => mime)).toEqual(["text/plain"]);
+  const file = new File(["data"], "not-a-note.png", { type: "image/png" });
+  await act(async () => {
+    fireEvent.paste(editor, { clipboardData: { files: [file], getData: read } });
+    fireEvent.drop(editor, { dataTransfer: { files: [file], getData: read } });
+  });
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(editor.querySelector("img")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Save draft" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0]?.[0]?.clinical?.note?.text).toContain(" &lt;pasted&gt;");
+});
+
 it("distinguishes unavailable notes from an empty list and still submits the authorized encounter", async () => {
   const unavailable = { state: "unavailable", items: [], next_offset: null };
   const post = vi.fn();

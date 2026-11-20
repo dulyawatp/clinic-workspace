@@ -18,6 +18,8 @@ import {
 } from "../../transport/native/linked-encounter";
 import { StatePanel } from "../../ui/StatePanel";
 import { EncounterLayout, EncounterReadFailure, EncounterStatus, SavedTerms } from "./ApprovedVisitWorkspace";
+import { FormattedNoteEditor, FormattedNotePreview } from "./LinkedFormattedNote";
+import { encodeNoteText, notePlainText, type NoteLine, parseFormattedNote, serializeFormattedNote } from "./linked-note-format";
 
 type Kind = "symptoms" | "diagnoses";
 
@@ -125,11 +127,11 @@ function noteContent(source: string) {
   return { text: rich ? readable(template.content).trim() : template.content.textContent ?? "", rich };
 }
 
-function encodeNote(text: string): string {
-  return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
-type NoteEdit = { original: LinkedNote | null; text: string };
+type NoteEdit = {
+  original: LinkedNote | null;
+  text: string;
+  rich?: { lines: NoteLine[]; baseline: string; html: string | null };
+};
 type Write = "save" | "submit";
 type Operation = Write | "check" | "notes";
 type Uncertain = { kind: Write; rejected?: true };
@@ -208,13 +210,17 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   const readOnly = completed || recoveryUnavailable;
   const hasClinicalChanges = Object.keys(clinical).length > 0;
   const dirty = hasClinicalChanges || edit !== null;
-  const noteChanged = edit && edit.text !== (edit.original ? noteContent(edit.original.text).text : "");
+  const noteChanged = edit && (edit.rich ? edit.rich.html !== null && edit.rich.html !== edit.rich.baseline :
+    edit.text !== (edit.original ? noteContent(edit.original.text).text : ""));
   const saveInput: LinkedClinical = {
     ...clinical,
-    ...(noteChanged && { note: { id: edit.original?.id ?? null, modified: edit.original?.modified ?? null, text: encodeNote(edit.text) } }),
+    ...(noteChanged && { note: {
+      id: edit.original?.id ?? null, modified: edit.original?.modified ?? null,
+      text: edit.rich?.html ?? encodeNoteText(edit.text),
+    } }),
   };
   const cannotSave = (encounter !== null && !hasClinicalChanges && !noteChanged) ||
-    Boolean(edit && !edit.text.trim());
+    Boolean(edit && ((!edit.rich && !edit.text.trim()) || edit.rich?.html === null || (noteChanged && !edit.text.trim())));
   useBeforeUnload((event) => {
     if ((uncertain?.kind === "save" || busy === "save") && dirty) {
       event.preventDefault();
@@ -401,13 +407,20 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
             {!notes.items.length && <p className="pc-note">{t("linkedEncounter.noNotes")}</p>}
             {notes.items.map((item) => {
               const content = noteContent(item.text);
+              const lines = content.rich ? parseFormattedNote(item.text) : null;
               return <article className="visit-preview-stack visit-linked-note" key={item.id}>
                 <h4>{item.id}</h4>
-                <p className="visit-linked-note-text">{content.text || t("linkedEncounter.noNoteText")}</p>
-                {content.rich && <p className="pc-note">{t("linkedEncounter.formattedNote")}</p>}
-                {!content.rich && !readOnly && <div>
+                {lines ? <FormattedNotePreview lines={lines} /> :
+                  <p className="visit-linked-note-text">{content.text || t("linkedEncounter.noNoteText")}</p>}
+                {content.rich && !lines && <p className="pc-note">{t("linkedEncounter.formattedNote")}</p>}
+                {(!content.rich || lines) && !readOnly && <div>
                   <Button variant="secondary" disabled={locked || edit !== null}
-                    onClick={() => setEdit({ original: item, text: content.text })}>
+                    onClick={() => {
+                      const html = lines && serializeFormattedNote(lines);
+                      setEdit(lines && html
+                        ? { original: item, text: notePlainText(lines), rich: { lines, baseline: html, html } }
+                        : { original: item, text: content.text });
+                    }}>
                     {t("linkedEncounter.editNote", { id: item.id })}
                   </Button>
                 </div>}
@@ -419,10 +432,14 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
             </Button></div>}
             {!completed && (edit ? (
               <div className="pc-field">
-                <label>{t("workspace.narrative")}
+                {edit.rich ? <FormattedNoteEditor lines={edit.rich.lines} disabled={locked} onChange={(value) => {
+                  setEdit((previous) => previous?.rich ? {
+                    ...previous, text: value?.text ?? previous.text, rich: { ...previous.rich, html: value?.html ?? null },
+                  } : previous);
+                }} /> : <label>{t("workspace.narrative")}
                   <textarea value={edit.text} readOnly={recoveryUnavailable} disabled={readLocked}
                     onChange={(event) => setEdit({ ...edit, text: event.target.value })} />
-                </label>
+                </label>}
                 {!recoveryUnavailable && <>
                   <p className="pc-note">{t("linkedEncounter.noteSaveHint")}</p>
                   <div><Button variant="secondary" disabled={locked} onClick={() => setEdit(null)}>
