@@ -261,3 +261,12 @@ class EncounterReadTests(unittest.TestCase):
             self.assertIsNone(self.gateway.view_patient_encounter("ENC-00")["diagnoses"])
         parent.fields["diagnosis"] = "Wrong Child"
         self.assertIsNone(self.gateway.view_patient_encounter("ENC-00")["diagnoses"])
+
+    def test_malformed_child_mask_fieldnames_fail_closed(self):
+        child = self.frappe.meta["Patient Encounter Symptom"]
+        for entry in (SimpleNamespace(), SimpleNamespace(fieldname=None),
+                      SimpleNamespace(fieldname=""), SimpleNamespace(fieldname=7)):
+            with self.subTest(entry=entry), patch.object(
+                child, "get_masked_fields", return_value=[entry]
+            ):
+                self.assertIsNone(self.gateway.view_patient_encounter("ENC-00")["symptoms"])

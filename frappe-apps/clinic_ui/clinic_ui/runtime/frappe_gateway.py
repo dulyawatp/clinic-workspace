@@ -1026,7 +1026,11 @@ class Gateway:
             child_field = child_meta.get_field(field)
             accessible = meta.get_permlevel_access("read", user=self.frappe.session.user)
             masked_fields = child_meta.get_masked_fields()
-            if masked_fields is None:
+            if masked_fields is None or any(
+                not isinstance(getattr(item, "fieldname", None), str)
+                or not item.fieldname.strip()
+                for item in masked_fields
+            ):
                 return None
             masked = {item.fieldname for item in masked_fields}
             if not child_field or child_field.permlevel not in accessible or field in masked:
