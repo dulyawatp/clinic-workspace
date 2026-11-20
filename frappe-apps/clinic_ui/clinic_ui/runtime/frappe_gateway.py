@@ -462,6 +462,11 @@ class Gateway:
             return matches[0].native_appointment_id
         return ref
 
+    def insert_lab_report(self, values):
+        doc = self.frappe.get_doc(values)
+        doc.insert()
+        return doc
+
     def _linked_fields(self, doctype, fields, ptype="read", parent_meta=None):
         meta = self.frappe.get_meta(doctype)
         authority = parent_meta or meta

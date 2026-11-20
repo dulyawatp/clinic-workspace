@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from clinic_ui.endpoints import lab_reports
+from clinic_ui.runtime.frappe_gateway import Gateway as NativeGateway
 
 
 class Doc(SimpleNamespace):
@@ -43,6 +44,11 @@ class Gateway:
     def get_list(self, doctype, **kwargs):
         start = kwargs["start"]
         return [{"name": f.name} for f in self.files[start:start + kwargs["page_length"]]]
+
+    def insert_lab_report(self, values):
+        doc = self.get_doc(values)
+        doc.insert()
+        return doc
 
 
 class LabReportsTests(unittest.TestCase):
@@ -127,6 +133,15 @@ class LabReportsTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             lab_reports.upload(gateway, "A1", "report.pdf", b"%PDF-1.7")
         self.assertEqual(len(gateway.files), 1)
+
+    def test_native_gateway_inserts_file_with_native_permissions(self):
+        calls = []
+        doc = SimpleNamespace(insert=lambda: calls.append("insert"))
+        frappe = SimpleNamespace(get_doc=lambda values: (calls.append(values), doc)[1])
+        gateway = NativeGateway(frappe)
+        values = {"doctype": "File", "file_name": "report.pdf", "content": b"%PDF-1.7"}
+        self.assertIs(gateway.insert_lab_report(values), doc)
+        self.assertEqual(calls, [values, "insert"])
 
 
 class UploadApiTests(unittest.TestCase):

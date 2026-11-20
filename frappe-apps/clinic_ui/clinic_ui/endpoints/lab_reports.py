@@ -113,10 +113,9 @@ def upload(gateway, appointment_ref, filename, content):
     folder = gateway.frappe.get_doc("File", FOLDER)
     if not folder.is_folder:
         raise ValueError("invalid report folder")
-    doc = gateway.frappe.get_doc({
+    doc = gateway.insert_lab_report({
         "doctype": "File", "file_name": filename, "content": content,
         "is_private": 1, "folder": FOLDER, "attached_to_doctype": "Patient Appointment",
         "attached_to_name": appointment.name,
     })
-    doc.insert()
     return _project(doc, appointment)
