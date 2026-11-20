@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router-dom";
 import { ROUTES } from "../../app/routes";
@@ -6,16 +6,33 @@ import { useSession } from "../../app/SessionProvider";
 import { Card, DataTable, PageHeader } from "../../design/components";
 import { useLocale } from "../../i18n/LocaleProvider";
 import {
+  financeWriteLocked,
+  NativeFinanceWriteError,
+  receivePayment,
+  subscribeFinanceWriteLock,
+} from "../../transport/native/finance-write";
+import {
   listNativePayableInvoices,
   type NativePayableInvoice,
   PAYABLE_INVOICE_PAGE_SIZE,
   PayableInvoiceReadError,
 } from "../../transport/native/payable-invoice";
+import { getNativePaymentReceipt } from "../../transport/native/payment-receipt";
+import { getNativePostedInvoiceDetail } from "../../transport/native/posted-invoice";
 import { FilterField } from "../operations/ops-ui";
 
 const DEFAULT_CURRENCY = "THB";
+const MAX_BALANCE_FRACTION_DIGITS = 20;
+const PAYABLE_STATUSES = new Set([
+  "Submitted", "Unpaid", "Overdue", "Partly Paid",
+  "Unpaid and Discounted", "Overdue and Discounted", "Partly Paid and Discounted",
+]);
 type InvoiceRequest = { currency: string; search: string; offset: number };
 type PaymentMode = "cash" | "card";
+type Receipt = { kind: "loading" | "unavailable" } | { kind: "ready"; href: string };
+type Confirmation = { kind: "idle" | "checking" | "posting" | "uncertain" } |
+  { kind: "confirmed"; payment: string; receipt: Receipt };
+const isPaymentLocked = () => financeWriteLocked("payment_receive");
 
 export function NativeCashierPaymentPage() {
   const { t } = useTranslation();
@@ -23,6 +40,8 @@ export function NativeCashierPaymentPage() {
   const [params] = useSearchParams();
   const canRead = status === "authenticated" && session?.mode === "live" &&
     session.user.roles.includes("CAS");
+  const canSettle = canRead && session.paymentSettlement === "full_balance_v1" &&
+    session.capabilities["write.payment.receive"] === "enabled";
   return (
     <div data-surface="CAS-03" data-testid="payments-page">
       <PageHeader
@@ -40,9 +59,10 @@ export function NativeCashierPaymentPage() {
       <div className="pc-page__body">
         {canRead ? (
           <PayableInvoicePicker
-            key={`${authGeneration}:${params.toString()}`}
+            key={`${authGeneration}:${canSettle}:${params.toString()}`}
             initialSearch={params.get("invoice") ?? ""}
             initialMode={params.get("mode") === "card" ? "card" : "cash"}
+            canSettle={canSettle}
           />
         ) : (
           <Card title={t("nativePayment.invoices")}>
@@ -63,7 +83,8 @@ export function NativeCashierPaymentPage() {
 function PayableInvoicePicker({
   initialSearch,
   initialMode,
-}: { initialSearch: string; initialMode: PaymentMode }) {
+  canSettle,
+}: { initialSearch: string; initialMode: PaymentMode; canSettle: boolean }) {
   const { t } = useTranslation();
   const { locale } = useLocale();
   const [search, setSearch] = useState(initialSearch);
@@ -76,6 +97,7 @@ function PayableInvoicePicker({
   } | null>(null);
   const [observedCurrencies, setObservedCurrencies] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState("");
+  const [staleIds, setStaleIds] = useState<string[]>([]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -103,6 +125,7 @@ function PayableInvoicePicker({
 
   function load(next: InvoiceRequest) {
     setSelectedId("");
+    setStaleIds([]);
     setRequest(next);
   }
 
@@ -111,7 +134,10 @@ function PayableInvoicePicker({
   const selected = page?.rows.find((row) => row.id === selectedId);
   const { offset } = request;
   const amount = (value: number, currency: string) =>
-    new Intl.NumberFormat(locale, { style: "currency", currency, currencyDisplay: "code" }).format(value);
+    new Intl.NumberFormat(locale, {
+      style: "currency", currency, currencyDisplay: "code",
+      maximumFractionDigits: MAX_BALANCE_FRACTION_DIGITS,
+    }).format(value);
 
   return (
     <>
@@ -215,6 +241,10 @@ function PayableInvoicePicker({
         invoice={selected}
         initialMode={initialMode}
         amount={amount}
+        canSettle={canSettle}
+        stale={staleIds.includes(selectedId)}
+        markStale={(id) => setStaleIds((ids) => [...ids, id])}
+        refresh={() => load({ ...request })}
       />
     </>
   );
@@ -233,18 +263,100 @@ function PaymentReview({
   invoice,
   initialMode,
   amount,
+  canSettle,
+  stale,
+  markStale,
+  refresh,
 }: {
   invoice?: NativePayableInvoice;
   initialMode: PaymentMode;
   amount: (value: number, currency: string) => string;
+  canSettle: boolean;
+  stale: boolean;
+  markStale: (id: string) => void;
+  refresh: () => void;
 }) {
   const { t } = useTranslation();
   const [mode, setMode] = useState(initialMode);
+  const [reference, setReference] = useState("");
+  const [confirmation, setConfirmation] = useState<Confirmation>({ kind: "idle" });
+  const attempt = useRef<AbortController | null>(null);
   const unavailableId = useId();
   const referenceHintId = useId();
+  const locked = useSyncExternalStore(subscribeFinanceWriteLock, isPaymentLocked);
+  const busy = confirmation.kind === "checking" || confirmation.kind === "posting";
+  const uncertain = confirmation.kind === "uncertain" || (locked && !busy && confirmation.kind !== "confirmed");
+  const invalidBalance = invoice && (!Number.isFinite(invoice.outstanding) ||
+    invoice.outstanding <= 0 || Number(invoice.outstanding.toFixed(MAX_BALANCE_FRACTION_DIGITS)) !== invoice.outstanding);
+  const stopped = canSettle && (busy || stale || uncertain || confirmation.kind === "confirmed");
+  const disabled = !canSettle || !invoice || invalidBalance || stopped || (mode === "card" && !reference.trim());
+
+  // Invalidate the review synchronously when the selected invoice or auth
+  // view unmounts. A dispatched write still finishes its transport ACK.
+  useLayoutEffect(() => () => attempt.current?.abort(), []);
+
+  async function confirm() {
+    if (disabled || !invoice || attempt.current || isPaymentLocked()) return;
+    const controller = new AbortController();
+    attempt.current = controller;
+    const { signal } = controller;
+    setConfirmation({ kind: "checking" });
+
+    const current = await getNativePostedInvoiceDetail(invoice.id, signal).catch(() => null);
+    if (signal.aborted) return;
+    if (!current || current.id !== invoice.id || !PAYABLE_STATUSES.has(current.status) ||
+      current.currency !== invoice.currency || current.outstanding !== invoice.outstanding) {
+      markStale(invoice.id);
+      setConfirmation({ kind: "idle" });
+      return;
+    }
+
+    const paymentMode = mode === "card" ? "Credit Card" : "Cash";
+    let payment: string;
+    setConfirmation({ kind: "posting" });
+    try {
+      const result = await receivePayment({
+        operation_key: crypto.randomUUID(),
+        invoice: current.id,
+        amount: current.outstanding,
+        allocations: [{ invoice: current.id, amount: current.outstanding }],
+        mode_of_payment: paymentMode,
+        ...(mode === "card" ? { reference_no: reference.trim() } : {}),
+      }, { expectFullSettlement: true });
+      payment = result.payment;
+    } catch (error) {
+      if (signal.aborted) return;
+      if (error instanceof NativeFinanceWriteError && error.code === "validation") {
+        markStale(invoice.id);
+        setConfirmation({ kind: "idle" });
+      } else {
+        setConfirmation({ kind: "uncertain" });
+      }
+      return;
+    }
+
+    if (signal.aborted) return;
+    setConfirmation({ kind: "confirmed", payment, receipt: { kind: "loading" } });
+    const href = await getNativePaymentReceipt({
+      payment,
+      invoice: current.id,
+      amount: current.outstanding,
+      currency: current.currency,
+      mode: paymentMode,
+    }, signal).catch(() => null);
+    if (signal.aborted) return;
+    setConfirmation({
+      kind: "confirmed", payment,
+      receipt: href ? { kind: "ready", href } : { kind: "unavailable" },
+    });
+  }
+
   return (
     <Card title={t("nativePayment.review")} hint={invoice?.id}>
-      <div className="ops-form">
+      <form className="ops-form" onSubmit={(event) => {
+        event.preventDefault();
+        void confirm();
+      }}>
         {invoice ? (
           <>
             <dl className="pc-dl">
@@ -270,7 +382,14 @@ function PaymentReview({
                 <input readOnly value={amount(invoice.outstanding, invoice.currency)} />
               </FilterField>
               <FilterField label={t("nativePayment.method")}>
-                <select value={mode} onChange={(event) => setMode(event.target.value === "card" ? "card" : "cash")}>
+                <select
+                  value={mode}
+                  disabled={stopped}
+                  onChange={(event) => {
+                    setReference("");
+                    setMode(event.target.value === "card" ? "card" : "cash");
+                  }}
+                >
                   <option value="cash">{t("financeWrite.modeCash")}</option>
                   <option value="card">{t("financeWrite.modeCard")}</option>
                 </select>
@@ -278,7 +397,15 @@ function PaymentReview({
               {mode === "card" && (
                 <div>
                   <FilterField label={t("financeWrite.reference")}>
-                    <input required autoComplete="off" aria-describedby={referenceHintId} />
+                    <input
+                      required
+                      autoComplete="off"
+                      maxLength={140}
+                      disabled={stopped}
+                      value={reference}
+                      onChange={(event) => setReference(event.target.value)}
+                      aria-describedby={referenceHintId}
+                    />
                   </FilterField>
                   <p className="pc-field__hint" id={referenceHintId}>{t("nativePayment.referenceHint")}</p>
                 </div>
@@ -287,18 +414,47 @@ function PaymentReview({
           </>
         ) : <p className="pc-note">{t("nativePayment.choose")}</p>}
         <div className="ops-form__actions">
-          {/* Posting stays disconnected: the installed action accepts partial payments. */}
           <button
-            type="button"
+            type="submit"
             className="pc-button pc-button--primary"
-            disabled
-            aria-describedby={unavailableId}
+            disabled={disabled}
+            aria-describedby={!canSettle ? unavailableId : undefined}
           >
             {t("nativePayment.confirm")}
           </button>
-          <p className="pc-field__hint" id={unavailableId}>{t("nativePayment.confirmUnavailable")}</p>
+          {!canSettle && (
+            <p className="pc-field__hint" id={unavailableId}>{t("nativePayment.confirmUnavailable")}</p>
+          )}
+          {canSettle && (stale || invalidBalance) && !uncertain && (
+            <>
+              <p className="pc-error" role="alert">{t("nativePayment.refreshReview")}</p>
+              <button type="button" className="pc-button pc-button--secondary" onClick={refresh}>
+                {t("nativePayment.refreshInvoices")}
+              </button>
+            </>
+          )}
         </div>
-      </div>
+        {canSettle && uncertain && <p className="pc-error" role="alert">{t("financeWrite.uncertain")}</p>}
+        {busy && <p className="pc-note" role="status">
+          {t(confirmation.kind === "checking" ? "nativePayment.checkingBalance" : "financeWrite.saving")}
+        </p>}
+        {confirmation.kind === "confirmed" && (
+          <>
+            <p className="pc-note" role="status">{t("nativePayment.confirmed", { payment: confirmation.payment })}</p>
+            {confirmation.receipt.kind === "ready" ? (
+              <div className="ops-form__actions">
+                <a className="pc-button pc-button--secondary" href={confirmation.receipt.href} target="_blank" rel="noopener noreferrer">
+                  {t("nativePayment.openReceipt")}
+                </a>
+              </div>
+            ) : (
+              <p className="pc-note" role="status">
+                {t(confirmation.receipt.kind === "loading" ? "nativePayment.checkingReceipt" : "nativePayment.receiptUnavailable")}
+              </p>
+            )}
+          </>
+        )}
+      </form>
     </Card>
   );
 }

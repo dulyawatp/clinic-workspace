@@ -112,6 +112,23 @@ describe("native transport opt-in", () => {
 });
 
 describe("native session bootstrap", () => {
+  it.each([
+    [undefined, undefined],
+    ["full_balance_v1", "full_balance_v1"],
+    ["full_balance_v1 ", undefined],
+    ["FULL_BALANCE_V1", undefined],
+    [true, undefined],
+    [{ version: "full_balance_v1" }, undefined],
+  ])("maps only an exact native payment settlement marker (%j)", async (marker, expected) => {
+    serveBootstrap(liveMessage({
+      paymentSettlement: marker,
+      capabilities: { "write.payment.receive": "enabled" },
+    }));
+    const session = await fetchNativeSession();
+    expect(session?.paymentSettlement).toBe(expected);
+    expect(session?.capabilities["write.payment.receive"]).toBe("enabled");
+  });
+
   it("reads the Frappe method and unwraps only the message envelope", async () => {
     serveBootstrap(liveMessage());
     const fetchSpy = vi.spyOn(globalThis, "fetch");

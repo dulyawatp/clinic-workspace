@@ -19,6 +19,7 @@ payload and are never logged.
 
 from clinic_ui.core import dto
 from clinic_ui.core import finance_contract
+from clinic_ui.core import write_fence
 from clinic_ui.core.capabilities import bootstrap_capabilities
 from clinic_ui.core.epoch import session_epoch
 from clinic_ui.core.policy import (
@@ -287,7 +288,7 @@ def _purchase_write_flags(gateway, settings, role):
         return disabled
 
 
-def _finance_write_flags(gateway, settings, role):
+def _finance_write_flags(gateway, settings, role, actor):
     """Return ``(invoice, payment)`` when each finance surface is open.
 
     Independent of the purchasing and clinical flags: exact approved site,
@@ -324,15 +325,29 @@ def _finance_write_flags(gateway, settings, role):
                 )
             )
         )
+    except Exception:
+        return disabled
+    try:
         payment_ok = (
-            gateway.native_finance_install_problem() is None
+            role in PAYMENT_ROLE_CODES
+            and actor != write_fence.LATCH_ACTOR
+            and gateway.native_finance_settlement_verified() is True
+            and gateway.native_finance_payment_install_problem() is None
             and gateway.write_deployment_approved() is True
             and gateway.write_fence_ready() is True
             and gateway.native_finance_can_write("Payment Entry") is True
+            and gateway.native_finance_can_submit("Payment Entry") is True
+            and gateway.native_doctype_can_read("Sales Invoice") is True
         )
-        return invoice_ok, payment_ok
+        if payment_ok:
+            limit = finance_contract.budget(finance_contract.PAYMENT_KIND)
+            records = gateway.list_committed_finance_receipts(
+                limit, kind=finance_contract.PAYMENT_KIND
+            )
+            payment_ok = len(records) < limit
     except Exception:
-        return disabled
+        payment_ok = False
+    return invoice_ok, payment_ok
 
 
 def _admin_write_flags(gateway, settings, role):
@@ -419,7 +434,7 @@ def bootstrap(gateway):
             write_purchase_receipt,
         ) = _purchase_write_flags(gateway, settings, role)
         write_invoice_submit, write_payment_receive = _finance_write_flags(
-            gateway, settings, role
+            gateway, settings, role, view.user
         )
         capabilities = bootstrap_capabilities(
             write_patient_create=write_create,
@@ -446,7 +461,7 @@ def bootstrap(gateway):
             write_admin_user=write_admin_user,
             write_admin_master=write_admin_master,
         )
-        return dto.build_bootstrap(
+        result = dto.build_bootstrap(
             session_epoch=epoch,
             user_id=view.user,
             display_name=view.full_name,
@@ -454,5 +469,8 @@ def bootstrap(gateway):
             csrf_token=csrf_token,
             capabilities=capabilities,
         )
+        if write_payment_receive:
+            result["paymentSettlement"] = "full_balance_v1"
+        return result
     except ValueError:
         gateway.deny()

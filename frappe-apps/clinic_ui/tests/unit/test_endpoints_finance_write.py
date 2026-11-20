@@ -744,6 +744,108 @@ class InvoiceReadTests(unittest.TestCase):
 
 
 class PaymentReceiveTests(unittest.TestCase):
+    def test_ledger_ranges_are_locked_before_gate_recheck_and_dispatch(self):
+        fake = gateway()
+        finance_write.receive_payment(fake, payment_body(), CSRF)
+        order = fake.call_order
+        self.assertLess(order.index("finance_lock_profile"), order.index("snapshot_reset"))
+        self.assertLess(order.index("snapshot_reset"), order.index("finance_invoice_lock"))
+        self.assertLess(order.index("finance_invoice_lock"), order.index("finance_ledger_ranges"))
+        self.assertLess(order.index("finance_ledger_ranges"), order.index("finance_dispatch"))
+
+    def test_ledger_range_failure_rolls_back_without_dispatch(self):
+        fake = gateway()
+        fake.lock_finance_payment_ledger_ranges = mock.Mock(
+            side_effect=patient_write.WriteUncertain()
+        )
+        finance_write.receive_payment(fake, payment_body(), CSRF)
+        self.assertNotIn("finance_dispatch", fake.call_order)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.finance_payment_calls, [])
+
+    def test_authority_drift_under_lock_refuses_before_dispatch(self):
+        for denied in ("create", "submit", "target"):
+            with self.subTest(denied=denied):
+                fake = gateway()
+                create = mock.Mock(side_effect=[True, denied != "create"])
+                fake.native_finance_can_write = create
+                fake.native_finance_can_submit = mock.Mock(return_value=denied != "submit")
+                fake.native_finance_can_read_invoice = mock.Mock(return_value=denied != "target")
+                try:
+                    finance_write.receive_payment(fake, payment_body(), CSRF)
+                except Denied:
+                    pass
+                self.assertIn("finance_invoice_lock", fake.call_order)
+                self.assertNotIn("finance_dispatch", fake.call_order)
+                self.assertEqual(fake.finance_payment_calls, [])
+
+    def test_payment_uses_locked_facts_and_voucher_verifier(self):
+        fake = gateway()
+        facts = {
+            "invoice": "SINV-1", "outstanding": 20.0, "company": "SIT Synthetic Company USD",
+            "currency": "USD", "customer": "CUST-1",
+            "receivable_account": "Invoice Debtors", "mode_account": "Cash - SITCO",
+            "mode_of_payment": "Cash",
+        }
+        fake.payment_settlement_facts = mock.Mock(return_value=facts)
+        fake.verify_full_payment_effects = mock.Mock(return_value=True)
+        result = finance_write.receive_payment(fake, payment_body(), CSRF)
+        self.assertEqual(result["status"], "received")
+        self.assertEqual(fake.finance_payment_calls[0]["paid_from"], "Invoice Debtors")
+        fake.verify_full_payment_effects.assert_called_once_with("PE-1", facts)
+        self.assertEqual(fake.finance_facts_calls, [])
+
+    def test_payment_rejects_missing_locked_facts_before_dispatch(self):
+        fake = gateway()
+        fake.payment_settlement_facts = mock.Mock(return_value=None)
+        finance_write.receive_payment(fake, payment_body(), CSRF)
+        self.assertNotIn("finance_dispatch", fake.call_order)
+        self.assertEqual(fake.finance_payment_calls, [])
+
+    def test_locked_facts_wrong_company_refuses_before_dispatch(self):
+        fake = gateway()
+        fake.payment_settlement_facts = mock.Mock(return_value={
+            "company": "Other", "currency": "USD", "customer": "CUST-1"
+        })
+        finance_write.receive_payment(fake, payment_body(), CSRF)
+        self.assertNotIn("finance_dispatch", fake.call_order)
+        self.assertEqual(fake.finance_payment_calls, [])
+
+    def test_changed_locked_invoice_balance_refuses_before_dispatch(self):
+        fake = gateway()
+        changed = payment_detail()
+        changed["invoice"]["outstanding_amount"] = 19.0
+        fake.finance_detail_sequence = [payment_detail(), changed]
+        finance_write.receive_payment(fake, payment_body(), CSRF)
+        self.assertNotIn("finance_dispatch", fake.call_order)
+        self.assertEqual(fake.finance_payment_calls, [])
+
+    def test_failed_voucher_verification_rolls_back_without_receipt(self):
+        fake = gateway()
+        fake.verify_full_payment_effects = mock.Mock(return_value=False)
+        finance_write.receive_payment(fake, payment_body(), CSRF)
+        self.assertIn("finance_dispatch", fake.call_order)
+        self.assertEqual(fake.rollback_calls, 1)
+        self.assertEqual(fake.commit_calls, 0)
+        self.assertEqual(fake.finance_fence_claim.committed, [])
+
+    def test_unverified_native_settlement_refuses_before_dispatch(self):
+        fake = gateway()
+        fake.finance_settlement_verified = False
+        finance_write.receive_payment(fake, payment_body(), CSRF)
+        self.assertNotIn("finance_dispatch", fake.call_order)
+        self.assertEqual(fake.finance_payment_calls, [])
+
+    def test_payment_locks_invoice_before_dispatch(self):
+        fake = gateway()
+        finance_write.receive_payment(fake, payment_body(), CSRF)
+        self.assertIn("finance_invoice_lock", fake.call_order)
+        self.assertIn("finance_dispatch", fake.call_order)
+        self.assertLess(
+            fake.call_order.index("finance_invoice_lock"),
+            fake.call_order.index("finance_dispatch"),
+        )
+
     def test_one_payment_is_posted_with_a_matching_allocation(self):
         fake = gateway()
 
@@ -919,7 +1021,7 @@ class PaymentReceiveTests(unittest.TestCase):
             fake.finance_payment_calls[0]["reference_no"], "TERM-001"
         )
 
-    def test_a_partial_payment_reports_the_server_balance(self):
+    def test_a_partial_payment_is_refused_before_dispatch(self):
         fake = gateway()
         fake.finance_payment_detail = payment_detail(
             invoice={
@@ -938,10 +1040,9 @@ class PaymentReceiveTests(unittest.TestCase):
             CSRF,
         )
 
-        self.assertEqual(payload["outstanding"], 30.0)
-        expected = fake.finance_facts_calls[0][1]
-        self.assertIsNone(expected["status"])
-        self.assertEqual(expected["unchanged_status"], "Unpaid")
+        self.assertEqual(payload["code"], "VALIDATION")
+        self.assertEqual(fake.finance_fence_calls, [])
+        self.assertEqual(fake.finance_payment_calls, [])
 
     def test_the_payment_body_is_strict(self):
         for candidate in (
@@ -1387,6 +1488,61 @@ class AckTests(unittest.TestCase):
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_legacy_flag_without_release_profile_does_not_advertise_settlement(self):
+        fake = gateway()
+        fake.finance_settlement_verified = False
+        result = session.bootstrap(fake)
+        self.assertEqual(result["capabilities"]["write.payment.receive"], "read_only")
+        self.assertNotIn("paymentSettlement", result)
+        self.assertEqual(result["capabilities"]["write.invoice.submit"], "enabled")
+
+    def test_full_profile_advertises_exact_marker(self):
+        result = session.bootstrap(gateway())
+        self.assertEqual(result["capabilities"]["write.payment.receive"], "enabled")
+        self.assertEqual(result["paymentSettlement"], "full_balance_v1")
+
+    def test_no_submit_authority_or_budget_means_no_marker(self):
+        for condition in ("submit", "budget"):
+            with self.subTest(condition=condition):
+                fake = gateway()
+                if condition == "submit":
+                    fake.finance_submit_authority = {"Payment Entry": False}
+                else:
+                    committed(fake)
+                result = session.bootstrap(fake)
+                self.assertEqual(result["capabilities"]["write.payment.receive"], "read_only")
+                self.assertNotIn("paymentSettlement", result)
+                self.assertEqual(result["capabilities"]["write.invoice.submit"], "enabled")
+
+    def test_payment_advertisement_requires_each_existing_guard(self):
+        for condition in ("create", "invoice_read", "metadata", "fence", "deployment", "budget_error"):
+            with self.subTest(condition=condition):
+                fake = gateway()
+                if condition == "create":
+                    fake.finance_create_authority = {"Payment Entry": False}
+                elif condition == "invoice_read":
+                    fake.doctype_reads = {"Sales Invoice": False}
+                elif condition == "metadata":
+                    fake.finance_install_problem = "missing field"
+                elif condition == "fence":
+                    fake.fence_ready = False
+                elif condition == "deployment":
+                    fake.deployment_approved = False
+                else:
+                    fake.finance_receipt_list_error = patient_write.StoreUnavailable()
+                result = session.bootstrap(fake)
+                self.assertEqual(result["capabilities"]["write.payment.receive"], "read_only")
+                self.assertNotIn("paymentSettlement", result)
+
+    def test_reserved_fence_actor_cannot_advertise_payment(self):
+        fake = gateway()
+        fake.current_session = session_view(
+            user=write_fence.LATCH_ACTOR, roles=ROLES["CAS"]
+        )
+        result = session.bootstrap(fake)
+        self.assertEqual(result["capabilities"]["write.payment.receive"], "read_only")
+        self.assertNotIn("paymentSettlement", result)
+
     def test_a_cashier_sees_the_finance_surfaces(self):
         capabilities = session.bootstrap(gateway())["capabilities"]
         self.assertEqual(capabilities["write.invoice.submit"], "enabled")

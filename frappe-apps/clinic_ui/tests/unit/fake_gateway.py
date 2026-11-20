@@ -119,6 +119,21 @@ class FakeFence:
         return False
 
 
+class FakeFinanceLease(FakeFence):
+    def __init__(self, gateway):
+        super().__init__(gateway.finance_fence_claim, gateway.finance_fence_error)
+        self.gateway = gateway
+
+    def __enter__(self):
+        if self.error is not None:
+            raise self.error
+        return self
+
+    def dispatch(self):
+        self.gateway.call_order.append("finance_dispatch")
+        return self.claim
+
+
 class FakeGateway:
     def __init__(
         self,
@@ -1995,6 +2010,9 @@ class FakeGateway:
     def native_finance_install_problem(self):
         return self.finance_install_problem
 
+    def native_finance_payment_install_problem(self):
+        return self.finance_install_problem
+
     def native_finance_invoice_install_problem(self):
         return self.finance_invoice_install_problem
 
@@ -2003,6 +2021,9 @@ class FakeGateway:
 
     def native_finance_can_submit(self, doctype):
         return self.finance_submit_authority.get(doctype, True)
+
+    def native_finance_can_read_invoice(self, invoice):
+        return True
 
     def native_finance_invoice_view(self, invoice_id):
         self.finance_invoice_view_calls.append(invoice_id)
@@ -2097,6 +2118,36 @@ class FakeGateway:
 
     def native_finance_payment_detail(self, payload):
         return self._finance_detail(self.finance_payment_detail, payload)
+
+    def lock_finance_invoice(self, invoice):
+        self.call_order.append("finance_invoice_lock")
+
+    def finance_payment_lock_profile(self):
+        self.call_order.append("finance_lock_profile")
+        return ("voucher_idx", "against_idx")
+
+    def lock_finance_payment_ledger_ranges(self, invoice, profile):
+        self.call_order.append("finance_ledger_ranges")
+
+    def native_finance_settlement_verified(self):
+        return getattr(self, "finance_settlement_verified", True)
+
+    def payment_settlement_facts(self, invoice, mode_account, amount, allocation, mode):
+        detail = self.finance_payment_detail
+        if detail is None or amount != allocation:
+            return None
+        state = detail["invoice"]
+        if amount != state["outstanding_amount"]:
+            return None
+        return {
+            "invoice": invoice, "outstanding": amount, "company": detail["company"],
+            "currency": detail["currency"], "customer": state["customer"],
+            "receivable_account": state.get("debit_to") or detail["receivable_account"],
+            "mode_account": mode_account, "mode_of_payment": mode,
+        }
+
+    def verify_full_payment_effects(self, reference, settlement):
+        return not bool(self.finance_facts)
 
     def native_finance_baseline(self, kind, invoice=None):
         self.finance_baseline_calls.append((kind, invoice))
@@ -2305,6 +2356,11 @@ class FakeGateway:
         self.call_order.append("finance_fence")
         self.finance_fence_calls.append((actor, kind, operation_key, payload_digest))
         return FakeFence(self.finance_fence_claim, self.finance_fence_error)
+
+    def finance_payment_lease(self, actor, kind, operation_key, payload_digest):
+        self.call_order.append("finance_lease")
+        self.finance_fence_calls.append((actor, kind, operation_key, payload_digest))
+        return FakeFinanceLease(self)
 
 
 class FakeFinanceReceipt:

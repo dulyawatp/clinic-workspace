@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -21,6 +21,13 @@ const { list, ReadError } = vi.hoisted(() => ({
 }));
 
 const SALES_INVOICE = "/api/resource/Sales%20Invoice";
+const RECEIVE = "/api/method/clinic_ui.api.finance_write.receive_payment";
+const ACK = "/api/method/clinic_ui.api.finance_write.ack";
+const ACK_TOKEN = "a".repeat(64);
+const PAYMENT_LOCK = "clinic.finance-write.pending.payment_receive";
+const PAYMENT_ID = "PE-TEST-1";
+const PAYMENT_ENTRY = `/api/resource/Payment%20Entry/${PAYMENT_ID}`;
+const RECEIPT_NAME = "Open receipt (new tab)";
 
 vi.mock("../../transport/native/payable-invoice", () => ({
   listNativePayableInvoices: list,
@@ -69,6 +76,69 @@ const currency = () => screen.getByRole("combobox", { name: "Currency" });
 const selectInvoice = (id: string) =>
   screen.findByRole("button", { name: `Select ${id}` });
 const review = () => within(screen.getByRole("region", { name: "Payment review" }));
+const confirm = () => review().getByRole("button", { name: "Confirm full payment" });
+
+function optIn({
+  marker = "full_balance_v1",
+  capability = "enabled",
+  role = "CAS",
+  sessionEpoch = "native-epoch",
+}: { marker?: unknown; capability?: unknown; role?: string; sessionEpoch?: string } = {}) {
+  server.use(http.get(NATIVE_BOOTSTRAP, () => HttpResponse.json({
+    message: {
+      mode: "live", sessionEpoch,
+      user: { id: "native|cas", displayName: "Native CAS", roles: [role] },
+      capabilities: { "write.payment.receive": capability },
+      csrfToken: "native-csrf",
+      paymentSettlement: marker,
+    },
+  })));
+}
+
+function detail(overrides: Record<string, unknown> = {}) {
+  return HttpResponse.json({ data: {
+    name: thb.id, docstatus: 1, status: "Unpaid", customer: thb.customer, company: "Clinic",
+    posting_date: thb.postingDate, currency: thb.currency, total: thb.total, discount_amount: 0,
+    net_total: thb.total, total_taxes_and_charges: 0, grand_total: thb.total,
+    outstanding_amount: thb.outstanding,
+    items: [{ item_name: "Consultation", qty: 1, uom: "Nos", rate: thb.total, amount: thb.total, net_amount: thb.total }],
+    taxes: [],
+    ...overrides,
+  } });
+}
+
+function received() {
+  return HttpResponse.json({
+    message: { payment: PAYMENT_ID, invoice: thb.id, status: "received", outstanding: 0, ackToken: ACK_TOKEN },
+  });
+}
+
+const allocation = { reference_doctype: "Sales Invoice", reference_name: thb.id, allocated_amount: thb.outstanding };
+
+function receipt(mode = "Cash", overrides: Record<string, unknown> = {}) {
+  return HttpResponse.json({ data: {
+    name: PAYMENT_ID,
+    docstatus: 1,
+    payment_type: "Receive",
+    mode_of_payment: mode,
+    paid_from_account_currency: thb.currency,
+    paid_to_account_currency: thb.currency,
+    paid_amount: thb.outstanding,
+    received_amount: thb.outstanding,
+    references: [allocation],
+    ...overrides,
+  } });
+}
+
+function setupReceiptFlow() {
+  optIn();
+  list.mockResolvedValue({ rows: [thb, anotherThb], hasMore: false });
+  server.use(
+    http.get(`${SALES_INVOICE}/${thb.id}`, () => detail()),
+    http.post(RECEIVE, received),
+    http.post(ACK, () => HttpResponse.json({ message: { acknowledged: true } })),
+  );
+}
 
 beforeEach(() => {
   localStorage.setItem(LOCALE_KEY, "en");
@@ -84,6 +154,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   clearNativeCsrfToken();
   localStorage.removeItem(LOCALE_KEY);
+  localStorage.removeItem(PAYMENT_LOCK);
 });
 
 it("keeps the fixture payment route local without a Sales Invoice read or a write", async () => {
@@ -123,6 +194,332 @@ it("makes only bootstrap and a Sales Invoice GET on the native CAS route", async
   await user.click(confirm);
   expect(fetchSpy.mock.calls.map(([url, init]) => [String(url).split("?")[0], init?.method ?? "GET"]))
     .toEqual([[NATIVE_BOOTSTRAP, "GET"], [SALES_INVOICE, "GET"]]);
+});
+
+it.each([
+  { marker: "full_balance_v2" },
+  { marker: "full_balance_v1 " },
+  { marker: true },
+  { capability: "read_only" },
+  { capability: null },
+])("keeps payment read-only unless both exact signals are present (%j)", async (signal) => {
+  optIn(signal);
+  list.mockResolvedValue({ rows: [thb], hasMore: false });
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  const user = userEvent.setup();
+  open();
+  await user.click(await selectInvoice(thb.id));
+  expect(confirm()).toBeDisabled();
+  await user.click(confirm());
+  expect(fetchSpy.mock.calls.map(([url]) => url)).toEqual([NATIVE_BOOTSTRAP]);
+});
+
+it.each(["Cash", "Credit Card"])("rechecks and posts exactly one acknowledged full %s settlement", async (mode) => {
+  optIn();
+  list.mockResolvedValue({ rows: [thb], hasMore: false });
+  const calls: string[] = [];
+  const writes: Record<string, unknown>[] = [];
+  let release!: () => void;
+  const delayed = new Promise<void>((resolve) => { release = resolve; });
+  let releaseAck!: () => void;
+  const delayedAck = new Promise<void>((resolve) => { releaseAck = resolve; });
+  server.use(
+    http.get(`${SALES_INVOICE}/${thb.id}`, async () => {
+      calls.push("detail");
+      await delayed;
+      return detail();
+    }),
+    http.post(RECEIVE, async ({ request }) => {
+      calls.push("receive");
+      writes.push(await request.json() as Record<string, unknown>);
+      return received();
+    }),
+    http.post(ACK, async ({ request }) => {
+      calls.push("ack");
+      writes.push(await request.json() as Record<string, unknown>);
+      await delayedAck;
+      return HttpResponse.json({ message: { acknowledged: true } });
+    }),
+    http.get(PAYMENT_ENTRY, () => {
+      calls.push("receipt");
+      return receipt(mode);
+    }),
+  );
+  const user = userEvent.setup();
+  open();
+  await user.click(await selectInvoice(thb.id));
+  if (mode === "Credit Card") {
+    await user.selectOptions(review().getByLabelText("Payment method"), mode);
+    expect(confirm()).toBeDisabled();
+    await user.type(review().getByLabelText("Card terminal reference"), "TERM-492218");
+  }
+  expect(confirm()).toBeEnabled();
+  const form = confirm().closest("form")!;
+  act(() => {
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+  });
+  await waitFor(() => expect(calls).toEqual(["detail"]));
+  await act(async () => release());
+  await waitFor(() => expect(calls).toEqual(["detail", "receive", "ack"]));
+  expect(review().queryByRole("link", { name: RECEIPT_NAME })).not.toBeInTheDocument();
+  await act(async () => releaseAck());
+  expect(await review().findByText("Payment received. Payment ID: PE-TEST-1.")).toHaveAttribute("role", "status");
+  const print = await review().findByRole("link", { name: RECEIPT_NAME });
+  expect(print).toHaveAttribute("href", `/printview?doctype=Payment+Entry&name=${PAYMENT_ID}&format=Standard&no_letterhead=1`);
+  expect(print).toHaveAttribute("target", "_blank");
+  expect(print).toHaveAttribute("rel", "noopener noreferrer");
+  expect(calls).toEqual(["detail", "receive", "ack", "receipt"]);
+  expect(writes).toEqual([
+    {
+      operation_key: expect.any(String),
+      invoice: thb.id,
+      mode_of_payment: mode,
+      amount: thb.outstanding,
+      allocations: [{ invoice: thb.id, amount: thb.outstanding }],
+      ...(mode === "Credit Card" ? { reference_no: "TERM-492218" } : {}),
+    },
+    { operation_key: writes[0]?.operation_key, kind: "payment_receive", ack_token: ACK_TOKEN },
+  ]);
+  expect(confirm()).toBeDisabled();
+});
+
+it.each([
+  { name: "PE-other" },
+  { docstatus: 0 },
+  { docstatus: 2 },
+  { payment_type: "Pay" },
+  { mode_of_payment: "Credit Card" },
+  { paid_from_account_currency: "USD" },
+  { paid_to_account_currency: "USD" },
+  { paid_amount: thb.outstanding + 0.01 },
+  { received_amount: String(thb.outstanding) },
+  { references: [] },
+  { references: [allocation, allocation] },
+  { references: [{ ...allocation, reference_doctype: "Purchase Invoice" }] },
+  { references: [{ ...allocation, reference_name: anotherThb.id }] },
+  { references: [{ ...allocation, allocated_amount: thb.outstanding - 0.01 }] },
+])("preserves confirmation but refuses a mismatched or malformed receipt (%j)", async (overrides) => {
+  setupReceiptFlow();
+  server.use(http.get(PAYMENT_ENTRY, () => receipt("Cash", overrides)));
+  const user = userEvent.setup();
+  open();
+  await user.click(await selectInvoice(thb.id));
+  await user.click(confirm());
+  expect(await review().findByText("Receipt unavailable.")).toBeVisible();
+  expect(review().getByText("Payment received. Payment ID: PE-TEST-1.")).toBeVisible();
+  expect(review().queryByRole("link", { name: RECEIPT_NAME })).not.toBeInTheDocument();
+  expect(confirm()).toBeDisabled();
+});
+
+it("keeps a denied receipt distinct from confirmed payment and does not read it again or post again", async () => {
+  setupReceiptFlow();
+  const getReceipt = vi.fn(() => new HttpResponse(null, { status: 403 }));
+  server.use(http.get(PAYMENT_ENTRY, getReceipt));
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  const user = userEvent.setup();
+  open();
+  await user.click(await selectInvoice(thb.id));
+  await user.click(confirm());
+  expect(await review().findByText("Receipt unavailable.")).toBeVisible();
+  expect(review().getByText("Payment received. Payment ID: PE-TEST-1.")).toBeVisible();
+  expect(review().queryByRole("link", { name: RECEIPT_NAME })).not.toBeInTheDocument();
+  await user.click(confirm());
+  expect(getReceipt).toHaveBeenCalledTimes(1);
+  expect(fetchSpy.mock.calls.map(([url, init]) => [url, init?.method ?? "GET"])).toEqual([
+    [NATIVE_BOOTSTRAP, "GET"],
+    [`${SALES_INVOICE}/${thb.id}`, "GET"],
+    [RECEIVE, "POST"],
+    [ACK, "POST"],
+    [PAYMENT_ENTRY, "GET"],
+  ]);
+});
+
+it("does not read the receipt or show confirmation when acknowledgment fails", async () => {
+  setupReceiptFlow();
+  const read = vi.fn(() => receipt());
+  server.use(
+    http.post(ACK, () => new HttpResponse(null, { status: 503 })),
+    http.get(PAYMENT_ENTRY, read),
+  );
+  const user = userEvent.setup();
+  open();
+  await user.click(await selectInvoice(thb.id));
+  await user.click(confirm());
+  expect(await review().findByRole("alert")).toHaveTextContent(/outcome is uncertain/i);
+  expect(confirm()).toBeDisabled();
+  expect(read).not.toHaveBeenCalled();
+  expect(review().queryByText(/Payment ID/)).not.toBeInTheDocument();
+  expect(review().queryByRole("link", { name: RECEIPT_NAME })).not.toBeInTheDocument();
+});
+
+it.each(["invoice", "auth epoch"])("cancels a pending receipt and hides it after changing %s", async (change) => {
+  setupReceiptFlow();
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const read = vi.fn(async () => {
+    await pending;
+    return receipt();
+  });
+  server.use(http.get(PAYMENT_ENTRY, read));
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  const user = userEvent.setup();
+  open();
+  await user.click(await selectInvoice(thb.id));
+  await user.click(confirm());
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+  expect(review().getByText("Payment received. Payment ID: PE-TEST-1.")).toBeVisible();
+  expect(review().queryByRole("link", { name: RECEIPT_NAME })).not.toBeInTheDocument();
+  const signal = fetchSpy.mock.calls.find(([url]) => url === PAYMENT_ENTRY)?.[1]?.signal;
+  if (change === "auth epoch") {
+    optIn({ sessionEpoch: "replacement-epoch" });
+    await user.click(screen.getByRole("button", { name: "Refresh session" }));
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+  }
+  await user.click(await selectInvoice(anotherThb.id));
+  expect(signal?.aborted).toBe(true);
+  await act(async () => release());
+  expect(review().getByText(anotherThb.customer)).toBeVisible();
+  expect(review().queryByRole("link", { name: RECEIPT_NAME })).not.toBeInTheDocument();
+  expect(review().queryByText("Receipt unavailable.")).not.toBeInTheDocument();
+});
+
+it.each([
+  { outstanding_amount: 2800 },
+  { outstanding_amount: 2850.5001 },
+  { outstanding_amount: 0 },
+  { currency: "USD" },
+  { status: "Paid" },
+  { status: "Cancelled" },
+  { docstatus: 0 },
+  { name: anotherThb.id },
+])("stops before posting when recheck fails or invoice changed (%j)", async (changed) => {
+  optIn();
+  list.mockResolvedValue({ rows: [thb], hasMore: false });
+  server.use(http.get(`${SALES_INVOICE}/${thb.id}`, () => detail(changed)));
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  const user = userEvent.setup();
+  open();
+  await user.click(await selectInvoice(thb.id));
+  await user.click(confirm());
+  expect(await review().findByRole("alert")).toHaveTextContent(/refresh.*review/i);
+  expect(confirm()).toBeDisabled();
+  expect(fetchSpy.mock.calls.map(([url]) => url)).toEqual([NATIVE_BOOTSTRAP, `${SALES_INVOICE}/${thb.id}`]);
+  await user.click(review().getByRole("button", { name: "Refresh invoices" }));
+  await user.click(await selectInvoice(thb.id));
+  expect(list).toHaveBeenCalledTimes(2);
+  expect(confirm()).toBeEnabled();
+});
+
+it("does not reuse a stale invoice snapshot after switching the selection away and back", async () => {
+  optIn();
+  list.mockResolvedValue({ rows: [thb, anotherThb], hasMore: false });
+  const read = vi.fn(() => detail({ outstanding_amount: 2800 }));
+  server.use(http.get(`${SALES_INVOICE}/${thb.id}`, read));
+  const user = userEvent.setup();
+  open();
+  await user.click(await selectInvoice(thb.id));
+  await user.click(confirm());
+  await review().findByRole("alert");
+  await user.click(await selectInvoice(anotherThb.id));
+  expect(confirm()).toBeEnabled();
+  await user.click(await selectInvoice(thb.id));
+  expect(confirm()).toBeDisabled();
+  expect(review().getByRole("alert")).toHaveTextContent(/refresh.*review/i);
+  expect(read).toHaveBeenCalledTimes(1);
+});
+
+it("persists the uncertain stop across remount and does not dispatch a retry", async () => {
+  optIn();
+  list.mockResolvedValue({ rows: [thb], hasMore: false });
+  const post = vi.fn(() => HttpResponse.error());
+  const ack = vi.fn();
+  const readReceipt = vi.fn(() => receipt());
+  server.use(
+    http.get(`${SALES_INVOICE}/${thb.id}`, () => detail()),
+    http.post(RECEIVE, post),
+    http.post(ACK, ack),
+    http.get(PAYMENT_ENTRY, readReceipt),
+  );
+  const user = userEvent.setup();
+  const first = open();
+  await user.click(await selectInvoice(thb.id));
+  await user.click(confirm());
+  expect(await review().findByRole("alert")).toHaveTextContent("The outcome is uncertain. Do not retry");
+  expect(confirm()).toBeDisabled();
+  first.unmount();
+  open();
+  await user.click(await selectInvoice(thb.id));
+  expect(review().getByRole("alert")).toHaveTextContent("The outcome is uncertain. Do not retry");
+  expect(confirm()).toBeDisabled();
+  await user.click(confirm());
+  expect(post).toHaveBeenCalledTimes(1);
+  expect(ack).not.toHaveBeenCalled();
+  expect(readReceipt).not.toHaveBeenCalled();
+});
+
+it("cancels an old balance check when another invoice is selected", async () => {
+  optIn();
+  list.mockResolvedValue({ rows: [thb, anotherThb], hasMore: false });
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const read = vi.fn(async () => {
+    await pending;
+    return detail();
+  });
+  const post = vi.fn(received);
+  server.use(http.get(`${SALES_INVOICE}/${thb.id}`, read), http.post(RECEIVE, post));
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  const user = userEvent.setup();
+  open();
+  await user.click(await selectInvoice(thb.id));
+  await user.click(confirm());
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+  const signal = fetchSpy.mock.calls.find(([url]) => url === `${SALES_INVOICE}/${thb.id}`)?.[1]?.signal;
+  await user.click(await selectInvoice(anotherThb.id));
+  expect(signal?.aborted).toBe(true);
+  await act(async () => release());
+  expect(review().getByText(anotherThb.customer)).toBeVisible();
+  expect(post).not.toHaveBeenCalled();
+});
+
+it.each(["invoice", "auth epoch"])("suppresses an acknowledged result from a previous %s", async (change) => {
+  optIn();
+  list.mockResolvedValue({ rows: [thb, anotherThb], hasMore: false });
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const post = vi.fn(async () => {
+    await pending;
+    return received();
+  });
+  const ack = vi.fn(() => HttpResponse.json({ message: { acknowledged: true } }));
+  const readReceipt = vi.fn(() => receipt());
+  server.use(
+    http.get(`${SALES_INVOICE}/${thb.id}`, () => detail()),
+    http.post(RECEIVE, post),
+    http.post(ACK, ack),
+    http.get(PAYMENT_ENTRY, readReceipt),
+  );
+  const user = userEvent.setup();
+  open();
+  await user.click(await selectInvoice(thb.id));
+  await user.click(confirm());
+  await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
+  if (change === "auth epoch") {
+    optIn({ sessionEpoch: "replacement-epoch" });
+    await user.click(screen.getByRole("button", { name: "Refresh session" }));
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+  }
+  await user.click(await selectInvoice(anotherThb.id));
+  await act(async () => release());
+  await waitFor(() => {
+    expect(ack).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem(PAYMENT_LOCK)).toBeNull();
+  });
+  expect(review().getByText(anotherThb.customer)).toBeVisible();
+  expect(screen.queryByText(/PE-TEST-1/)).not.toBeInTheDocument();
+  expect(readReceipt).not.toHaveBeenCalled();
+  expect(confirm()).toBeEnabled();
 });
 
 it("defaults to THB, discovers eligible currencies on demand, and resets review at each currency change", async () => {
@@ -228,7 +625,7 @@ it("distinguishes an empty THB list from a denied read and never substitutes dem
 });
 
 it("does not read invoices for a native user without the cashier role", async () => {
-  server.use(http.get(NATIVE_BOOTSTRAP, () => nativeSession("ADM")));
+  optIn({ role: "ADM" });
   const fetchSpy = vi.spyOn(globalThis, "fetch");
   open();
   expect(await screen.findByRole("alert")).toHaveTextContent("You don’t have permission to view unpaid invoices.");

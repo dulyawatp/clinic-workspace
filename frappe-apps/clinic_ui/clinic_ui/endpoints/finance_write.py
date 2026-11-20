@@ -181,7 +181,7 @@ def _shared_gate(gateway, csrf_token, allowed_codes):
         gateway.deny()
     if gateway.native_finance_boundary_problem() is not None:
         gateway.deny()
-    if gateway.native_finance_install_problem() is not None:
+    if gateway.native_finance_payment_install_problem() is not None:
         gateway.deny()
     return settings, view, role
 
@@ -449,10 +449,12 @@ def _perform(
             fields=_digest_fields(payload),
         )
         budget_ok = _budget_remaining(gateway, kind)
-        if budget_ok:
+        if budget_ok and kind != finance_contract.PAYMENT_KIND:
             baseline = gateway.native_finance_baseline(
                 kind, payload.get("invoice")
             )
+        else:
+            baseline = None
     except finance_contract.FinanceContractError:
         return _respond_error(gateway, HTTP_UNPROCESSABLE, VALIDATION_CODE)
     except (
@@ -466,12 +468,25 @@ def _perform(
 
     reference = None
     try:
-        with gateway.finance_write_fence(
+        fence = (
+            gateway.finance_payment_lease
+            if kind == finance_contract.PAYMENT_KIND
+            else gateway.finance_write_fence
+        )
+        with fence(
             actor, kind, payload["operation_key"], digest
-        ) as claim:
+        ) as held:
+            claim = None if kind == finance_contract.PAYMENT_KIND else held
             try:
                 _require_budget(gateway, kind)
+                if kind == finance_contract.PAYMENT_KIND:
+                    lock_profile = gateway.finance_payment_lock_profile()
                 gateway.reset_native_read_snapshot()
+                if kind == finance_contract.PAYMENT_KIND:
+                    gateway.lock_finance_invoice(payload["invoice"])
+                    gateway.lock_finance_payment_ledger_ranges(
+                        payload["invoice"], lock_profile
+                    )
                 fence_settings, fence_view, fence_role = _shared_gate(
                     gateway, csrf_token, allowed_codes
                 )
@@ -479,6 +494,12 @@ def _perform(
                     raise patient_write.WriteUncertain()
                 if fence_role not in allowed_codes:
                     gateway.deny()
+                if kind == finance_contract.PAYMENT_KIND and (
+                    gateway.native_finance_can_write(finance_contract.PAYMENT_DOCTYPE) is not True
+                    or gateway.native_finance_can_submit(finance_contract.PAYMENT_DOCTYPE) is not True
+                    or gateway.native_finance_can_read_invoice(payload["invoice"]) is not True
+                ):
+                    raise finance_contract.FinanceTargetNotEligible()
                 current = read_detail(gateway, payload, fence_settings)
                 if current is None or problems(current, payload):
                     raise finance_contract.FinanceTargetNotEligible()
@@ -486,13 +507,45 @@ def _perform(
                 prepared = prepare(current, payload)
                 if finance_contract.prepared_problem(kind, prepared) is not None:
                     raise finance_contract.FinanceTargetNotEligible()
+                if kind == finance_contract.PAYMENT_KIND:
+                    if gateway.native_finance_settlement_verified() is not True:
+                        raise finance_contract.FinanceTargetNotEligible()
+                    settlement = gateway.payment_settlement_facts(
+                        payload["invoice"], (current.get("mode") or {}).get("account"),
+                        payload["amount"], payload["allocations"][0]["amount"],
+                        payload["mode_of_payment"],
+                    )
+                    if (
+                        not isinstance(settlement, dict)
+                        or settlement.get("company") != current.get("company")
+                        or settlement.get("currency") != current.get("currency")
+                        or settlement.get("customer") != (current.get("invoice") or {}).get("customer")
+                    ):
+                        raise finance_contract.FinanceTargetNotEligible()
+                    settlement["reference_no"] = payload.get("reference_no") or ""
+                    settlement["reference_date"] = current.get("today")
+                    prepared.update({
+                        "company": settlement["company"],
+                        "currency": settlement["currency"],
+                        "party": settlement["customer"],
+                        "paid_from": settlement["receivable_account"],
+                        "paid_to": settlement["mode_account"],
+                        "paid_amount": float(settlement["outstanding"]),
+                        "received_amount": float(settlement["outstanding"]),
+                    })
+                    prepared["references"][0]["allocated_amount"] = float(settlement["outstanding"])
+                    prepared["references"][0]["outstanding_amount"] = float(settlement["outstanding"])
+                    if finance_contract.prepared_problem(kind, prepared) is not None:
+                        raise finance_contract.FinanceTargetNotEligible()
+                    claim = held.dispatch()
                 reference = mutate(gateway, prepared)
-                facts = read_facts(gateway, reference, expected_effects, baseline)
-                if (
-                    finance_contract.side_effect_problem(facts, expected_effects)
-                    is not None
-                ):
-                    raise patient_write.WriteUncertain()
+                if kind == finance_contract.PAYMENT_KIND:
+                    if gateway.verify_full_payment_effects(reference, settlement) is not True:
+                        raise patient_write.WriteUncertain()
+                else:
+                    facts = read_facts(gateway, reference, expected_effects, baseline)
+                    if finance_contract.side_effect_problem(facts, expected_effects) is not None:
+                        raise patient_write.WriteUncertain()
                 receipt = _finish_fence(
                     gateway,
                     claim,
@@ -517,10 +570,11 @@ def _perform(
                 _rollback_or_raise(gateway)
                 raise
             except Exception:
-                _mark_unknown(
-                    claim,
-                    "native finance write outcome not established",
-                )
+                if claim is not None:
+                    _mark_unknown(
+                        claim,
+                        "native finance write outcome not established",
+                    )
                 _rollback_or_raise(gateway)
                 raise patient_write.WriteUncertain() from None
     except finance_contract.FinanceTargetNotEligible:

@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date as _date, datetime as _datetime
+from decimal import Decimal
 from clinic_ui.endpoints.linked_encounter import LinkedEncounterError
 
 from clinic_ui.core import (
@@ -7497,6 +7498,12 @@ class Gateway:
         except Exception:
             return "installed metadata unreadable"
 
+    def native_finance_payment_install_problem(self):
+        try:
+            return finance_contract.payment_install_problem(self._finance_meta_fields())
+        except Exception:
+            return "installed metadata unreadable"
+
     def native_finance_invoice_install_problem(self):
         """Preflight only the converted invoice lane's required fields."""
 
@@ -7661,6 +7668,9 @@ class Gateway:
             )
         except Exception:
             return False
+
+    def native_finance_can_read_invoice(self, invoice):
+        return self._finance_can_read_document(finance_contract.INVOICE_DOCTYPE, invoice)
 
     def _finance_field_readable(self, doctype, fieldname):
         """True when one DocField is readable and unmasked for the session user."""
@@ -8053,6 +8063,7 @@ class Gateway:
                     "outstanding_amount",
                     "grand_total",
                     "customer",
+                    "debit_to",
                 ],
                 as_dict=True,
             )
@@ -8070,6 +8081,7 @@ class Gateway:
             ),
             "grand_total": self._finance_money(get("grand_total")),
             "customer": self._text_value(get("customer")),
+            "debit_to": self._text_value(get("debit_to")),
         }
 
     def native_finance_invoice_view(self, native_invoice_id):
@@ -8192,6 +8204,7 @@ class Gateway:
         except Exception:
             exists = False
         account = ""
+        accepted = False
         if exists and company:
             try:
                 account = self._text_value(
@@ -8201,12 +8214,30 @@ class Gateway:
                         "default_account",
                     )
                 )
+                mode = self.frappe.db.get_value(
+                    finance_contract.MODE_OF_PAYMENT_DOCTYPE, name,
+                    ["enabled", "type"], as_dict=True,
+                )
+                account_detail = self.frappe.db.get_value(
+                    finance_contract.ACCOUNT_DOCTYPE, account,
+                    ["company", "account_type", "is_group", "disabled"], as_dict=True,
+                )
+                required_type = {"Cash": "Cash", "Credit Card": "Bank"}.get(name)
+                accepted = bool(
+                    required_type and mode and account_detail
+                    and mode.get("enabled") == 1
+                    and mode.get("type") == required_type
+                    and account_detail.get("company") == company
+                    and account_detail.get("account_type") == required_type
+                    and account_detail.get("is_group") == 0
+                    and account_detail.get("disabled") == 0
+                )
             except Exception:
                 account = ""
         return {
             "exists": exists,
             "account": account,
-            "accepted": name in finance_contract.ACCEPTED_PAYMENT_MODES,
+            "accepted": accepted,
         }
 
     def _finance_payment_recorded(self, invoice):
@@ -8238,13 +8269,14 @@ class Gateway:
         try:
             company, _currency = self._purchase_company_currency()
             defaults = self._finance_company_defaults(company)
+            invoice = self._finance_invoice_state(payload["invoice"])
             return {
                 "today": self.site_today(),
                 "company": company,
                 "currency": self._text_value(
                     defaults.get("default_currency")
                 ),
-                "invoice": self._finance_invoice_state(payload["invoice"]),
+                "invoice": invoice,
                 "mode": self._finance_mode_of_payment(
                     payload["mode_of_payment"], company
                 ),
@@ -8252,11 +8284,434 @@ class Gateway:
                     payload["invoice"]
                 ),
                 "receivable_account": (
-                    defaults.get("default_receivable_account") or ""
+                    invoice.get("debit_to") or ""
                 ),
             }
         except Exception:
             raise patient_write.StoreUnavailable() from None
+
+    def lock_finance_invoice(self, invoice):
+        """Lock the invoice as the first table read in the fresh transaction."""
+        try:
+            rows = self.frappe.db.sql(
+                "SELECT name FROM `tabSales Invoice` FORCE INDEX (`PRIMARY`) "
+                "WHERE name=%s FOR UPDATE",
+                (invoice,),
+            )
+            if len(rows) != 1:
+                raise patient_write.WriteUncertain()
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def finance_payment_lock_profile(self):
+        """Inspect candidate MariaDB lock prerequisites before snapshot reset."""
+        try:
+            db = self.frappe.db
+            session = db.sql(
+                "SELECT @@version AS version, @@session.tx_isolation AS isolation, "
+                "@@session.autocommit AS autocommit",
+                as_dict=True,
+            )
+            if len(session) != 1:
+                raise ValueError("session unavailable")
+            state = session[0]
+            if (
+                "mariadb" not in str(state.get("version", "")).lower()
+                or str(state.get("isolation", "")).upper().replace("_", "-") != "REPEATABLE-READ"
+                or state.get("autocommit") != 0
+            ):
+                raise ValueError("unsupported transaction profile")
+            for table in ("tabSales Invoice", "tabPayment Ledger Entry"):
+                tables = db.sql(
+                    "SELECT ENGINE FROM information_schema.TABLES "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s",
+                    (table,), as_dict=True,
+                )
+                if len(tables) != 1 or str(tables[0].get("ENGINE", "")).lower() != "innodb":
+                    raise ValueError("unsupported table engine")
+            invoice_indexes = db.sql("SHOW INDEX FROM `tabSales Invoice`", as_dict=True)
+            primary = [row for row in invoice_indexes if row.get("Key_name") == "PRIMARY"]
+            if (
+                len(primary) != 1
+                or primary[0].get("Non_unique") != 0
+                or primary[0].get("Seq_in_index") != 1
+                or primary[0].get("Column_name") != "name"
+                or primary[0].get("Sub_part") is not None
+                or str(primary[0].get("Index_type", "")).upper() != "BTREE"
+            ):
+                raise ValueError("invoice primary index unavailable")
+            indexes = db.sql("SHOW INDEX FROM `tabPayment Ledger Entry`", as_dict=True)
+            grouped = {}
+            for row in indexes:
+                name = row.get("Key_name")
+                if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_]+", name):
+                    continue
+                grouped.setdefault(name, []).append(row)
+            selected = []
+            for columns in (
+                ("voucher_no", "voucher_type"),
+                ("against_voucher_no", "against_voucher_type"),
+            ):
+                matches = []
+                for name, rows in grouped.items():
+                    rows = sorted(rows, key=lambda row: int(row.get("Seq_in_index") or 0))
+                    if (
+                        len(rows) == 2
+                        and [row.get("Seq_in_index") for row in rows] == [1, 2]
+                        and tuple(row.get("Column_name") for row in rows) == columns
+                        and all(
+                            row.get("Non_unique") == 1
+                            and row.get("Sub_part") is None
+                            and str(row.get("Index_type", "")).upper() == "BTREE"
+                            and str(row.get("Ignored", "NO")).upper() == "NO"
+                            for row in rows
+                        )
+                    ):
+                        matches.append(name)
+                if not matches:
+                    raise ValueError("required full-width index missing")
+                selected.append(sorted(matches)[0])
+            return tuple(selected)
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def lock_finance_payment_ledger_ranges(self, invoice, profile):
+        """Current-lock both complete PLE ranges after the invoice PK lock."""
+        try:
+            if (
+                not isinstance(profile, tuple)
+                or len(profile) != 2
+                or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_]+", name) for name in profile)
+            ):
+                raise ValueError("invalid verified index profile")
+            for index, number_column, type_column in (
+                (profile[0], "voucher_no", "voucher_type"),
+                (profile[1], "against_voucher_no", "against_voucher_type"),
+            ):
+                rows = self.frappe.db.sql(
+                    f"SELECT amount FROM `tabPayment Ledger Entry` FORCE INDEX (`{index}`) "
+                    f"WHERE `{number_column}`=%s AND `{type_column}`=%s LIMIT 201 FOR UPDATE",
+                    (invoice, finance_contract.INVOICE_DOCTYPE),
+                )
+                if len(rows) > 200:
+                    raise ValueError("invoice ledger range exceeds bound")
+        except Exception:
+            raise patient_write.WriteUncertain() from None
+
+    def native_finance_settlement_verified(self):
+        """Release predicate: fail closed until installed acceptance is complete."""
+        return False
+
+    def payment_settlement_facts(
+        self, invoice_name, mode_account, amount, allocation, mode_of_payment
+    ):
+        """Read settlement facts after caller locks invoice in fresh transaction.
+
+        No write or lock is performed here. Missing or inconsistent facts refuse.
+        This helper is not sufficient to authorize posting.
+        """
+        try:
+            from erpnext.accounts.utils import QueryPaymentLedger
+
+            frappe = self.frappe
+            invoice = frappe.get_doc(finance_contract.INVOICE_DOCTYPE, invoice_name)
+            if (
+                invoice.name != invoice_name
+                or invoice.docstatus != 1
+                or not invoice.company
+                or not invoice.customer
+                or not invoice.debit_to
+                or not mode_account
+                or invoice.debit_to == mode_account
+                or mode_of_payment not in finance_contract.ACCEPTED_PAYMENT_MODES
+            ):
+                return None
+            currency = frappe.db.get_value("Company", invoice.company, "default_currency")
+            if not currency or invoice.currency != currency or invoice.party_account_currency != currency:
+                return None
+            if Decimal(str(invoice.conversion_rate)) != Decimal(1):
+                return None
+            for account in (invoice.debit_to, mode_account):
+                if (
+                    frappe.db.get_value("Account", account, "company") != invoice.company
+                    or frappe.db.get_value("Account", account, "account_currency") != currency
+                ):
+                    return None
+            if (
+                frappe.db.get_value("Account", invoice.debit_to, "account_type") != "Receivable"
+                or frappe.db.get_value("Account", invoice.debit_to, "is_group") != 0
+                or frappe.db.get_value("Account", invoice.debit_to, "disabled") != 0
+            ):
+                return None
+
+            payment = frappe.get_doc({
+                "doctype": finance_contract.PAYMENT_DOCTYPE,
+                "company": invoice.company,
+                "payment_type": "Receive",
+                "party_type": "Customer",
+                "party": invoice.customer,
+                "paid_from": invoice.debit_to,
+                "paid_to": mode_account,
+                "paid_from_account_currency": currency,
+                "paid_to_account_currency": currency,
+            })
+            reference = payment.append("references", {
+                "reference_doctype": finance_contract.INVOICE_DOCTYPE,
+                "reference_name": invoice_name,
+            })
+            precisions = {
+                "invoice_outstanding": invoice.precision("outstanding_amount"),
+                "paid_amount": payment.precision("paid_amount"),
+                "received_amount": payment.precision("received_amount"),
+                "allocated_amount": reference.precision("allocated_amount"),
+                "reference_outstanding": reference.precision("outstanding_amount"),
+            }
+            if any(type(value) is not int or value < 0 or value > 18 for value in precisions.values()):
+                return None
+            if isinstance(amount, bool) or isinstance(allocation, bool):
+                return None
+            paid = Decimal(str(amount))
+            allocated = Decimal(str(allocation))
+            if not paid.is_finite() or not allocated.is_finite() or paid <= 0 or paid != allocated:
+                return None
+            for precision in precisions.values():
+                if paid != paid.quantize(Decimal(1).scaleb(-precision)):
+                    return None
+
+            ple = frappe.qb.DocType(finance_contract.PAYMENT_LEDGER_DOCTYPE)
+            rows = QueryPaymentLedger().get_voucher_outstandings(
+                vouchers=[frappe._dict(voucher_type=finance_contract.INVOICE_DOCTYPE, voucher_no=invoice_name)],
+                common_filter=[
+                    ple.company == invoice.company,
+                    ple.account_currency == currency,
+                    ple.account == invoice.debit_to,
+                    ple.party_type == "Customer",
+                    ple.party == invoice.customer,
+                ],
+            )
+            if not isinstance(rows, (list, tuple)) or len(rows) != 1:
+                return None
+            row = rows[0]
+            if (
+                row.get("voucher_type") != finance_contract.INVOICE_DOCTYPE
+                or row.get("voucher_no") != invoice_name
+                or row.get("account") != invoice.debit_to
+                or row.get("party_type") != "Customer"
+                or row.get("party") != invoice.customer
+                or row.get("currency") != currency
+                or row.get("outstanding") is None
+                or row.get("outstanding_in_account_currency") is None
+                or invoice.outstanding_amount is None
+            ):
+                return None
+            precision = precisions["invoice_outstanding"]
+            raw_ledger = Decimal(str(row["outstanding_in_account_currency"]))
+            raw_company_ledger = Decimal(str(row["outstanding"]))
+            raw_invoice = Decimal(str(invoice.outstanding_amount))
+            ledger_balance = Decimal(str(frappe.utils.flt(row["outstanding_in_account_currency"], precision)))
+            invoice_balance = Decimal(str(frappe.utils.flt(invoice.outstanding_amount, precision)))
+            if not raw_company_ledger.is_finite() or raw_company_ledger != paid or not raw_ledger.is_finite() or raw_ledger != ledger_balance or not raw_invoice.is_finite() or raw_invoice != invoice_balance or not ledger_balance.is_finite() or ledger_balance <= 0 or ledger_balance != invoice_balance or paid != ledger_balance:
+                return None
+            return {
+                "outstanding": ledger_balance,
+                "currency": currency,
+                "precisions": precisions,
+                "receivable_account": invoice.debit_to,
+                "mode_account": mode_account,
+                "customer": invoice.customer,
+                "company": invoice.company,
+                "invoice": invoice_name,
+                "mode_of_payment": mode_of_payment,
+            }
+        except Exception:
+            return None
+
+    def verify_full_payment_effects(self, payment_name, settlement_facts):
+        """Verify scoped effects under caller's retained invoice lock.
+
+        Read-only and fail-closed; does not authorize dispatch or commit.
+        Facts must come from ``payment_settlement_facts`` in this transaction.
+        Source reviewed: ERPNext 16.52.1. Same-currency, unit-rate Receive only;
+        exact stored decimals, with invoice and payment/reference precision
+        established by the pre-dispatch facts reader. This assumes native QPL
+        returns one row even for zero balance, and native GL/PLE fields and
+        signs match the pinned source. Installed behavior requires verification.
+        """
+        try:
+            from erpnext.accounts.utils import QueryPaymentLedger
+
+            frappe = self.frappe
+            facts = settlement_facts
+            invoice_name = facts["invoice"]
+            company = facts["company"]
+            currency = facts["currency"]
+            customer = facts["customer"]
+            receivable = facts["receivable_account"]
+            mode_account = facts["mode_account"]
+            amount = Decimal(str(facts["outstanding"]))
+            if not amount.is_finite() or amount <= 0:
+                return False
+
+            def money(value):
+                if value is None or isinstance(value, bool):
+                    raise ValueError("missing money")
+                result = Decimal(str(value))
+                if not result.is_finite():
+                    raise ValueError("invalid money")
+                return result
+
+            payment = frappe.get_doc(finance_contract.PAYMENT_DOCTYPE, payment_name)
+            if (
+                payment.name != payment_name
+                or payment.docstatus != 1
+                or payment.payment_type != "Receive"
+                or payment.party_type != "Customer"
+                or payment.party != customer
+                or payment.company != company
+                or payment.mode_of_payment != facts["mode_of_payment"]
+                or (payment.reference_no or "") != facts["reference_no"]
+                or (
+                    facts["reference_no"]
+                    and str(payment.reference_date) != str(facts["reference_date"])
+                )
+                or payment.paid_from != receivable
+                or payment.paid_to != mode_account
+                or payment.paid_from_account_currency != currency
+                or payment.paid_to_account_currency != currency
+                or any(money(getattr(payment, field)) != amount for field in (
+                    "paid_amount", "received_amount", "base_paid_amount", "base_received_amount"
+                ))
+                or money(payment.unallocated_amount) != 0
+                or money(payment.difference_amount) != 0
+                or money(payment.source_exchange_rate) != 1
+                or money(payment.target_exchange_rate) != 1
+                or len(payment.references) != 1
+            ):
+                return False
+            reference = payment.references[0]
+            if (
+                reference.reference_doctype != finance_contract.INVOICE_DOCTYPE
+                or reference.reference_name != invoice_name
+                or money(reference.allocated_amount) != amount
+            ):
+                return False
+
+            filters = {"voucher_type": finance_contract.PAYMENT_DOCTYPE, "voucher_no": payment_name}
+            gl_fields = [
+                "voucher_type", "voucher_no", "company", "account", "account_currency",
+                "debit", "credit", "debit_in_account_currency", "credit_in_account_currency",
+                "party_type", "party", "against_voucher_type", "against_voucher", "is_cancelled",
+            ]
+            ple_fields = [
+                "voucher_type", "voucher_no", "company", "account", "account_type",
+                "account_currency", "party_type", "party", "against_voucher_type",
+                "against_voucher_no", "amount", "amount_in_account_currency", "delinked",
+            ]
+            gl_rows = frappe.db.get_all(
+                finance_contract.GL_ENTRY_DOCTYPE, filters=filters, fields=gl_fields, limit=201
+            )
+            ple_rows = frappe.db.get_all(
+                finance_contract.PAYMENT_LEDGER_DOCTYPE, filters=filters, fields=ple_fields, limit=201
+            )
+            if not gl_rows or len(gl_rows) > 200 or not ple_rows or len(ple_rows) > 200:
+                return False
+            debit_total = credit_total = Decimal(0)
+            for row in gl_rows:
+                if (
+                    row.get("voucher_type") != finance_contract.PAYMENT_DOCTYPE
+                    or row.get("voucher_no") != payment_name
+                    or row.get("company") != company
+                    or row.get("account_currency") != currency
+                    or row.get("is_cancelled") != 0
+                ):
+                    return False
+                debit, credit = money(row.get("debit")), money(row.get("credit"))
+                if debit < 0 or credit < 0:
+                    return False
+                if (
+                    money(row.get("debit_in_account_currency")) != debit
+                    or money(row.get("credit_in_account_currency")) != credit
+                ):
+                    return False
+                if row.get("account") == mode_account:
+                    if credit != 0:
+                        return False
+                    debit_total += debit
+                elif row.get("account") == receivable:
+                    if (
+                        debit != 0
+                        or row.get("party_type") != "Customer"
+                        or row.get("party") != customer
+                        or row.get("against_voucher_type") != finance_contract.INVOICE_DOCTYPE
+                        or row.get("against_voucher") != invoice_name
+                    ):
+                        return False
+                    credit_total += credit
+                else:
+                    return False
+            if debit_total != amount or credit_total != amount:
+                return False
+            ple_total = ple_account_total = Decimal(0)
+            for row in ple_rows:
+                if (
+                    row.get("voucher_type") != finance_contract.PAYMENT_DOCTYPE
+                    or row.get("voucher_no") != payment_name
+                    or row.get("company") != company
+                    or row.get("account") != receivable
+                    or row.get("account_type") != "Receivable"
+                    or row.get("account_currency") != currency
+                    or row.get("party_type") != "Customer"
+                    or row.get("party") != customer
+                    or row.get("against_voucher_type") != finance_contract.INVOICE_DOCTYPE
+                    or row.get("against_voucher_no") != invoice_name
+                    or row.get("delinked") != 0
+                ):
+                    return False
+                company_amount = money(row.get("amount"))
+                account_amount = money(row.get("amount_in_account_currency"))
+                if company_amount >= 0 or account_amount >= 0:
+                    return False
+                ple_total += company_amount
+                ple_account_total += account_amount
+            if ple_total != -amount or ple_account_total != -amount:
+                return False
+
+            invoice = frappe.get_doc(finance_contract.INVOICE_DOCTYPE, invoice_name)
+            if (
+                invoice.name != invoice_name
+                or invoice.docstatus != 1
+                or invoice.status != "Paid"
+                or invoice.company != company
+                or invoice.customer != customer
+                or invoice.debit_to != receivable
+                or invoice.currency != currency
+                or invoice.party_account_currency != currency
+                or money(invoice.outstanding_amount) != 0
+            ):
+                return False
+            ple = frappe.qb.DocType(finance_contract.PAYMENT_LEDGER_DOCTYPE)
+            rows = QueryPaymentLedger().get_voucher_outstandings(
+                vouchers=[frappe._dict(voucher_type=finance_contract.INVOICE_DOCTYPE, voucher_no=invoice_name)],
+                common_filter=[
+                    ple.company == company, ple.account_currency == currency,
+                    ple.account == receivable, ple.party_type == "Customer", ple.party == customer,
+                ],
+            )
+            if not isinstance(rows, (list, tuple)) or len(rows) != 1:
+                return False
+            row = rows[0]
+            return (
+                row.get("voucher_type") == finance_contract.INVOICE_DOCTYPE
+                and row.get("voucher_no") == invoice_name
+                and row.get("account") == receivable
+                and row.get("party_type") == "Customer"
+                and row.get("party") == customer
+                and row.get("currency") == currency
+                and money(row.get("outstanding")) == 0
+                and money(row.get("outstanding_in_account_currency")) == 0
+            )
+        except Exception:
+            return False
 
     def _finance_counts(self):
         vouchers = (
@@ -8638,6 +9093,29 @@ class Gateway:
                 operation_key=operation_key,
                 ack_receipt="ack:" + expected,
             )
+        except write_fence.StoreUnavailable as exc:
+            raise patient_write.StoreUnavailable() from exc
+        except write_fence.FenceError as exc:
+            raise patient_write.WriteUncertain() from exc
+
+    @contextmanager
+    def finance_payment_lease(self, actor, kind, operation_key, payload_digest):
+        if kind != finance_contract.PAYMENT_KIND:
+            raise patient_write.WriteUncertain()
+        try:
+            with self._ledger().lease(
+                actor=actor,
+                kind=kind,
+                operation_key=operation_key,
+                payload_digest=payload_digest,
+            ) as lease:
+                yield EncounterWriteLease(lease)
+        except write_fence.OperationLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.SiteLocked as exc:
+            raise patient_write.WriteLocked() from exc
+        except write_fence.OperationConflict as exc:
+            raise patient_write.WriteConflict() from exc
         except write_fence.StoreUnavailable as exc:
             raise patient_write.StoreUnavailable() from exc
         except write_fence.FenceError as exc:

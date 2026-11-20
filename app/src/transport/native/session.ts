@@ -134,11 +134,12 @@ function parseBootstrap(body: unknown): {
 } {
   if (!isRecord(body) || !isRecord(body.message)) throw unavailable();
   const message = body.message;
+  const { csrfToken, paymentSettlement: marker } = message;
 
   // Existing validator: roles/epoch/capability shape are unchanged here.
   if (!isSessionDTO(message)) throw unavailable();
   if (message.mode !== "live") throw unavailable();
-  if (!isSafeToken(message.csrfToken)) throw unavailable();
+  if (!isSafeToken(csrfToken)) throw unavailable();
 
   return {
     session: {
@@ -146,8 +147,9 @@ function parseBootstrap(body: unknown): {
       sessionEpoch: message.sessionEpoch,
       user: message.user,
       capabilities: nativeCapabilities(message.capabilities),
+      ...(marker === "full_balance_v1" ? { paymentSettlement: marker } : {}),
     },
-    csrfToken: message.csrfToken,
+    csrfToken,
   };
 }
 

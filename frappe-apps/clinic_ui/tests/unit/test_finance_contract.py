@@ -628,6 +628,18 @@ class PaymentProblemTests(unittest.TestCase):
         problems = self.problems(body=body)
         self.assertIn("exceeds the invoice outstanding", problems[0][2])
 
+    def test_a_partial_payment_is_refused(self):
+        body = payment_body(
+            amount=10.0, allocations=[{"invoice": "SINV-1", "amount": 10.0}]
+        )
+        self.assertTrue(self.problems(body=body))
+
+    def test_a_near_amount_allocation_is_refused(self):
+        body = payment_body(
+            allocations=[{"invoice": "SINV-1", "amount": 19.999}]
+        )
+        self.assertTrue(self.problems(body=body))
+
     def test_an_allocation_sum_that_differs_from_the_paid_amount_is_refused(self):
         body = payment_body(
             amount=20.0, allocations=[{"invoice": "SINV-1", "amount": 15.0}]
@@ -1021,6 +1033,73 @@ class InvoiceInstalledPreflightTests(unittest.TestCase):
             "status",
         }
         self.assertIsNotNone(finance_contract.install_problem(fields))
+
+
+class PaymentInstalledPreflightTests(unittest.TestCase):
+    # Fields read by the proposed locked payment facts and voucher verifier.
+    PAYMENT_FIELDS = {
+        "Sales Invoice": {"party_account_currency"},
+        "Account": {"account_currency"},
+        "Payment Entry": {
+            "paid_from_account_currency", "paid_to_account_currency",
+            "base_paid_amount", "base_received_amount",
+            "unallocated_amount", "difference_amount",
+        },
+        "GL Entry": {
+            "company", "account_currency", "debit_in_account_currency",
+            "credit_in_account_currency", "party_type", "party",
+            "against_voucher_type", "against_voucher",
+        },
+        "Payment Ledger Entry": {
+            "company", "account", "account_currency", "party_type", "party",
+            "against_voucher_type", "against_voucher_no",
+            "amount_in_account_currency", "posting_date", "due_date",
+            "cost_center", "remarks",
+        },
+    }
+
+    def installed_fields(self):
+        fields = {
+            doctype: {name for names in candidates.values() for name in names}
+            for doctype, candidates in finance_contract.INSTALLED_CANDIDATES.items()
+        }
+        fields["Payment Entry"].discard("currency")
+        for doctype, names in self.PAYMENT_FIELDS.items():
+            fields[doctype].update(names)
+        return fields
+
+    def test_payment_entry_schema_needs_account_currencies_not_currency(self):
+        fields = self.installed_fields()
+        self.assertIsNone(finance_contract.install_problem(fields))
+
+    def test_every_native_payment_verification_field_is_required(self):
+        for doctype, names in self.PAYMENT_FIELDS.items():
+            for name in names:
+                with self.subTest(doctype=doctype, field=name):
+                    fields = self.installed_fields()
+                    fields[doctype].remove(name)
+                    self.assertEqual(
+                        finance_contract.install_problem(fields),
+                        f"missing field {doctype}.{name}",
+                    )
+
+    def test_payment_fields_do_not_weaken_invoice_preflight(self):
+        fields = self.installed_fields()
+        fields["Sales Invoice"].remove("currency")
+        self.assertEqual(
+            finance_contract.invoice_install_problem(fields),
+            "missing field Sales Invoice.currency",
+        )
+
+    def test_payment_preflight_does_not_require_item_defaults(self):
+        fields = self.installed_fields()
+        fields.pop("Item Default")
+        self.assertIsNone(finance_contract.payment_install_problem(fields))
+        fields["Payment Entry"].remove("paid_to_account_currency")
+        self.assertEqual(
+            finance_contract.payment_install_problem(fields),
+            "missing field Payment Entry.paid_to_account_currency",
+        )
 
 
 class InvoiceTotalsRoundingTests(unittest.TestCase):

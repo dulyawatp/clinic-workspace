@@ -1,8 +1,8 @@
 import type { CapabilityMap, RoleCode } from "./capability";
 
 /**
- * Wire shape of `GET /api/session`. Kept identical to the proxy's `SessionDTO`;
- * do not add client-only fields here.
+ * Session shape shared with `GET /api/session`, plus explicitly negotiated
+ * native bootstrap extensions.
  */
 export interface SessionDTO {
   /** Missing mode is a legacy fixture session, never live. */
@@ -15,6 +15,8 @@ export interface SessionDTO {
     roles: RoleCode[];
   };
   capabilities: CapabilityMap;
+  /** Set only by the native bootstrap mapper. */
+  paymentSettlement?: "full_balance_v1";
 }
 
 const ROLE_CODES: ReadonlySet<string> = new Set([
@@ -39,10 +41,9 @@ function isRoleList(value: unknown): value is RoleCode[] {
 }
 
 /**
- * Narrow untrusted JSON to `SessionDTO`. Anything malformed is treated as
- * unverified rather than exposed to the UI.
+ * Validate the shared session fields. Native extensions are mapped separately.
  */
-export function isSessionDTO(value: unknown): value is SessionDTO {
+export function isSessionDTO(value: unknown): value is Omit<SessionDTO, "paymentSettlement"> {
   if (!isRecord(value) || !isRecord(value.user)) {
     return false;
   }
