@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useBeforeUnload, useNavigate } from "react-router-dom";
 import { ROUTES } from "../../app/routes";
 import { useSession } from "../../app/SessionProvider";
 import { Badge, Button } from "../../design/components";
@@ -130,7 +130,48 @@ function encodeNote(text: string): string {
 }
 
 type NoteEdit = { original: LinkedNote | null; text: string };
-type Operation = "save" | "submit" | "check" | "notes";
+type Write = "save" | "submit";
+type Operation = Write | "check" | "notes";
+type Uncertain = { kind: Write; rejected?: true };
+
+// Same-tab recovery marker only. Do not persist record identifiers or any
+// patient, note, or clinical data. This fingerprint is not authorization.
+function pendingKey(kind: Write, id: string) {
+  let fingerprint = 0xcbf29ce484222325n;
+  for (let i = 0; i < id.length; i++) {
+    fingerprint = BigInt.asUintN(64, (fingerprint ^ BigInt(id.charCodeAt(i))) * 0x100000001b3n);
+  }
+  return `clinic.linked.${kind}.${fingerprint.toString(16)}`;
+}
+
+function isPending(key: string): boolean {
+  try { return sessionStorage.getItem(key) === "pending"; }
+  catch { return false; }
+}
+
+function clearPending(key: string) {
+  try { sessionStorage.removeItem(key); }
+  catch { /* Leave a conservative lock if storage becomes unavailable. */ }
+}
+
+function matchesSavedInput(before: LinkedEncounter, after: LinkedEncounter, sent: LinkedClinical) {
+  if (!before.encounter || !after.encounter || before.encounter.modified === after.encounter.modified) return false;
+  if (!sent.symptoms && !sent.diagnoses && !sent.note) return false;
+  for (const kind of ["symptoms", "diagnoses"] as const) {
+    const wanted = sent[kind];
+    const persisted = after.encounter[kind];
+    if (wanted && (wanted.length !== persisted.length || wanted.some((item, i) => item !== persisted[i]))) return false;
+  }
+  if (sent.note) {
+    const wanted = sent.note;
+    // New notes have no known native identity, and inaccessible or unlisted
+    // notes cannot be inferred from the encounter version alone.
+    if (!wanted.id || !wanted.modified || after.notes.state !== "available") return false;
+    return after.notes.items.some((item) =>
+      item.id === wanted.id && item.modified !== wanted.modified && item.text === wanted.text);
+  }
+  return true;
+}
 
 function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; appointmentRef: string }) {
   const { t } = useTranslation();
@@ -140,7 +181,13 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   const [edit, setEdit] = useState<NoteEdit | null>(null);
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState<Operation | null>(null);
-  const [uncertain, setUncertain] = useState<"submit" | "save" | null>(null);
+  const saveKey = pendingKey("save", initial.context.appointment);
+  const submitKey = initial.encounter && pendingKey("submit", initial.encounter.id);
+  const [uncertain, setUncertain] = useState<Uncertain | null>(() => {
+    if (submitKey && initial.encounter?.docstatus === 0 && isPending(submitKey)) return { kind: "submit" };
+    if (isPending(saveKey)) return { kind: "save" };
+    return null;
+  });
   const [feedback, setFeedback] = useState<string | null>(null);
   const [pageError, setPageError] = useState(false);
   const inFlight = useRef(false);
@@ -153,6 +200,9 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
     readLifetime.current = controller;
     return () => controller.abort();
   }, []);
+  useEffect(() => {
+    if (submitKey && initial.encounter?.docstatus === 1) clearPending(submitKey);
+  }, [submitKey, initial.encounter?.docstatus]);
 
   const { context, encounter, notes } = record;
   const completed = encounter?.docstatus === 1;
@@ -165,8 +215,18 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   const hasClinicalChanges = Object.keys(clinical).length > 0;
   const dirty = hasClinicalChanges || edit !== null;
   const noteChanged = edit && edit.text !== (edit.original ? noteContent(edit.original.text).text : "");
+  const saveInput: LinkedClinical = {
+    ...clinical,
+    ...(noteChanged && { note: { id: edit.original?.id ?? null, modified: edit.original?.modified ?? null, text: encodeNote(edit.text) } }),
+  };
   const cannotSave = (encounter !== null && !hasClinicalChanges && !noteChanged) ||
     Boolean(edit && !edit.text.trim());
+  useBeforeUnload((event) => {
+    if ((uncertain?.kind === "save" || busy === "save") && dirty) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+  });
 
   async function run(operation: Operation, action: (signal: AbortSignal) => Promise<void>) {
     const signal = readLifetime.current?.signal;
@@ -197,48 +257,67 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
     if (!sameContext(record, next) || (encounter && next.encounter?.id !== encounter.id)) throw invalidLinkedEncounter;
   }
 
-  async function reconcile(kind: "submit" | "save", signal: AbortSignal) {
+  async function reconcile({ kind, rejected }: Uncertain, signal: AbortSignal) {
+    setFeedback(null);
     try {
       const next = await openLinkedEncounter(appointmentRef, signal);
       verifyIdentity(next);
       if (signal.aborted) return;
-      accept(next);
-      setFeedback(next.encounter?.docstatus === 1 ? null :
-        kind === "submit" ? "linkedEncounter.stillDraft" : "linkedEncounter.saveUnconfirmed");
+      if (kind === "submit" && (next.encounter?.docstatus === 1 || rejected)) {
+        if (submitKey) clearPending(submitKey);
+        accept(next);
+      } else if (kind === "save" && matchesSavedInput(record, next, saveInput)) {
+        clearPending(saveKey);
+        accept(next);
+        if (next.encounter?.docstatus === 0) setFeedback("linkedEncounter.saved");
+      } else {
+        setFeedback(kind === "submit" ? "linkedEncounter.stillDraft" :
+          dirty ? "linkedEncounter.saveUnconfirmed" : "linkedEncounter.saveUnverified");
+      }
     } catch {
       if (!signal.aborted) setFeedback("linkedEncounter.statusUnconfirmed");
     }
   }
 
-  function persist(kind: "submit" | "save") {
+  function persist(kind: Write) {
     if (completed || uncertain || (kind === "submit" && (!encounter || dirty || !confirm))) return;
     if (kind === "save" && (confirm || cannotSave || (noteChanged && notes.state !== "available"))) return;
+    const key = kind === "save" ? saveKey : submitKey;
+    if (!key) return;
     void run(kind, async (signal) => {
       setFeedback(null);
       try {
+        sessionStorage.setItem(key, "pending");
+      } catch {
+        setConfirm(false);
+        setFeedback("linkedEncounter.recoveryUnavailable");
+        return;
+      }
+      try {
         const next = kind === "submit" && encounter
           ? await completeLinkedEncounter(appointmentRef, encounter.id, encounter.modified)
-          : await saveLinkedEncounter(appointmentRef, encounter?.modified ?? null, {
-            ...clinical,
-            ...(noteChanged && { note: { id: edit.original?.id ?? null, modified: edit.original?.modified ?? null, text: encodeNote(edit.text) } }),
-          });
+          : await saveLinkedEncounter(appointmentRef, encounter?.modified ?? null, saveInput);
         verifyIdentity(next);
         if (next.encounter?.docstatus !== (kind === "submit" ? 1 : 0)) throw invalidLinkedEncounter;
+        clearPending(key);
         if (signal.aborted) return;
         accept(next);
         if (kind === "save" && encounter) setFeedback("linkedEncounter.saved");
       } catch (error) {
+        const code = (error as EncounterReadError | undefined)?.code;
+        const denied = code === "FORBIDDEN" || code === "AUTH_EXPIRED";
+        const rejected = code === "VALIDATION" || code === "CONFLICT_STALE";
+        if (denied || rejected) clearPending(key);
         if (signal.aborted) return;
         setConfirm(false);
-        const code = (error as EncounterReadError | undefined)?.code;
-        if (code === "FORBIDDEN" || code === "AUTH_EXPIRED") {
+        if (denied) {
           setFeedback("linkedEncounter.writeDenied");
-        } else if (code === "VALIDATION" || code === "CONFLICT_STALE") {
+        } else if (rejected) {
           setFeedback("linkedEncounter.writeRejected");
-          setUncertain(kind);
+          if (kind === "submit") setUncertain({ kind, rejected: true });
         } else {
-          setUncertain(kind);
-          await reconcile(kind, signal);
+          setUncertain({ kind });
+          await reconcile({ kind }, signal);
         }
       }
     });
@@ -268,12 +347,23 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   }
 
   if (uncertain) {
+    const notice = feedback ?? (busy ? "linkedEncounter.checking" :
+      uncertain.kind === "submit" ? "linkedEncounter.stillDraft" : "linkedEncounter.saveUnverified");
     return (
       <div className="visit-preview-card visit-preview-actions visit-preview-stack">
-        <p role={feedback ? "alert" : "status"}>{t(feedback ?? "linkedEncounter.checking")}</p>
+        <p role={busy && !feedback ? "status" : "alert"}>{t(notice)}</p>
         <div><Button disabled={Boolean(busy)} onClick={() => void run("check", (signal) => reconcile(uncertain, signal))}>
           {t(busy ? "common.loading" : "linkedEncounter.check")}
         </Button></div>
+        {uncertain.kind === "save" && dirty && (
+          <div className="visit-preview-stack">
+            {(["symptoms", "diagnoses"] as const).map((kind) => clinical[kind] &&
+              <SavedTerms key={kind} kind={kind} items={clinical[kind]} />)}
+            {edit && <div className="pc-field">
+              <label>{t("workspace.narrative")}<textarea readOnly value={edit.text} /></label>
+            </div>}
+          </div>
+        )}
       </div>
     );
   }

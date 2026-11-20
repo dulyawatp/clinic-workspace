@@ -31,6 +31,7 @@ function setup(path: string, role: "REC" | "PHA" = "REC") {
 beforeEach(() => {
   vi.stubEnv("VITE_CLINIC_NATIVE", "1");
   localStorage.setItem(LOCALE_KEY, "en");
+  sessionStorage.clear();
   server.use(
     http.get(NATIVE_BOOTSTRAP, () => nativeSession("REC", { "read.patient": "enabled", "read.appointment": "read_only" })),
     http.get("/api/method/clinic_ui.api.appointments.view", () => reply({
@@ -43,6 +44,19 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs();
   localStorage.removeItem(LOCALE_KEY);
+  sessionStorage.clear();
+});
+
+it.each([true, false] as const)("shows the launch according to the authoritative is_fixture=%s flag", async (is_fixture) => {
+  server.use(http.get("/api/method/clinic_ui.api.appointments.view", () => reply({
+    workspace_patient_id: "WS-PAT", appointment_id: REF, appointment_date: "2026-11-20",
+    appointment_time: "09:30:00", status: "Open", modified: VERSION,
+    can_reschedule: false, can_checkin: false, is_fixture,
+  })));
+  setup(ROUTES.appointment(REF));
+  expect(await screen.findByTestId("appointment-reference")).toBeVisible();
+  if (is_fixture) expect(screen.queryByRole("link", { name: "Open encounter" })).not.toBeInTheDocument();
+  else expect(screen.getByRole("link", { name: "Open encounter" })).toBeVisible();
 });
 
 it("starts from appointment detail, saves, reopens the same draft, and completes it once", async () => {
@@ -192,14 +206,169 @@ it.each(["submitted", "draft", "unavailable"] as const)("reconciles a lost submi
   await user.click(screen.getByRole("button", { name: "Confirm submission" }));
   if (result === "submitted") expect(await screen.findByText("Submitted")).toBeVisible();
   else if (result === "draft") {
-    expect(await screen.findByText("The encounter is still a draft. Review it before submitting again.")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Submit encounter" })).toBeEnabled();
+    expect(await screen.findByText("The encounter still appears as a draft. Submission is not confirmed.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Submit encounter" })).not.toBeInTheDocument();
   } else {
     expect(await screen.findByRole("button", { name: "Check encounter status" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Submit encounter" })).not.toBeInTheDocument();
   }
   expect(get).toHaveBeenCalledTimes(2);
   expect(post).toHaveBeenCalledTimes(1);
+});
+
+it("keeps an ambiguous submit locked through repeated draft reads until a delayed commit appears", async () => {
+  let current = draft;
+  const get = vi.fn();
+  const post = vi.fn();
+  server.use(
+    http.get(`${METHOD}open_for_appointment`, () => {
+      get();
+      return reply(current);
+    }),
+    http.post(`${METHOD}complete_linked`, () => {
+      post();
+      return HttpResponse.error();
+    }),
+  );
+  const page = setup(canonical);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Submit encounter" }));
+  await user.click(screen.getByRole("button", { name: "Confirm submission" }));
+  let check = await screen.findByRole("button", { name: "Check encounter status" });
+  await user.click(check);
+  await waitFor(() => expect(get).toHaveBeenCalledTimes(3));
+  check = await screen.findByRole("button", { name: "Check encounter status" });
+  expect(screen.queryByRole("button", { name: /submit encounter|confirm submission|save draft/i })).not.toBeInTheDocument();
+  page.unmount();
+  setup(canonical);
+  check = await screen.findByRole("button", { name: "Check encounter status" });
+  expect(screen.queryByRole("button", { name: "Submit encounter" })).not.toBeInTheDocument();
+  current = completed;
+  await user.click(check);
+  expect(await screen.findByText("Submitted")).toBeVisible();
+  expect(screen.getByText(note.text)).toBeVisible();
+  expect(get).toHaveBeenCalledTimes(5);
+  expect(post).toHaveBeenCalledTimes(1);
+});
+
+it("distinguishes a write explicitly rejected by Frappe from a lost submit response", async () => {
+  const get = vi.fn();
+  const post = vi.fn();
+  server.use(
+    http.get(`${METHOD}open_for_appointment`, () => {
+      get();
+      return reply(draft);
+    }),
+    http.post(`${METHOD}complete_linked`, () => {
+      post();
+      return new HttpResponse(null, { status: 417 });
+    }),
+  );
+  setup(canonical);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Submit encounter" }));
+  await user.click(screen.getByRole("button", { name: "Confirm submission" }));
+  expect(await screen.findByText("Marley rejected this change. Check the current record before trying again.")).toBeVisible();
+  expect(get).toHaveBeenCalledTimes(1);
+  await user.click(screen.getByRole("button", { name: "Check encounter status" }));
+  expect(await screen.findByRole("button", { name: "Submit encounter" })).toBeEnabled();
+  expect(get).toHaveBeenCalledTimes(2);
+  expect(post).toHaveBeenCalledTimes(1);
+});
+
+it("preserves coded changes and note input across ambiguous save reads until the selected note and encounter are verified", async () => {
+  const changedVersion = "2026-11-20 09:45:00.000001";
+  const noteText = "New follow-up instructions.";
+  let current = draft;
+  const get = vi.fn();
+  const save = vi.fn();
+  server.use(
+    http.get(`${METHOD}open_for_appointment`, () => {
+      get();
+      return reply(current);
+    }),
+    http.get("/api/resource/Complaint", () => HttpResponse.json({ data: [{ name: "Itching" }] })),
+    http.post(`${METHOD}save_linked`, async ({ request }) => {
+      save(await request.json());
+      return HttpResponse.error();
+    }),
+  );
+  setup(canonical);
+  const user = userEvent.setup();
+  await user.type(await screen.findByRole("searchbox", { name: "Symptoms" }), "Itching");
+  await user.click(await screen.findByRole("button", { name: "Itching" }));
+  await user.click(screen.getByRole("button", { name: "Edit note NOTE-1" }));
+  const editable = screen.getByRole("textbox", { name: "Visit narrative" });
+  await user.clear(editable);
+  await user.type(editable, noteText);
+  await user.click(screen.getByRole("button", { name: "Save draft" }));
+  expect(await screen.findByText("The save is not confirmed. Your changes are shown below so you can copy them if needed.")).toBeVisible();
+  let input = screen.getByRole("textbox", { name: "Visit narrative" });
+  expect(input).toHaveValue(noteText);
+  expect(input).toHaveAttribute("readonly");
+  expect(screen.getByText("Itching")).toBeVisible();
+  expect(screen.queryByRole("button", { name: /save draft|submit encounter/i })).not.toBeInTheDocument();
+  current = {
+    ...draft,
+    encounter: { ...encounter, modified: changedVersion, symptoms: ["Pain", "Itching"] },
+    notes: { ...notes, items: [{ ...note, text: noteText }] }, // right content, unchanged note version
+  };
+  await user.click(screen.getByRole("button", { name: "Check encounter status" }));
+  await waitFor(() => expect(get).toHaveBeenCalledTimes(3));
+  input = screen.getByRole("textbox", { name: "Visit narrative" });
+  expect(input).toHaveValue(noteText);
+  expect(input).toHaveAttribute("readonly");
+  current = { ...current, notes: { ...notes, items: [{ ...note, modified: changedVersion, text: noteText }] } };
+  await user.click(await screen.findByRole("button", { name: "Check encounter status" }));
+  expect(await screen.findByText("Draft saved.")).toBeVisible();
+  expect(screen.getByText(noteText)).toBeVisible();
+  expect(screen.queryByRole("textbox", { name: "Visit narrative" })).not.toBeInTheDocument();
+  expect(get).toHaveBeenCalledTimes(4);
+  expect(save.mock.calls).toEqual([[{
+    appointment_ref: REF,
+    expected_version: VERSION,
+    clinical: { symptoms: ["Pain", "Itching"], note: { id: note.id, modified: note.modified, text: noteText } },
+  }]]);
+});
+
+it("does not treat an indistinguishable new note as proof of an ambiguous save", async () => {
+  let current = draft;
+  const get = vi.fn();
+  const save = vi.fn();
+  server.use(
+    http.get(`${METHOD}open_for_appointment`, () => {
+      get();
+      return reply(current);
+    }),
+    http.post(`${METHOD}save_linked`, () => {
+      save();
+      return HttpResponse.error();
+    }),
+  );
+  const page = setup(canonical);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Add clinical note" }));
+  await user.type(screen.getByRole("textbox", { name: "Visit narrative" }), "Possible duplicate note.");
+  await user.click(screen.getByRole("button", { name: "Save draft" }));
+  await screen.findByRole("button", { name: "Check encounter status" });
+  current = {
+    ...draft,
+    encounter: { ...encounter, modified: "2026-11-20 09:45:00.000001" },
+    notes: { ...notes, items: [...notes.items, { ...note, id: "NOTE-2", text: "Possible duplicate note." }] },
+  };
+  await user.click(screen.getByRole("button", { name: "Check encounter status" }));
+  await waitFor(() => expect(get).toHaveBeenCalledTimes(3));
+  expect(await screen.findByRole("button", { name: "Check encounter status" })).toBeEnabled();
+  expect(screen.getByRole("textbox", { name: "Visit narrative" })).toHaveValue("Possible duplicate note.");
+  expect(JSON.stringify(sessionStorage)).not.toMatch(/Possible duplicate note|PAT-REAL|ENC-REAL|APT-REAL/);
+  expect(screen.queryByText("Draft saved.")).not.toBeInTheDocument();
+  page.unmount();
+  setup(canonical);
+  expect(await screen.findByText("The save is not confirmed. Verify the encounter in Marley before making further changes.")).toBeVisible();
+  expect(get).toHaveBeenCalledTimes(4);
+  expect(screen.queryByRole("button", { name: /save draft|submit encounter/i })).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "Visit narrative" })).not.toBeInTheDocument();
+  expect(save).toHaveBeenCalledTimes(1);
 });
 
 it("paginates clinical notes and updates only the explicitly selected note and version", async () => {

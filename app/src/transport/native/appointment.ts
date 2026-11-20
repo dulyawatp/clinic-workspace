@@ -129,6 +129,7 @@ export interface NativeAppointmentDetail extends NativeAppointmentItem {
 export interface NativeAppointmentRead extends NativeAppointmentDetail {
   can_reschedule: boolean;
   can_checkin: boolean;
+  is_fixture?: boolean;
 }
 
 /**
@@ -162,26 +163,29 @@ function readDetailFields(
 }
 
 /**
- * Parser for `appointments.view`. Both flags must be booleans; there is no
- * client-side inference from status or date. Only the canonical fields are
- * accepted.
+ * Parser for `appointments.view`. Older endpoints can omit fixture identity.
+ * Never infer it from an ID, status, date, or unrelated action flags.
  */
 export function parseNativeAppointmentRead(
   value: unknown,
   expectedId?: string,
 ): NativeAppointmentRead {
-  if (!isRecord(value) || !hasExactKeys(value, READ_KEYS))
+  if (!isRecord(value)) throw unavailable();
+  const hasFixture = Object.hasOwn(value, "is_fixture");
+  if (!hasExactKeys(value, hasFixture ? [...READ_KEYS, "is_fixture"] : READ_KEYS))
     throw unavailable();
   const detail = readDetailFields(value, expectedId);
   if (
     typeof value.can_reschedule !== "boolean" ||
-    typeof value.can_checkin !== "boolean"
+    typeof value.can_checkin !== "boolean" ||
+    (hasFixture && typeof value.is_fixture !== "boolean")
   )
     throw unavailable();
   return {
     ...detail,
     can_reschedule: value.can_reschedule,
     can_checkin: value.can_checkin,
+    ...(typeof value.is_fixture === "boolean" ? { is_fixture: value.is_fixture } : {}),
   };
 }
 
