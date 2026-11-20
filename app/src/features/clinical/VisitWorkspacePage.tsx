@@ -11,6 +11,7 @@ import {
 import { toI18nKey } from "../../domain/errors";
 import { coreData } from "../../fixtures/data";
 import { nativeTransportEnabled } from "../../transport/native/flag";
+import { isAppointmentRef } from "../../transport/native/linked-encounter";
 import { useReadQuery } from "../../transport/read/query";
 import { PageHeader } from "../../ui/PageHeader";
 import { StatePanel } from "../../ui/StatePanel";
@@ -19,6 +20,7 @@ import { AuthoredVisitWorkspace, type NativeVisitBinding } from "./AuthoredVisit
 import { DiagnosesSection } from "./DiagnosesSection";
 import { ExamSection } from "./ExamSection";
 import { HistorySection } from "./HistorySection";
+import { LinkedVisitWorkspace } from "./LinkedVisitWorkspace";
 import { ExternalLabSection } from "./LabPanels";
 import { MedicationsSection } from "./MedicationsSection";
 import { NoteSection } from "./NoteSection";
@@ -144,8 +146,15 @@ export function VisitWorkspacePage() {
   const { id } = useParams();
   const [params] = useSearchParams();
   const { session, authGeneration } = useSession();
+  const explicit = params.has("appointment_ref") || params.has("launch");
+  const appointmentRef = params.get("appointment_ref");
+  const launch = params.get("launch");
+  const validLinkedRoute = appointmentRef && isAppointmentRef(appointmentRef) &&
+    params.getAll("appointment_ref").length === 1 &&
+    (launch === null || (launch === "1" && id === "appointment" && params.getAll("launch").length === 1)) &&
+    !params.has("appointment") && !params.has("encounter") && !params.has("patient");
   const binding = id ? legacyVisitBinding(id, params) : null;
-  const nativeRead = Boolean(id && !binding && nativeTransportEnabled() && session?.mode === "live");
+  const nativeVisit = Boolean(id && (explicit || !binding) && nativeTransportEnabled() && session?.mode === "live");
   const page = (
     <>
       <PageHeader
@@ -153,7 +162,14 @@ export function VisitWorkspacePage() {
         breadcrumb={<Link to={ROUTES.home}>{t("nav.today")}</Link>}
       />
       <div className="shell-page-body">
-        {id && nativeRead ? (
+        {explicit ? (
+          nativeVisit && validLinkedRoute && appointmentRef ? (
+            <LinkedVisitWorkspace key={JSON.stringify([authGeneration, id, appointmentRef, launch])}
+              appointmentRef={appointmentRef} encounterId={launch === null ? id ?? null : null} />
+          ) : (
+            <StatePanel kind="error" title={t("workspace.nativeEncounterLoadError")} />
+          )
+        ) : id && nativeVisit ? (
           <SavedEncounterWorkspace key={JSON.stringify([authGeneration, id])} encounterId={id} />
         ) : binding ? (
           <AuthoredVisitWorkspace key={JSON.stringify([authGeneration, id, binding])} native={binding} />
@@ -165,5 +181,5 @@ export function VisitWorkspacePage() {
       </div>
     </>
   );
-  return nativeRead ? page : <RoleGuard surface="DOC-02">{page}</RoleGuard>;
+  return nativeVisit ? page : <RoleGuard surface="DOC-02">{page}</RoleGuard>;
 }

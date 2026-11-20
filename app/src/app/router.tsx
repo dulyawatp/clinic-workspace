@@ -8,7 +8,6 @@ import {
   RouterProvider,
 } from "react-router-dom";
 import { SignInPage } from "../features/auth/SignInPage";
-import { NativeEncounterDraftPage } from "../features/patients/NativeEncounterDraft";
 import { AppShell } from "../features/shell/AppShell";
 import { StatePanel } from "../ui/StatePanel";
 import { RequireSession } from "./guards";
@@ -38,9 +37,8 @@ export function RouteErrorFallback() {
  * the login route and the protected shell routes are covered.
  *
  * Designed surfaces come from `SURFACE_ROUTES` and retain their `RoleGuard`.
- * DOC-02 applies it internally to its legacy branches; Frappe owns native reads.
- * The native draft has its own authenticated route; Frappe authorizes its
- * reads and write. Legacy React-era addresses stay as redirects only.
+ * DOC-02 applies it internally to its legacy branches; Frappe owns native
+ * encounter reads and writes. Legacy React-era addresses stay as redirects only.
  */
 export const appRoutes: RouteObject[] = [
   {
@@ -61,7 +59,6 @@ export const appRoutes: RouteObject[] = [
             path,
             element: surface === "DOC-02" ? element : <RoleGuard surface={surface}>{element}</RoleGuard>,
           })),
-          { path: ROUTES.nativeEncounterNew, element: <NativeEncounterDraftPage /> },
           { path: ROUTES.legacyFinance, element: <FinanceRedirect /> },
           {
             // Legacy patient picker: gated as the PAT-04 clinician entry and

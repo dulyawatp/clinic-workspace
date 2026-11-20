@@ -150,6 +150,9 @@
   background: #f2f8f8;
 }
 .visit-preview-note textarea { min-height: 8.75rem; resize: vertical; }
+.visit-linked-note + .visit-linked-note { border-top: 1px solid var(--border); padding-top: 0.75rem; }
+.visit-linked-note-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.visit-preview-actions { margin-top: 1rem; padding: 1rem; }
 .visit-preview .pc-field :is(input, textarea, select) {
   font-size: .875rem;
   font-weight: 400;

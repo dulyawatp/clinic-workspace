@@ -57,7 +57,7 @@ export function NativeVisitTimeline({ patientRef }: { patientRef: string }) {
                   <div className="visit-history-spine" aria-hidden="true" />
                   <article className="visit-preview-card visit-native-history-card">
                     <div className="visit-preview-head">
-                      <h3><Link to={ROUTES.visit(visit.id)}>{t("workspace.historyVisit", { id: visit.id })}</Link></h3>
+                      <h3>{t("workspace.historyVisit", { id: visit.id })}</h3>
                       <EncounterStatus status={visit.docstatus} />
                     </div>
                     <p className="pc-note">{t("clinical.practitioner")}: {visit.practitioner || t("common.unavailable")}</p>

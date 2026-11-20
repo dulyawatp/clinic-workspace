@@ -234,6 +234,9 @@ export function LiveAppointmentPage({ id }: { id: string }) {
           </dl>
 
           <div className="appointment-actions">
+            <Link className="pc-button pc-button--primary" to={ROUTES.linkedVisit(appointment.appointment_id)}>
+              {t("workspace.openEncounter")}
+            </Link>
             {!canReschedule ? (
               <p className="appointment-write-note" role="status">
                 {t("appointmentWrite.rescheduleUnavailable")}

@@ -23,6 +23,7 @@ export const ROUTES = {
   patientNew: "/clinic/patients/new",
   patientPattern: "/clinic/patients/:id",
   patient: (id: string) => `/clinic/patients/${encodeURIComponent(id)}`,
+  patientHistory: (id: string): string => `${ROUTES.patient(id)}?view=history`,
 
   photoPattern: "/clinic/patients/:id/photos",
   photoComparePattern: "/clinic/patients/:id/photos/compare",
@@ -44,9 +45,13 @@ export const ROUTES = {
     `/clinic/appointments/${encodeURIComponent(id)}`,
 
   doctor: "/clinic/doctor",
-  nativeEncounterNew: "/clinic/encounters/new",
   visitPattern: "/clinic/visits/:id",
   visit: (id: string) => `/clinic/visits/${encodeURIComponent(id)}`,
+  linkedVisit: (appointmentRef: string, encounterId?: string): string => {
+    const params = new URLSearchParams({ appointment_ref: appointmentRef });
+    if (encounterId === undefined) params.set("launch", "1");
+    return `${ROUTES.visit(encounterId ?? "appointment")}?${params}`;
+  },
   procedurePattern: "/clinic/procedures/:id",
   procedure: (id: string) => `/clinic/procedures/${encodeURIComponent(id)}`,
   labPattern: "/clinic/labs/:id",

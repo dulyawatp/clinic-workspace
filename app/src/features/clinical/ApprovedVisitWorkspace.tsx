@@ -144,7 +144,7 @@ export function EncounterReadFailure({ error, onRetry }: {
     : <StatePanel kind="error" title={title} />;
 }
 
-function SavedTerms({ kind, items }: { kind: Kind; items: string[] | null }) {
+export function SavedTerms({ kind, items }: { kind: Kind; items: string[] | null }) {
   const { t } = useTranslation();
   return (
     <div className="visit-preview-stack">
@@ -188,8 +188,8 @@ export function SavedEncounterWorkspace({ encounterId }: { encounterId: string }
               <h2>{encounter.patientName}</h2>
             </div>
           </div>
-          <Link className="pc-button pc-button--secondary" to={`${ROUTES.patient(encounter.patientId)}?view=history`}>
-            {t("workspace.history")}
+          <Link className="pc-button pc-button--secondary" to={ROUTES.patientHistory(encounter.patientId)}>
+            {t("workspace.patientHistory")}
           </Link>
         </div>
         <dl>

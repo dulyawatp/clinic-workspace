@@ -68,7 +68,7 @@ afterEach(() => {
   localStorage.removeItem(LOCALE_KEY);
 });
 
-it("opens native patient history and reopens its saved encounter with GET only", async () => {
+it("opens read-only native patient history and reads a bare saved encounter with GET only", async () => {
   const reads = vi.fn();
   const posts = postSpy();
   const first = setup(ROUTES.patient(ref));
@@ -87,14 +87,15 @@ it("opens native patient history and reopens its saved encounter with GET only",
   );
   try {
     const user = userEvent.setup();
-    const history = await screen.findByRole("link", { name: "Visit history" });
+    const history = await screen.findByRole("link", { name: "Patient History" });
     expect(history).toHaveAttribute("href", `${ROUTES.patient(ref)}?view=history`);
     expect(reads).not.toHaveBeenCalled();
     await user.click(history);
-    expect(await screen.findByRole("link", { name: `Visit ${id}` })).toHaveAttribute("href", ROUTES.visit(id));
+    expect(await screen.findByRole("heading", { name: `Visit ${id}` })).toBeVisible();
+    expect(screen.queryByRole("link", { name: `Visit ${id}` })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Load more visits" }));
-    expect(await screen.findByRole("link", { name: "Visit ENCOUNTER-older" })).toHaveAttribute("href", ROUTES.visit("ENCOUNTER-older"));
-    await user.click(screen.getByRole("link", { name: `Visit ${id}` }));
+    expect(await screen.findByRole("heading", { name: "Visit ENCOUNTER-older" })).toBeVisible();
+    await act(async () => first.router.navigate(ROUTES.visit(id)));
     expect(first.router.state.location.pathname).toBe(ROUTES.visit(id));
     expect(await screen.findByRole("heading", { name: row.patientName })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Clinical Note" })).toBeVisible();
@@ -107,10 +108,10 @@ it("opens native patient history and reopens its saved encounter with GET only",
     expect(screen.queryByTestId("sample-banner")).not.toBeInTheDocument();
 
     const address = first.router.state.location.pathname;
-    const back = screen.getByRole("link", { name: "Visit history" });
+    const back = screen.getByRole("link", { name: "Patient History" });
     expect(back).toHaveAttribute("href", `${ROUTES.patient(row.patientId)}?view=history`);
     await user.click(back);
-    expect(await screen.findByRole("link", { name: `Visit ${id}` })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: `Visit ${id}` })).toBeVisible();
     expect(first.router.state.location.pathname).toBe(ROUTES.patient(row.patientId));
     first.unmount();
     setup(address);
@@ -136,7 +137,7 @@ it("loads more history after Frappe filters every encounter on the first page", 
   const more = await screen.findByRole("button", { name: "Load more visits" });
   expect(screen.queryByText("No visits found.")).not.toBeInTheDocument();
   await userEvent.setup().click(more);
-  expect(await screen.findByRole("link", { name: `Visit ${id}` })).toHaveAttribute("href", ROUTES.visit(id));
+  expect(await screen.findByRole("heading", { name: `Visit ${id}` })).toBeVisible();
   expect(screen.queryByRole("button", { name: "Load more visits" })).not.toBeInTheDocument();
   expect(offsets.mock.calls).toEqual([["0"], ["20"]]);
 });
@@ -153,7 +154,7 @@ it.each([
   expect(await screen.findByRole("heading", { name: title })).toBeVisible();
   expect(screen.queryByText("DO NOT DISPLAY")).not.toBeInTheDocument();
   expect(screen.queryByText(row.patientName)).not.toBeInTheDocument();
-  expect(screen.queryByRole("link", { name: "Visit history" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Patient History" })).not.toBeInTheDocument();
   expect(screen.queryByTestId("sample-banner")).not.toBeInTheDocument();
 });
 
@@ -190,7 +191,7 @@ it("does not let a malformed legacy binding hijack a Thai native deep link", asy
   expect(await screen.findByRole("heading", { name: row.patientName })).toBeVisible();
   expect(screen.getByText("ยังไม่ได้บันทึกอาการ")).toBeVisible();
   expect(screen.getByText("ไม่สามารถแสดงการวินิจฉัยในหน้านี้")).toBeVisible();
-  expect(screen.getByRole("link", { name: "ประวัติการตรวจ" })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: "ประวัติผู้ป่วย" })).toHaveAttribute(
     "href", `${ROUTES.patient(row.patientId)}?view=history`,
   );
   expect(screen.queryByTestId("native-write-banner")).not.toBeInTheDocument();
@@ -248,7 +249,7 @@ it("drops an in-flight history on patient change and a saved encounter on identi
   await act(async () => router.navigate(`${ROUTES.patient("workspace-b")}?view=history`));
   expect(await screen.findByText("No visits found.")).toBeVisible();
   await act(async () => delayed.finish());
-  expect(screen.queryByRole("link", { name: `Visit ${id}` })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: `Visit ${id}` })).not.toBeInTheDocument();
 
   await act(async () => router.navigate(ROUTES.visit(id)));
   expect(await screen.findByRole("heading", { name: row.patientName })).toBeVisible();
@@ -259,7 +260,7 @@ it("drops an in-flight history on patient change and a saved encounter on identi
   await userEvent.setup().click(screen.getByRole("button", { name: "Refresh identity" }));
   expect(await screen.findByRole("heading", { name: "Permission denied" })).toBeVisible();
   expect(screen.queryByRole("heading", { name: row.patientName })).not.toBeInTheDocument();
-  expect(screen.queryByRole("link", { name: "Visit history" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Patient History" })).not.toBeInTheDocument();
 });
 
 it("does not render a late visit response after changing visit or show prior rows on denied history", async () => {

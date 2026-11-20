@@ -668,8 +668,8 @@ function NativePatientProfileContent({
               </div>
             </dl>
           </div>
-          <Link className="ui-button ui-button--secondary" to={`${ROUTES.patient(workspacePatientId)}?view=history`}>
-            {t("workspace.history")}
+          <Link className="ui-button ui-button--secondary" to={ROUTES.patientHistory(detail.workspace_patient_id)}>
+            {t("workspace.patientHistory")}
           </Link>
         </header>
         <RedactionNotice roles={session?.user.roles ?? []} />

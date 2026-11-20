@@ -323,16 +323,7 @@ function DirectoryContent() {
     setPage(1);
   }
 
-  const directoryHeader = (
-    <PageHeader
-      title={t("surface.PAT-01")}
-      actions={nativeLive && (
-        <Link className="ui-button ui-button--primary" to={ROUTES.nativeEncounterNew}>
-          {t("nativeEncounter.launch")}
-        </Link>
-      )}
-    />
-  );
+  const directoryHeader = <PageHeader title={t("surface.PAT-01")} />;
 
   const capability = getCapability(caps, "read.patient");
   const listingDenied =
