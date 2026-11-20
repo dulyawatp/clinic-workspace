@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  bookNativeAppointment,
   cancelNativeAppointment,
   checkinNativeAppointment,
   noShowNativeAppointment,
@@ -22,7 +21,7 @@ const DETAIL = {
 };
 const NATIVE_DETAIL = {
   workspace_patient_id: "PAT-0001",
-  appointment_id: "APT-0001",
+  appointment_id: ALIAS,
   appointment_date: "2026-11-20",
   appointment_time: "09:30:00",
   status: "Scheduled",
@@ -30,22 +29,13 @@ const NATIVE_DETAIL = {
 };
 
 function success(
-  status: "booked" | "rescheduled" | "checked_in" | "cancelled" | "no_show",
+  status: "rescheduled" | "checked_in" | "cancelled" | "no_show",
   appointment: Record<string, unknown> = DETAIL,
 ) {
   return new Response(
     JSON.stringify({ message: { status, appointment } }),
     { status: 200 },
   );
-}
-
-function bookInput() {
-  return {
-    operation_key: OPERATION,
-    workspace_patient_id: "WS-1",
-    appointment_date: "2026-11-20",
-    appointment_time: "09:30",
-  };
 }
 
 function rescheduleInput() {
@@ -82,41 +72,13 @@ describe("native appointment writes", () => {
     vi.restoreAllMocks();
   });
 
-  it("posts one booking request and never sends an acknowledgement", async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(success("booked"));
-
-    await expect(bookNativeAppointment(bookInput())).resolves.toEqual({
-      status: "booked",
-      appointment: DETAIL,
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
-      "/api/method/clinic_ui.api.appointments.book",
-    );
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
-      operation_key: OPERATION,
-      workspace_patient_id: "WS-1",
-      appointment_date: "2026-11-20",
-      appointment_time: "09:30",
-    });
-    expect(
-      (fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>)[
-        "X-Frappe-CSRF-Token"
-      ],
-    ).toBe("csrf");
-    expect(localStorage.length).toBe(0);
-  });
-
   it("ignores the retired browser fence key and does not recreate it", async () => {
     localStorage.setItem("clinic.appointment-write.pending", "1");
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValue(success("booked"));
+      .mockResolvedValue(success("rescheduled"));
 
-    await bookNativeAppointment(bookInput());
+    await rescheduleNativeAppointment(rescheduleInput());
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(localStorage.getItem("clinic.appointment-write.pending")).toBe("1");
@@ -125,13 +87,13 @@ describe("native appointment writes", () => {
   it("accepts native identifier values in the canonical fields", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValue(success("booked", NATIVE_DETAIL));
+      .mockResolvedValue(success("rescheduled", NATIVE_DETAIL));
 
-    await expect(bookNativeAppointment(bookInput())).resolves.toEqual({
-      status: "booked",
+    await expect(rescheduleNativeAppointment(rescheduleInput())).resolves.toEqual({
+      status: "rescheduled",
       appointment: {
         workspace_patient_id: "PAT-0001",
-        appointment_id: "APT-0001",
+        appointment_id: ALIAS,
         appointment_date: "2026-11-20",
         appointment_time: "09:30:00",
         status: "Scheduled",
@@ -161,10 +123,10 @@ describe("native appointment writes", () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(
-        success("booked", appointment as Record<string, unknown>),
+        success("rescheduled", appointment as Record<string, unknown>),
       );
 
-    await expect(bookNativeAppointment(bookInput())).rejects.toMatchObject({
+    await expect(rescheduleNativeAppointment(rescheduleInput())).rejects.toMatchObject({
       code: "uncertain",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -175,7 +137,7 @@ describe("native appointment writes", () => {
       new Response(
         JSON.stringify({
           message: {
-            status: "booked",
+            status: "rescheduled",
             ackToken: "a".repeat(64),
             appointment: DETAIL,
           },
@@ -184,7 +146,7 @@ describe("native appointment writes", () => {
       ),
     );
 
-    await expect(bookNativeAppointment(bookInput())).rejects.toMatchObject({
+    await expect(rescheduleNativeAppointment(rescheduleInput())).rejects.toMatchObject({
       code: "uncertain",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -194,7 +156,7 @@ describe("native appointment writes", () => {
     session.token = null;
     const fetchMock = vi.spyOn(globalThis, "fetch");
 
-    await expect(bookNativeAppointment(bookInput())).rejects.toMatchObject({
+    await expect(rescheduleNativeAppointment(rescheduleInput())).rejects.toMatchObject({
       code: "uncertain",
     });
     expect(fetchMock).not.toHaveBeenCalled();
@@ -205,7 +167,7 @@ describe("native appointment writes", () => {
       .spyOn(globalThis, "fetch")
       .mockRejectedValue(new Error("network"));
 
-    await expect(bookNativeAppointment(bookInput())).rejects.toMatchObject({
+    await expect(rescheduleNativeAppointment(rescheduleInput())).rejects.toMatchObject({
       code: "uncertain",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -213,26 +175,26 @@ describe("native appointment writes", () => {
   });
 
   it.each([
-    ["missing appointment", { message: { status: "booked" } }],
-    ["unreadable appointment", { message: { status: "booked", appointment: null } }],
+    ["missing appointment", { message: { status: "rescheduled" } }],
+    ["unreadable appointment", { message: { status: "rescheduled", appointment: null } }],
     [
       "missing version",
-      { message: { status: "booked", appointment: { ...DETAIL, modified: undefined } } },
+      { message: { status: "rescheduled", appointment: { ...DETAIL, modified: undefined } } },
     ],
     [
       "invalid date",
-      { message: { status: "booked", appointment: { ...DETAIL, appointment_date: "2026-02-30" } } },
+      { message: { status: "rescheduled", appointment: { ...DETAIL, appointment_date: "2026-02-30" } } },
     ],
     [
       "wrong operation status",
-      { message: { status: "rescheduled", appointment: DETAIL } },
+      { message: { status: "checked_in", appointment: DETAIL } },
     ],
   ])("reports %s as an unknown outcome", async (_label, body) => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
 
-    await expect(bookNativeAppointment(bookInput())).rejects.toMatchObject({
+    await expect(rescheduleNativeAppointment(rescheduleInput())).rejects.toMatchObject({
       code: "uncertain",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -252,7 +214,7 @@ describe("native appointment writes", () => {
         new Response(JSON.stringify({ message: { code } }), { status }),
       );
 
-    await expect(bookNativeAppointment(bookInput())).rejects.toMatchObject({
+    await expect(rescheduleNativeAppointment(rescheduleInput())).rejects.toMatchObject({
       code: kind,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);

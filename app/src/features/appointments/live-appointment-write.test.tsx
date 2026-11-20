@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { Route, Routes } from "react-router-dom";
@@ -13,7 +13,8 @@ const BOOTSTRAP = "/api/method/clinic_ui.api.session.bootstrap";
 const LIST = "/api/method/clinic_ui.api.appointments.synthetic_appointments";
 const VIEW = "/api/method/clinic_ui.api.appointments.view";
 const DIRECTORY = "/api/method/clinic_ui.api.directory.synthetic_patients";
-const BOOK = "/api/method/clinic_ui.api.appointments.book";
+const BOOK = "/api/resource/Patient%20Appointment";
+const LINK = "/api/method/frappe.desk.search.search_link";
 const RESCHEDULE = "/api/method/clinic_ui.api.appointments.reschedule";
 const CHECKIN = "/api/method/clinic_ui.api.appointments.checkin";
 const CANCEL = "/api/method/clinic_ui.api.appointments_cancel_write.cancel";
@@ -32,6 +33,50 @@ const DETAIL = {
   ...ROW,
   modified: "2026-11-20 09:00:00.000000",
 };
+
+const bookingFields = [
+  ["patient", "Patient", "ผู้ป่วย", "PAT-NATIVE", { status: "Active" }],
+  ["company", "Company", "บริษัท", "Hospital Co", null],
+  ["department", "Medical Department", "แผนก", "General Medicine", null],
+  ["appointment_type", "Appointment Type", "ประเภทนัดหมาย", "Department Visit", { allow_booking_for: "Department" }],
+] as const;
+const nativeBooking = {
+  patient: "PAT-NATIVE",
+  company: "Hospital Co",
+  department: "General Medicine",
+  appointment_type: "Department Visit",
+  appointment_for: "Department",
+  appointment_date: "2026-11-25",
+  appointment_time: "10:15",
+};
+const nativeDoc = { ...nativeBooking, doctype: "Patient Appointment", name: "HLC-APP-0042", status: "Scheduled" };
+
+function serveBooking() {
+  serveBase({ "write.appointment.book": "enabled" });
+  const lookups = vi.fn();
+  function reply(args: Record<string, unknown>) {
+    lookups(args);
+    const field = bookingFields.find(([name]) => args.link_fieldname === name);
+    if (!field) return new HttpResponse(null, { status: 400 });
+    return HttpResponse.json({ message: [{ value: field[3], label: "" }] });
+  }
+  server.use(
+    http.get(LINK, ({ request }) => reply(Object.fromEntries(new URL(request.url).searchParams))),
+    http.post(LINK, async ({ request }) => reply(await request.json() as Record<string, unknown>)),
+  );
+  return lookups;
+}
+
+async function fillBooking(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: "เริ่มจองนัด" }));
+  for (const [, , label, id] of bookingFields) {
+    await screen.findByRole("option", { name: id });
+    await user.selectOptions(screen.getByRole("combobox", { name: label }), id);
+  }
+  await user.type(screen.getByLabelText("วันที่"), nativeBooking.appointment_date);
+  await user.type(screen.getByLabelText("เวลา"), nativeBooking.appointment_time);
+  return screen.getByRole("button", { name: "ยืนยันการจอง" });
+}
 
 function bootstrap(caps: Record<string, string>) {
   return {
@@ -81,78 +126,100 @@ it("shows the booking form only when the server enables booking", async () => {
   expect(
     await screen.findByText(ALIAS),
   ).toBeVisible();
-  const start = screen.getByRole("button", { name: "เริ่มจองนัดทดสอบ" });
+  const start = screen.getByRole("button", { name: "เริ่มจองนัด" });
   expect(start).toBeDisabled();
   expect(
     screen.getByText("การจองไม่เปิดใช้งานสำหรับบัญชีนี้"),
   ).toBeVisible();
 });
 
-it("books a selected readable patient without an acknowledgement", async () => {
-  serveBase({
-    "write.appointment.book": "enabled",
-    "read.patient": "read_only",
-  });
+it("posts exact native Link values once, refreshes appointments and shows the returned identity and status", async () => {
+  const lookups = serveBooking();
   const book = vi.fn();
+  const list = vi.fn();
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
   server.use(
+    http.get(LIST, () => {
+      list();
+      return HttpResponse.json({ message: { items: [ROW] } });
+    }),
     http.post(BOOK, async ({ request }) => {
-      book(await request.json());
-      return writeSuccess("booked");
+      book(await request.json(), request.headers.get("X-Frappe-CSRF-Token"));
+      await pending;
+      return HttpResponse.json({ data: nativeDoc });
     }),
   );
   const user = userEvent.setup();
   renderWithFixtures(<ReceptionHomePage />);
+  const submit = await fillBooking(user);
+  const form = submit.closest("form")!;
+  fireEvent.submit(form);
+  fireEvent.submit(form);
+  await waitFor(() => expect(book).toHaveBeenCalledExactlyOnceWith(nativeBooking, "csrf"));
+  expect(submit).toBeDisabled();
+  expect(screen.getByLabelText("วันที่")).toBeDisabled();
+  release();
 
-  const start = await screen.findByRole("button", {
-    name: "เริ่มจองนัดทดสอบ",
-  });
-  await waitFor(() => expect(start).toBeEnabled());
-  await user.click(start);
-  await user.selectOptions(
-    await screen.findByLabelText("ผู้ป่วย"),
-    "WS-1",
-  );
-  await user.type(screen.getByLabelText("วันที่"), "2026-11-25");
-  await user.type(screen.getByLabelText("เวลา"), "10:15");
-  await user.click(screen.getByRole("button", { name: "ยืนยันการจอง" }));
-
-  expect(
-    await screen.findByText("จองแล้ว เลขที่อ้างอิง: appointment-alias-1"),
-  ).toBeVisible();
-  expect(book).toHaveBeenCalledWith({
-    operation_key: expect.any(String),
-    workspace_patient_id: "WS-1",
-    appointment_date: "2026-11-25",
-    appointment_time: "10:15",
-  });
+  expect(await screen.findByRole("link", { name: nativeDoc.name }))
+    .toHaveAttribute("href", `/clinic/appointments/${nativeDoc.name}`);
+  expect(screen.getByText(/บันทึกนัดหมายแล้ว/)).toHaveTextContent("HLC-APP-0042 · นัดหมาย");
+  await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+  for (const [field, doctype, , , filters] of bookingFields) {
+    expect(lookups).toHaveBeenCalledWith(expect.objectContaining({
+      doctype, link_fieldname: field, reference_doctype: "Patient Appointment",
+      ...(filters ? { filters: field === "patient" ? filters : JSON.stringify(filters) } : {}),
+    }));
+  }
   expect(localStorage.length).toBe(0);
 });
 
-it("offers every readable directory patient, not only those with appointments", async () => {
-  serveBase({ "write.appointment.book": "enabled" });
+it("offers Link lookup patients even without any fixture appointments", async () => {
+  const lookups = serveBooking();
   server.use(
     http.get(LIST, () => HttpResponse.json({ message: { items: [] } })),
-    http.get(DIRECTORY, () =>
-      HttpResponse.json({
-        message: {
-          items: [
-            { workspace_patient_id: "WS-1", display_name: "Patient One" },
-            { workspace_patient_id: "WS-2", display_name: "Patient Two" },
-          ],
-        },
-      }),
-    ),
   );
   const user = userEvent.setup();
   renderWithFixtures(<ReceptionHomePage />);
+  await user.click(await screen.findByRole("button", { name: "เริ่มจองนัด" }));
+  expect(await screen.findByRole("option", { name: "PAT-NATIVE" })).toBeInTheDocument();
+  await user.type(screen.getByRole("searchbox", { name: "ค้นหาผู้ป่วย" }), "native");
+  await waitFor(() => expect(lookups).toHaveBeenCalledWith(expect.objectContaining({ txt: "native", doctype: "Patient" })));
+});
 
-  const start = await screen.findByRole("button", {
-    name: "เริ่มจองนัดทดสอบ",
-  });
-  await waitFor(() => expect(start).toBeEnabled());
-  await user.click(start);
-  const patient = await screen.findByLabelText("ผู้ป่วย");
-  expect(within(patient).getByText(/Patient Two/)).toBeVisible();
+it.each([
+  ["native duplicate", () => HttpResponse.json({
+    exc_type: "DuplicateEntryError",
+    exc: "secret traceback",
+    _server_messages: JSON.stringify([
+      JSON.stringify({ message: "Unrelated warning" }),
+      JSON.stringify({
+        message: 'Patient already has an appointment <a href="/app/patient-appointment/existing-private">existing-private</a> booked for <b>General Medicine</b> on 25&nbsp;Nov.',
+        raise_exception: 1,
+      }),
+    ]),
+  }, { status: 500 }), /Patient already has an appointment booked for General Medicine on 25 Nov/],
+  ["permission denied", () => HttpResponse.json({ exc: "secret traceback" }, { status: 403 }), /บัญชีนี้ไม่มีสิทธิ์/],
+  ["lost response", () => HttpResponse.error(), /ยังไม่ยืนยันผลการนัดหมาย/],
+  ["unverified status", () => HttpResponse.json({ data: { ...nativeDoc, status: "booked" } }), /ยังไม่ยืนยันผลการนัดหมาย/],
+  ["missing native ID", () => HttpResponse.json({ data: { ...nativeDoc, name: undefined } }), /ยังไม่ยืนยันผลการนัดหมาย/],
+  ["mismatched patient", () => HttpResponse.json({ data: { ...nativeDoc, patient: "OTHER-PRIVATE" } }), /ยังไม่ยืนยันผลการนัดหมาย/],
+] as const)("does not retry or show a receipt for %s", async (_, respond, message) => {
+  serveBooking();
+  const book = vi.fn(respond);
+  const fallback = vi.fn(() => HttpResponse.json({}));
+  server.use(
+    http.post(BOOK, () => book()),
+    http.post("/api/method/clinic_ui.api.appointments.book", fallback),
+  );
+  const user = userEvent.setup();
+  renderWithFixtures(<ReceptionHomePage />);
+  await user.click(await fillBooking(user));
+  expect(await screen.findByText(message)).toBeVisible();
+  expect(screen.queryByText(/secret traceback|existing-private|Unrelated warning|OTHER-PRIVATE/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: nativeDoc.name })).not.toBeInTheDocument();
+  expect(book).toHaveBeenCalledTimes(1);
+  expect(fallback).not.toHaveBeenCalled();
 });
 
 it("reschedules a server-eligible appointment using the loaded version", async () => {
@@ -577,21 +644,13 @@ it("does not fetch or show check-in when the capability is not enabled", async (
 });
 
 it("does not carry a stop state across a remount", async () => {
-  serveBase({ "write.appointment.book": "enabled" });
+  serveBooking();
   server.use(
     http.post(BOOK, () => HttpResponse.json({}, { status: 500 })),
   );
   const user = userEvent.setup();
   const first = renderWithFixtures(<ReceptionHomePage />);
-  let start = await screen.findByRole("button", {
-    name: "เริ่มจองนัดทดสอบ",
-  });
-  await waitFor(() => expect(start).toBeEnabled());
-  await user.click(start);
-  await user.selectOptions(await screen.findByLabelText("ผู้ป่วย"), "WS-1");
-  await user.type(screen.getByLabelText("วันที่"), "2026-11-25");
-  await user.type(screen.getByLabelText("เวลา"), "10:15");
-  await user.click(screen.getByRole("button", { name: "ยืนยันการจอง" }));
+  await user.click(await fillBooking(user));
   expect(
     await screen.findByText(/ยังไม่ยืนยันผลการนัดหมาย/),
   ).toBeVisible();
@@ -599,7 +658,7 @@ it("does not carry a stop state across a remount", async () => {
   first.unmount();
 
   renderWithFixtures(<ReceptionHomePage />);
-  start = await screen.findByRole("button", { name: "เริ่มจองนัดทดสอบ" });
+  const start = await screen.findByRole("button", { name: "เริ่มจองนัด" });
   await waitFor(() => expect(start).toBeEnabled());
   expect(screen.queryByText(/ยังไม่ยืนยันผลการนัดหมาย/)).toBeNull();
 });

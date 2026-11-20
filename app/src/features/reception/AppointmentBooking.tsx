@@ -1,276 +1,240 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useQueryClient } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link, useSearchParams } from "react-router-dom";
+import { ROUTES } from "../../app/routes";
 import { useSession } from "../../app/SessionProvider";
 import { getCapability } from "../../domain/capability";
 import { Button } from "../../ui/Button";
-import { StatePanel } from "../../ui/StatePanel";
 import { WriteGate } from "../../ui/WriteGate";
 import {
-  bookNativeAppointment,
-  NativeAppointmentWriteError,
-} from "../../transport/native/appointment-write";
+  AppointmentBookingError,
+  createDepartmentAppointment,
+  searchBookingLinks,
+  type BookedAppointment,
+  type BookingLinkField,
+  type BookingLinkOption,
+} from "../../transport/native/appointment-booking";
 import { nativeTransportEnabled } from "../../transport/native/flag";
 import { useCapabilities } from "../shell/CapabilityProvider";
-import { useLivePatients } from "../patients/live-directory";
 
-function messageKey(code: string): string {
-  switch (code) {
-    case "stale":
-      return "appointmentWrite.stale";
-    case "conflict":
-      return "appointmentWrite.conflict";
-    case "validation":
-      return "appointmentWrite.invalid";
-    case "forbidden":
-    case "auth":
-      return "appointmentWrite.forbidden";
-    default:
-      return "appointmentWrite.uncertain";
-  }
-}
+const fields = {
+  patient: "appointment.patient",
+  company: "appointment.company",
+  department: "appointmentWrite.department",
+  appointment_type: "appointment.type",
+} satisfies Record<BookingLinkField, string>;
 
-/**
- * Booking in reception. The native transport is required: there is no proxy
- * booking path, and the wrapper mounts no query when it is unavailable.
- */
+const statusKeys = {
+  Scheduled: "status.scheduled",
+  Open: "appointmentWrite.openStatus",
+  Confirmed: "status.confirmed",
+  "No Show": "status.noShow",
+} satisfies Record<BookedAppointment["status"], string>;
+
 export function AppointmentBooking() {
-  return nativeTransportEnabled() ? <AppointmentBookingForm /> : null;
+  const { session, authGeneration } = useSession();
+  return nativeTransportEnabled() && session?.mode === "live"
+    ? <AppointmentBookingForm key={authGeneration} />
+    : null;
 }
 
 function AppointmentBookingForm() {
   const { t } = useTranslation();
   const { caps } = useCapabilities();
-  const { session } = useSession();
   const queryClient = useQueryClient();
-  const [searchParams] = useSearchParams();
-  const requestedPatient = searchParams.get("patient") ?? "";
-  const requestedSource = searchParams.get("source") ?? "";
-  const authoredReturnSource = searchParams.get("returnSource") ?? "";
-  const autoOpen = searchParams.get("book") === "1";
-  const enabled =
-    getCapability(caps, "write.appointment.book") === "enabled";
-  const appliedRequest = useRef(false);
-  const patientId = useId();
+  const [params] = useSearchParams();
+  const enabled = getCapability(caps, "write.appointment.book") === "enabled";
+  const [open, setOpen] = useState(params.get("book") === "1" && enabled);
   const dateId = useId();
   const timeId = useId();
-  const [open, setOpen] = useState(autoOpen && enabled);
-  const [selected, setSelected] = useState("");
+  const [selected, setSelected] = useState<Partial<Record<BookingLinkField, BookingLinkOption>>>({});
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
+  const dispatched = useRef(false);
   const [saving, setSaving] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
-  const [booked, setBooked] = useState<string | null>(null);
-  const directory = useLivePatients();
+  const [failure, setFailure] = useState<AppointmentBookingError | null>(null);
+  const [booked, setBooked] = useState<BookedAppointment | null>(null);
 
-  // Patient choices are the readable directory only. The converted lane lets
-  // the server's native write authority decide eligibility, so a readable
-  // patient is no longer narrowed by the appointment list.
-  const candidates = useMemo(() => directory.data ?? [], [directory.data]);
-
-  useEffect(() => {
-    if (selected !== "" && candidates.some((item) => item.workspace_patient_id === selected))
-      return;
-    setSelected("");
-  }, [candidates, selected]);
-
-  useEffect(() => {
-    if (appliedRequest.current) return;
-    if (requestedPatient === "") {
-      appliedRequest.current = true;
-      return;
-    }
-    if (!candidates.some((item) => item.workspace_patient_id === requestedPatient))
-      return;
-    setSelected(requestedPatient);
-    if (autoOpen && enabled) setOpen(true);
-    appliedRequest.current = true;
-  }, [autoOpen, candidates, enabled, requestedPatient]);
-
-  /*
-   * A Demo/Sample claim is only honest when the authored return record is
-   * actually on the link. A plain `source=return` is a real booking request
-   * opened from an appointment, so it carries no sample claim at all.
-   */
+  // These links carry a workspace reference (sometimes a fixture alias),
+  // not a verified Patient docname. Preserve entry/source, never prefill it.
+  const selectPatientAgain = Boolean(params.get("patient"));
+  const source = params.get("source");
   const sourceNote =
-    requestedSource === "return" && authoredReturnSource !== ""
+    source === "return" && params.get("returnSource")
       ? t("appointmentWrite.source.return")
-      : requestedSource === "checkout"
+      : source === "checkout"
         ? t("appointmentWrite.source.checkout")
         : null;
 
-  if (session?.mode !== "live") return null;
-
-  const title = t("appointmentWrite.bookTitle");
+  const { patient, company, department, appointment_type } = selected;
+  const canSubmit = Boolean(patient && company && department && appointment_type && date && time);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!enabled || saving) return;
-    if (
-      !candidates.some((item) => item.workspace_patient_id === selected) ||
-      !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
-      !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)
-    ) {
-      setFailure("validation");
-      return;
-    }
+    if (!enabled || dispatched.current || failure?.reason === "uncertain" ||
+        !patient || !company || !department || !appointment_type || !date || !time) return;
+    dispatched.current = true;
+    setSaving(true);
     setFailure(null);
     setBooked(null);
-    setSaving(true);
     try {
-      const result = await bookNativeAppointment({
-        operation_key: crypto.randomUUID(),
-        workspace_patient_id: selected,
+      const result = await createDepartmentAppointment({
+        patient: patient.id,
+        company: company.id,
+        department: department.id,
+        appointment_type: appointment_type.id,
         appointment_date: date,
         appointment_time: time,
       });
-      setBooked(result.appointment.appointment_id);
+      setBooked(result);
       setDate("");
       setTime("");
-      setSelected("");
+      setSelected({});
       setOpen(false);
     } catch (error) {
-      // A deterministic refusal is a known failure; anything else (lost,
-      // unreadable) is an unknown outcome. Nothing is retried automatically.
-      setFailure(
-        error instanceof NativeAppointmentWriteError ? error.code : "uncertain",
-      );
+      setFailure(error instanceof AppointmentBookingError ? error : new AppointmentBookingError("uncertain"));
+    } finally {
+      dispatched.current = false;
+      setSaving(false);
+      // Best-effort refresh is not reconciliation of an uncertain POST.
+      void queryClient.invalidateQueries({ queryKey: ["live-appointments"] });
+      void queryClient.invalidateQueries({ queryKey: ["live-appointment"] });
     }
-    // Best-effort refresh only: it is not a reconciliation guarantee, and an
-    // unknown outcome still requires the reader to check current records.
-    try {
-      await queryClient.invalidateQueries({ queryKey: ["live-appointments"] });
-    } catch {
-      // A failed refresh leaves reconciliation to the reader's next view.
-    }
-    setSaving(false);
   }
 
   return (
-    <section
-      className="appointment-card appointment-write-card"
-      aria-labelledby="appointment-booking-title"
-    >
-      <h2 id="appointment-booking-title">{title}</h2>
-      <p className="appointment-write-intro">
-        {t("appointmentWrite.bookingScope")}
-      </p>
-      {sourceNote !== null && (
-        <p className="appointment-write-note" role="status">
-          {sourceNote}
-        </p>
-      )}
+    <section className="appointment-card appointment-write-card" aria-labelledby="appointment-booking-title">
+      <h2 id="appointment-booking-title">{t("appointmentWrite.bookTitle")}</h2>
+      <p className="appointment-write-intro">{t("appointmentWrite.bookingScope")}</p>
+      {sourceNote !== null && <p className="appointment-write-note" role="status">{sourceNote}</p>}
       {!open && (
         <WriteGate capability="write.appointment.book">
-          <Button
-            variant="secondary"
-            disabled={directory.isPending || candidates.length === 0}
-            disabledReason={
-              candidates.length === 0
-                ? t("appointmentWrite.noPatients")
-                : undefined
-            }
-            onClick={() => setOpen(true)}
-          >
+          <Button variant="secondary" onClick={() => setOpen(true)}>
             {t("appointmentWrite.openForm")}
           </Button>
         </WriteGate>
       )}
-      {booked !== null && (
+      {booked && (
         <p role="status" className="appointment-write-success">
-          {t("appointmentWrite.booked", { reference: booked })}
+          {t("appointmentWrite.booked")}{" "}
+          <Link className="live-appointment-link" to={ROUTES.appointment(booked.id)}>{booked.id}</Link>
+          {" · "}{t(statusKeys[booked.status])}
         </p>
       )}
-      {!open && directory.isError && (
+      {failure && (
         <p role="alert" className="appointment-write-alert">
-          {t("errors.UPSTREAM_UNAVAILABLE")}
-        </p>
-      )}
-      {failure !== null && (
-        <p role="alert" className="appointment-write-alert">
-          {t(messageKey(failure))}
+          {failure.detail ?? t({
+            denied: "appointmentWrite.bookingDenied",
+            validation: "appointmentWrite.bookingInvalid",
+            uncertain: "appointmentWrite.uncertain",
+          }[failure.reason])}
         </p>
       )}
       {open && enabled && (
-        <form className="appointment-write-form" onSubmit={(event) => void submit(event)} noValidate>
-          <p>{t("appointmentWrite.patientRestriction")}</p>
-          {directory.isError ? (
-            <StatePanel kind="error" title={t("errors.UPSTREAM_UNAVAILABLE")} />
-          ) : directory.isPending || !directory.isFetchedAfterMount ? (
-            <StatePanel kind="loading" title={t("common.loading")} />
-          ) : candidates.length === 0 ? (
-            <p role="status">{t("appointmentWrite.noPatients")}</p>
-          ) : (
-            <div className="appointment-form">
-              <label htmlFor={patientId}>
-                {t("appointment.patient")}
-                <select
-                  id={patientId}
-                  value={selected}
-                  required
-                  onChange={(event) => setSelected(event.target.value)}
-                >
-                  <option value="">{t("patientWrite.select")}</option>
-                  {candidates.map((patient) => (
-                    <option
-                      key={patient.workspace_patient_id}
-                      value={patient.workspace_patient_id}
-                    >
-                      {patient.display_name} · {patient.workspace_patient_id}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label htmlFor={dateId}>
-                {t("appointment.date")}
-                <input
-                  id={dateId}
-                  type="date"
-                  value={date}
-                  required
-                  onChange={(event) => setDate(event.target.value)}
-                />
-              </label>
-              <label htmlFor={timeId}>
-                {t("appointment.time")}
-                <input
-                  id={timeId}
-                  type="time"
-                  value={time}
-                  required
-                  onChange={(event) => setTime(event.target.value)}
-                />
-              </label>
-            </div>
-          )}
+        <form className="appointment-write-form" onSubmit={(event) => void submit(event)}>
+          {selectPatientAgain && <p>{t("appointmentWrite.reselectPatient")}</p>}
+          <div className="appointment-form">
+            {(Object.keys(fields) as BookingLinkField[]).map((field) => (
+              <BookingLink
+                key={field}
+                field={field}
+                selected={selected[field]}
+                disabled={saving}
+                onSelect={(option) => setSelected((current) => ({ ...current, [field]: option }))}
+              />
+            ))}
+            <label htmlFor={dateId}>
+              {t("appointment.date")}
+              <input id={dateId} type="date" value={date} required disabled={saving}
+                onChange={(event) => setDate(event.target.value)} />
+            </label>
+            <label htmlFor={timeId}>
+              {t("appointment.time")}
+              <input id={timeId} type="time" value={time} required disabled={saving}
+                onChange={(event) => setTime(event.target.value)} />
+            </label>
+          </div>
           <div className="appointment-write-actions">
-            <Button
-              type="submit"
-              disabled={saving || candidates.length === 0}
-            >
-              {saving
-                ? t("appointmentWrite.saving")
-                : t("appointmentWrite.confirmBooking")}
+            <Button type="submit" disabled={saving || !canSubmit || failure?.reason === "uncertain"}>
+              {t(saving ? "appointmentWrite.saving" : "appointmentWrite.confirmBooking")}
             </Button>
-            <Button
-              variant="secondary"
-              disabled={saving}
-              onClick={() => {
-                setOpen(false);
-                setFailure(null);
-              }}
-            >
+            <Button variant="secondary" disabled={saving} onClick={() => {
+              setOpen(false);
+              setFailure(null);
+            }}>
               {t("appointmentWrite.close")}
             </Button>
           </div>
         </form>
       )}
-      {!enabled && !open && (
-        <p className="appointment-write-note">
-          {t("appointmentWrite.bookUnavailable")}
-        </p>
-      )}
+      {!enabled && !open && <p className="appointment-write-note">{t("appointmentWrite.bookUnavailable")}</p>}
     </section>
+  );
+}
+
+function BookingLink({
+  field, selected, disabled, onSelect,
+}: {
+  field: BookingLinkField;
+  selected?: BookingLinkOption;
+  disabled: boolean;
+  onSelect: (option?: BookingLinkOption) => void;
+}) {
+  const { t } = useTranslation();
+  const { authGeneration } = useSession();
+  const selectId = useId();
+  const [search, setSearch] = useState("");
+  const [settled, setSettled] = useState("");
+  const text = search.trim();
+  const matches = useQuery({
+    queryKey: ["native-appointment-booking-links", authGeneration, field, settled],
+    queryFn: ({ signal }) => searchBookingLinks(field, settled, signal),
+    enabled: !disabled && settled === text,
+    retry: false,
+    gcTime: 0,
+  });
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettled(text), 250);
+    return () => window.clearTimeout(timer);
+  }, [text]);
+
+  const matchesForText = settled === text ? matches.data ?? [] : [];
+  const options = selected && !matchesForText.some((option) => option.id === selected.id)
+    ? [selected, ...matchesForText]
+    : matchesForText;
+  const label = t(fields[field]);
+  const loading = settled !== text || matches.isPending;
+  return (
+    <div className="appointment-write-inline">
+      <label htmlFor={selectId}>{label}</label>
+      <input
+        type="search"
+        aria-label={t(`appointmentWrite.search.${field}`)}
+        placeholder={t(`appointmentWrite.search.${field}`)}
+        autoComplete="off"
+        maxLength={100}
+        value={search}
+        disabled={disabled}
+        onChange={(event) => {
+          setSearch(event.target.value);
+          onSelect();
+        }}
+      />
+      <select id={selectId} value={selected?.id ?? ""} required
+        disabled={disabled || loading || matches.isError}
+        onChange={(event) => onSelect(options.find((option) => option.id === event.target.value))}>
+        <option value="">{t("patientWrite.select")}</option>
+        {options.map(({ id, label }) => <option key={id} value={id}>{label === id ? id : `${label} · ${id}`}</option>)}
+      </select>
+      {!disabled && (
+        loading ? <p role="status">{t("common.loading")}</p> :
+        matches.isError ? <p role="alert">{t(
+          matches.error instanceof AppointmentBookingError && matches.error.reason === "denied"
+            ? "appointmentWrite.lookupDenied" : "errors.UPSTREAM_UNAVAILABLE"
+        )}</p> :
+        options.length === 0 ? <p role="status">{t("appointmentWrite.noMatches")}</p> : null
+      )}
+    </div>
   );
 }

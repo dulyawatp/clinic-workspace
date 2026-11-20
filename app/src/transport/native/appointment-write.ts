@@ -5,7 +5,7 @@ import {
 import { FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
 import { nativeCsrfToken } from "./session";
 
-export type AppointmentWriteKind = "book" | "reschedule" | "checkin";
+export type AppointmentWriteKind = "reschedule" | "checkin";
 /** Operation kinds of the designed cancel/no-show transitions. */
 export type AppointmentTransitionKind =
   | "appointment_cancel"
@@ -14,7 +14,6 @@ export type AppointmentOperationKind =
   | AppointmentWriteKind
   | AppointmentTransitionKind;
 export type AppointmentWriteStatus =
-  | "booked"
   | "rescheduled"
   | "checked_in"
   | "cancelled"
@@ -42,13 +41,6 @@ export class NativeAppointmentWriteError extends Error {
     this.name = "NativeAppointmentWriteError";
     this.code = code;
   }
-}
-
-export interface BookAppointmentInput {
-  operation_key: string;
-  workspace_patient_id: string;
-  appointment_date: string;
-  appointment_time: string;
 }
 
 export interface RescheduleAppointmentInput {
@@ -83,7 +75,6 @@ export interface AppointmentWriteResult {
 const STATUS_BY_OPERATION: Readonly<
   Record<AppointmentOperationKind, AppointmentWriteStatus>
 > = {
-  book: "booked",
   reschedule: "rescheduled",
   checkin: "checked_in",
   appointment_cancel: "cancelled",
@@ -116,16 +107,6 @@ function hasExactKeys(
     Object.keys(value).length === keys.length &&
     keys.every((key) => Object.hasOwn(value, key))
   );
-}
-
-function validBookInput(input: BookAppointmentInput): void {
-  if (
-    !isText(input.operation_key) ||
-    !isText(input.workspace_patient_id) ||
-    !/^\d{4}-\d{2}-\d{2}$/.test(input.appointment_date) ||
-    !/^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(input.appointment_time)
-  )
-    throw new NativeAppointmentWriteError("validation");
 }
 
 /**
@@ -261,23 +242,6 @@ async function writeAppointment(
   if (!response.ok) throw failure(response.status, body);
 
   return parseWriteResult(operation, expectedId, body);
-}
-
-export async function bookNativeAppointment(
-  input: BookAppointmentInput,
-): Promise<AppointmentWriteResult> {
-  validBookInput(input);
-  return writeAppointment(
-    "book",
-    "clinic_ui.api.appointments.book",
-    undefined,
-    {
-      operation_key: input.operation_key,
-      workspace_patient_id: input.workspace_patient_id,
-      appointment_date: input.appointment_date,
-      appointment_time: input.appointment_time,
-    },
-  );
 }
 
 export async function rescheduleNativeAppointment(
