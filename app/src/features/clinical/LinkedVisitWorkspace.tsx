@@ -171,6 +171,17 @@ function clearPending(key: string) {
   catch { /* Leave a conservative lock if storage becomes unavailable. */ }
 }
 
+function deskEncounterHref(id: string): string | null {
+  if (id === "." || id === "..") return null;
+  try {
+    // Desk reserves the slug route's "view" segment; its explicit Form route
+    // uses the same native doctype without the list-view ambiguity.
+    return id === "view" ? "/desk/Form/Patient%20Encounter/view" : `/desk/patient-encounter/${encodeURIComponent(id)}`;
+  } catch {
+    return null;
+  }
+}
+
 function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; appointmentRef: string }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -202,6 +213,8 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
 
   const { context, encounter, notes, medications } = record;
   const completed = encounter?.docstatus === 1;
+  const canReviewPrescriptions = medications.state === "available" && medications.complete;
+  const deskHref = encounter && !canReviewPrescriptions ? deskEncounterHref(encounter.id) : null;
   useEffect(() => {
     if (confirm) confirmation.current?.focus();
     else if (completed && initial.encounter?.docstatus === 0) patientHeading.current?.focus();
@@ -283,7 +296,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   }
 
   function persist(kind: Write) {
-    if (readOnly || uncertain || (kind === "submit" && (!encounter || dirty || !confirm))) return;
+    if (readOnly || uncertain || (kind === "submit" && (!encounter || !canReviewPrescriptions || dirty || !confirm))) return;
     if (kind === "save" && (confirm || cannotSave || (noteChanged && notes.state !== "available"))) return;
     const key = kind === "save" ? saveKey : submitKey;
     if (!key) return;
@@ -464,7 +477,7 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
         <div className="visit-preview-card visit-preview-actions visit-preview-stack">
           {recoveryUnavailable && <p role="alert">{t("linkedEncounter.recoveryUnavailable")}</p>}
           {feedback && <p role={feedback === "linkedEncounter.saved" ? "status" : "alert"}>{t(feedback)}</p>}
-          {confirm ? (
+          {confirm && canReviewPrescriptions ? (
             <div role="group" aria-labelledby={confirmLabel} aria-describedby={`${confirmLabel}-orders`}
               className="visit-preview-stack" ref={confirmation} tabIndex={-1}>
               <p id={confirmLabel}>{t("linkedEncounter.confirmHint")}</p>
@@ -479,11 +492,15 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
             <div className="pc-row">
               <Button variant="primary" disabled={locked || cannotSave}
                 onClick={() => persist("save")}>{t(busy === "save" ? "linkedEncounter.saving" : "linkedEncounter.save")}</Button>
-              {encounter && <Button variant="secondary" disabled={locked || dirty} onClick={() => setConfirm(true)}>
+              {encounter && canReviewPrescriptions && <Button variant="secondary" disabled={locked || dirty} onClick={() => setConfirm(true)}>
                 {t("linkedEncounter.submit")}
               </Button>}
             </div>
           </>}
+          {!completed && encounter && !canReviewPrescriptions && <div className="visit-preview-stack">
+            <p className="pc-note">{t("linkedRx.completeInMarley")}</p>
+            {deskHref && <div><a className="pc-button pc-button--secondary" href={deskHref}>{t("linkedRx.openInMarley")}</a></div>}
+          </div>}
         </div>
       )}
     </div>

@@ -52,6 +52,8 @@
   "linkedRx.lookupUnavailable": "Could not search Marley records.",
   "linkedRx.noMatches": "No matching records.",
   "linkedRx.submitWarning": "Marley can issue prescription orders when you submit this encounter.",
+  "linkedRx.completeInMarley": "Review all prescriptions and complete this encounter in Marley.",
+  "linkedRx.openInMarley": "Open encounter in Marley",
   "linkedEncounter.addNote": "Add clinical note",
   "linkedEncounter.editNote": "Edit note {{id}}",
   "linkedEncounter.moreNotes": "Load more notes",

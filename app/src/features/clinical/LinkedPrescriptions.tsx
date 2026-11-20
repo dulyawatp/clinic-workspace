@@ -49,7 +49,7 @@ function MasterPicker({ field, doctype, value, locked, onSelect }: {
   doctype: PrescriptionMaster;
   value: PrescriptionChoice | null;
   locked: boolean;
-  onSelect: (choice: PrescriptionChoice) => void;
+  onSelect: (choice: PrescriptionChoice | null) => void;
 }) {
   const { t } = useTranslation();
   const { authGeneration } = useSession();
@@ -75,7 +75,10 @@ function MasterPicker({ field, doctype, value, locked, onSelect }: {
       <label htmlFor={label}>{t(`linkedRx.${field}`)}</label>
       {value && <p className="pc-note">{choiceText(value)}</p>}
       <input id={label} type="search" disabled={locked} placeholder={t("linkedRx.search")}
-        value={input} maxLength={100} onChange={(event) => setInput(event.target.value)} />
+        value={input} maxLength={100} onChange={(event) => {
+          setInput(event.target.value);
+          if (value) onSelect(null);
+        }} />
       {!locked && search && (
         settled !== search || query.isPending || query.isFetching
           ? <p className="pc-note" role="status">{t("common.loading")}</p>
@@ -151,7 +154,7 @@ export function LinkedPrescriptions({ medications, draft, editable, locked, onCh
     onChange({ id, values: { drug_code: fromId(drug_code), dosage: fromId(dosage),
       period: fromId(period), dosage_form: fromId(dosage_form) } });
   }
-  function select(field: keyof DraftValues, choice: PrescriptionChoice) {
+  function select(field: keyof DraftValues, choice: PrescriptionChoice | null) {
     if (draft) onChange({ ...draft, values: { ...draft.values, [field]: choice } });
   }
 

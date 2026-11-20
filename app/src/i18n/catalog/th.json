@@ -52,6 +52,8 @@
   "linkedRx.lookupUnavailable": "ค้นหาข้อมูลใน Marley ไม่ได้",
   "linkedRx.noMatches": "ไม่พบข้อมูลที่ตรงกับการค้นหา",
   "linkedRx.submitWarning": "Marley อาจออกคำสั่งยาเมื่อยืนยันการตรวจนี้",
+  "linkedRx.completeInMarley": "ตรวจสอบรายการสั่งยาทั้งหมดและยืนยันการตรวจนี้ใน Marley",
+  "linkedRx.openInMarley": "เปิดการตรวจใน Marley",
   "linkedEncounter.addNote": "เพิ่มบันทึกทางคลินิก",
   "linkedEncounter.editNote": "แก้ไขบันทึก {{id}}",
   "linkedEncounter.moreNotes": "โหลดบันทึกเพิ่มเติม",

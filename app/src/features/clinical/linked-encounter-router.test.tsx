@@ -166,12 +166,61 @@ it.each(["unavailable", "truncated"] as const)("does not present %s prescription
   const medications = state === "unavailable" ? { state, complete: false, items: [] } :
     { state: "available", complete: false, items: [prescription] };
   server.use(http.get(`${METHOD}open_for_appointment`, () => reply({ ...draft, medications })));
-  setup(canonical);
-  expect(await screen.findByText(state === "unavailable" ? "Prescription records are unavailable here." :
-    "Only the first 100 prescription rows are shown.")).toBeVisible();
-  expect(screen.queryByText("No prescriptions recorded.")).not.toBeInTheDocument();
-  if (state === "unavailable") expect(screen.queryByRole("button", { name: "Add prescription" })).not.toBeInTheDocument();
-  else expect(screen.getByText("ITEM-1")).toBeVisible();
+  const posts = postSpy();
+  try {
+    setup(canonical);
+    expect(await screen.findByText(state === "unavailable" ? "Prescription records are unavailable here." :
+      "Only the first 100 prescription rows are shown.")).toBeVisible();
+    expect(screen.queryByText("No prescriptions recorded.")).not.toBeInTheDocument();
+    if (state === "unavailable") expect(screen.queryByRole("button", { name: "Add prescription" })).not.toBeInTheDocument();
+    else expect(screen.getByText("ITEM-1")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Submit encounter" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Confirm submission" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open encounter in Marley" })).toHaveAttribute("href", `/desk/patient-encounter/${ENC}`);
+    expect(screen.getByText("Review all prescriptions and complete this encounter in Marley.")).toBeVisible();
+    expect(posts.posts).toEqual([]);
+  } finally {
+    posts.stop();
+  }
+});
+
+it("blocks prescription save when replacement text has not been selected and restores the baseline on cancel", async () => {
+  const posts = postSpy();
+  server.use(
+    http.get(`${METHOD}open_for_appointment`, () => reply(withPrescriptions(prescription))),
+    http.get("/api/resource/Prescription%20Duration", () => HttpResponse.json({ data: [{ name: "7 Days" }] })),
+    http.get("/api/resource/Prescription%20Dosage", () => HttpResponse.json({ data: [{ name: "Twice daily" }] })),
+  );
+  try {
+    setup(canonical);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Edit dosage for RX-ROW" }));
+    await user.type(screen.getByRole("searchbox", { name: "Duration" }), "7 Days");
+    await user.click(await screen.findByRole("button", { name: "7 Days" }));
+    expect(screen.getByRole("button", { name: "Save draft" })).toBeEnabled();
+    await user.type(screen.getByRole("searchbox", { name: "Dosage" }), "Twice");
+    expect(await screen.findByRole("button", { name: "Twice daily" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save draft" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Cancel prescription changes" }));
+    await user.click(screen.getByRole("button", { name: "Edit dosage for RX-ROW" }));
+    expect(screen.getAllByText("Daily")).toHaveLength(2);
+    expect(screen.getAllByText("5 Days")).toHaveLength(2);
+    expect(screen.queryByText("7 Days")).not.toBeInTheDocument();
+    expect(posts.posts).toEqual([]);
+  } finally {
+    posts.stop();
+  }
+});
+
+it("routes the native prescription review link to the encoded authoritative encounter", async () => {
+  const id = "ENC?native#exact";
+  server.use(http.get(`${METHOD}open_for_appointment`, () => reply({
+    ...draft, encounter: { ...encounter, id },
+    medications: { state: "unavailable", complete: false, items: [] },
+  })));
+  setup(ROUTES.linkedVisit(REF, id));
+  expect(await screen.findByRole("link", { name: "Open encounter in Marley" }))
+    .toHaveAttribute("href", "/desk/patient-encounter/ENC%3Fnative%23exact");
 });
 
 it("shows denied prescription lookup honestly without a fallback catalog or free-text selection", async () => {
