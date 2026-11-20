@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { ROUTES } from "../../app/routes";
+import { useSession } from "../../app/SessionProvider";
 import { toI18nKey } from "../../domain/errors";
 import { Button } from "../../ui/Button";
 import { PageHeader } from "../../ui/PageHeader";
@@ -15,6 +16,7 @@ import {
   rescheduleNativeAppointment,
 } from "../../transport/native/appointment-write";
 import { useLiveAppointment } from "./live-appointment";
+import { NativeAppointmentCheckIn } from "./NativeAppointmentCheckIn";
 import { ReturnVisitLink } from "./ReturnVisitLink";
 import { NativeLabReportPanel } from "../clinical/NativeLabReports";
 
@@ -38,6 +40,7 @@ function failureKey(code: string): string {
 
 export function LiveAppointmentPage({ id }: { id: string }) {
   const { t } = useTranslation();
+  const { session } = useSession();
   const queryClient = useQueryClient();
   const detail = useLiveAppointment(id);
   const [open, setOpen] = useState(false);
@@ -235,6 +238,13 @@ export function LiveAppointmentPage({ id }: { id: string }) {
           </dl>
 
           <div className="appointment-actions">
+            {session?.user.roles.includes("REC") && appointment.is_fixture === false &&
+              appointment.native_appointment_id && (
+                <NativeAppointmentCheckIn
+                  key={appointment.native_appointment_id}
+                  nativeId={appointment.native_appointment_id}
+                />
+              )}
             {appointment.is_fixture === false && <Link className="pc-button pc-button--primary" to={ROUTES.linkedVisit(appointment.appointment_id)}>
               {t("workspace.openEncounter")}
             </Link>}

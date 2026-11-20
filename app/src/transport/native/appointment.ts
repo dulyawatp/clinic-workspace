@@ -125,11 +125,12 @@ export interface NativeAppointmentDetail extends NativeAppointmentItem {
   modified: string;
 }
 
-/** The read detail adds only the two server-computed action flags. */
+/** Authorized read detail; only non-fixtures can expose a native docname. */
 export interface NativeAppointmentRead extends NativeAppointmentDetail {
   can_reschedule: boolean;
   can_checkin: boolean;
   is_fixture?: boolean;
+  native_appointment_id?: string;
 }
 
 /**
@@ -172,13 +173,19 @@ export function parseNativeAppointmentRead(
 ): NativeAppointmentRead {
   if (!isRecord(value)) throw unavailable();
   const hasFixture = Object.hasOwn(value, "is_fixture");
-  if (!hasExactKeys(value, hasFixture ? [...READ_KEYS, "is_fixture"] : READ_KEYS))
+  const hasNativeId = Object.hasOwn(value, "native_appointment_id");
+  if (!hasExactKeys(value, [
+    ...READ_KEYS,
+    ...(hasFixture ? ["is_fixture"] : []),
+    ...(hasNativeId ? ["native_appointment_id"] : []),
+  ]))
     throw unavailable();
   const detail = readDetailFields(value, expectedId);
   if (
     typeof value.can_reschedule !== "boolean" ||
     typeof value.can_checkin !== "boolean" ||
-    (hasFixture && typeof value.is_fixture !== "boolean")
+    (hasFixture && typeof value.is_fixture !== "boolean") ||
+    (hasNativeId && (value.is_fixture !== false || !isSafeId(value.native_appointment_id)))
   )
     throw unavailable();
   return {
@@ -186,6 +193,9 @@ export function parseNativeAppointmentRead(
     can_reschedule: value.can_reschedule,
     can_checkin: value.can_checkin,
     ...(typeof value.is_fixture === "boolean" ? { is_fixture: value.is_fixture } : {}),
+    ...(typeof value.native_appointment_id === "string"
+      ? { native_appointment_id: value.native_appointment_id }
+      : {}),
   };
 }
 
