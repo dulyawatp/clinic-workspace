@@ -11,6 +11,7 @@ import { type EncounterReadError, listNativeEncounters, type NativeEncounterPage
 import { Button } from "../../ui/Button";
 import { StatePanel } from "../../ui/StatePanel";
 import { EncounterReadFailure, EncounterStatus } from "../clinical/ApprovedVisitWorkspace";
+import { LabReportDisclosure } from "../clinical/NativeLabReports";
 import { SampleLabFiles, SamplePhotos } from "../clinical/VisitEvidencePreview";
 import { approvedVisitNarrative, SAMPLE_REPORT, sampleLabFiles, samplePhotoSides, sampleVisitHistory, type SampleHistoryPreview } from "../clinical/visit-preview";
 
@@ -61,6 +62,7 @@ export function NativeVisitTimeline({ patientRef }: { patientRef: string }) {
                       <EncounterStatus status={visit.docstatus} />
                     </div>
                     <p className="pc-note">{t("clinical.practitioner")}: {visit.practitioner || t("common.unavailable")}</p>
+                    <LabReportDisclosure encounterId={visit.id} />
                   </article>
                 </li>
               ))}

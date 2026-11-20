@@ -20,6 +20,7 @@ import { StatePanel } from "../../ui/StatePanel";
 import { EncounterLayout, EncounterReadFailure, EncounterStatus, SavedTerms } from "./ApprovedVisitWorkspace";
 import { FormattedNoteEditor, FormattedNotePreview } from "./LinkedFormattedNote";
 import { LinkedPrescriptions, prescriptionChange, type PrescriptionDraft, PrescriptionRecovery } from "./LinkedPrescriptions";
+import { NativeLabReportPanel } from "./NativeLabReports";
 import { encodeNoteText, notePlainText, type NoteLine, parseFormattedNote, serializeFormattedNote } from "./linked-note-format";
 
 type Kind = "symptoms" | "diagnoses";
@@ -472,6 +473,9 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
           </div>}
         medications={<LinkedPrescriptions medications={medications} draft={prescription} editable={!readOnly}
           locked={locked} onChange={setPrescription} />}
+        lab={<NativeLabReportPanel context={encounter
+          ? { kind: "encounter", id: encounter.id }
+          : { kind: "appointment", id: appointmentRef }} />}
       />
        {(feedback || !completed) && (
         <div className="visit-preview-card visit-preview-actions visit-preview-stack">

@@ -16,6 +16,7 @@ import {
 } from "../../transport/native/appointment-write";
 import { useLiveAppointment } from "./live-appointment";
 import { ReturnVisitLink } from "./ReturnVisitLink";
+import { NativeLabReportPanel } from "../clinical/NativeLabReports";
 
 const TERMINAL_STATUSES = new Set(["Closed", "Cancelled", "No Show", "Checked Out"]);
 
@@ -404,6 +405,12 @@ export function LiveAppointmentPage({ id }: { id: string }) {
             </form>
           )}
         </section>
+        {appointment.is_fixture === false && (
+          <section className="appointment-card" aria-labelledby="appointment-lab-reports">
+            <h2 id="appointment-lab-reports">{t("labReports.title")}</h2>
+            <NativeLabReportPanel context={{ kind: "appointment", id: appointment.appointment_id }} upload />
+          </section>
+        )}
       </div>
     </>
   );
