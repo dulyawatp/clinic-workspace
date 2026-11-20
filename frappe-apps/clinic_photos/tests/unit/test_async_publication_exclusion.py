@@ -441,6 +441,25 @@ class ExclusionTests(unittest.TestCase):
     def _hold(self, *, row=None):
         return fake_runtime(row or self._row(), self.sites)
 
+    def test_target_lock_does_not_reserve_prepared_target_across_operations(self):
+        class TwoRowsDB(_FakeDB):
+            def __init__(self, first, second):
+                super().__init__(first)
+                self.rows = {first["name"]: self.row, second["name"]: dict(second)}
+
+            def get_value(self, doctype, filters=None, *args, **kwargs):
+                self.row = self.rows[filters]
+                return super().get_value(doctype, filters, *args, **kwargs)
+
+        first = self._row()
+        second = _row(operation_id=uuid.uuid4().hex)
+        with self._hold(row=first) as runtime:
+            runtime.db = TwoRowsDB(first, second)
+            with exclusion.hold_exclusion(self.operation_id, TARGET):
+                runtime.db.rows[self.operation_id]["state"] = "PREPARED"
+            with exclusion.hold_exclusion(second["name"], TARGET):
+                self.assertEqual(runtime.db.rows[self.operation_id]["state"], "PREPARED")
+
     def _start(self, mode, *, row=None):
         script = self.workspace / f"{self.marker}-{uuid.uuid4().hex}.py"
         script.write_text(
