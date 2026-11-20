@@ -57,6 +57,4 @@ scheduler_events = {
     },
 }
 
-clinic_native_checkin_observer = [
-    "clinic_photos.access.checkin_witness.observe",
-]
+# No doc_event is registered; feature controllers enforce their own lifecycle guards.

@@ -462,19 +462,6 @@ class Gateway:
             return matches[0].native_appointment_id
         return ref
 
-    def checkin_fixture_ids(self):
-        from clinic_ui.core import config
-
-        fixtures = config._appointment_allowlist(self.setting(config.APPOINTMENTS_KEY))
-        if fixtures is None:
-            raise LinkedEncounterError("invalid appointment configuration")
-        return {native for _, native in fixtures}
-
-    def schedule_checkin_observation(self, appointment, patient):
-        from clinic_ui.endpoints.checkin_observer import schedule
-
-        schedule(self.frappe, appointment, patient)
-
     def insert_lab_report(self, values):
         doc = self.frappe.get_doc(values)
         doc.insert()
