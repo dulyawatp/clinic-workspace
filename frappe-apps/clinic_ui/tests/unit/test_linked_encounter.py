@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from clinic_ui.endpoints import linked_encounter
-from clinic_ui.runtime.frappe_gateway import Gateway as NativeGateway
+from clinic_ui.runtime.frappe_gateway import Gateway as NativeGateway, LinkedFieldAccessError
 
 
 class Gateway:
@@ -25,8 +25,9 @@ class Gateway:
     def linked_find(self, context):
         return self.encounter
 
-    def linked_project(self, context, encounter):
-        return {"context": context, "encounter": encounter, "note": self.note}
+    def linked_project(self, context, encounter, note_offset=0):
+        return {"context": context, "encounter": encounter,
+                "notes": {"state": "available", "items": [] if self.note is None else [self.note], "next_offset": None}}
 
     def linked_save(self, context, encounter, clinical):
         self.calls.append(("save", clinical))
@@ -52,7 +53,7 @@ class LinkedEncounterTests(unittest.TestCase):
         self.assertEqual(self.gateway.calls, [])
         saved = linked_encounter.save_linked(self.gateway, {"appointment_ref": "A1", "expected_version": None, "clinical": {"note": {"text": "hello", "id": None, "modified": None}}})
         self.assertEqual(saved["encounter"]["id"], "E1")
-        self.assertEqual(linked_encounter.open_for_appointment(self.gateway, "A1")["note"]["id"], "N1")
+        self.assertEqual(linked_encounter.open_for_appointment(self.gateway, "A1")["notes"]["items"][0]["id"], "N1")
 
     def test_fixture_alias_collision_rejected(self):
         self.gateway.fixture.add("A1")
@@ -189,7 +190,8 @@ class ModelDoc:
         self.__dict__.update(fields)
 
     def check_permission(self, operation):
-        if (self.doctype, operation) in self.model.denied:
+        if ((self.doctype, operation) in self.model.denied
+                or (self.doctype, operation, getattr(self, "name", None)) in self.model.denied):
             raise PermissionError("native denial")
 
     def set(self, field, value):
@@ -200,7 +202,7 @@ class ModelDoc:
 
     def insert(self):
         self.check_permission("create")
-        self.name = "E1" if self.doctype == "Patient Encounter" else "N1"
+        self.name = "E1" if self.doctype == "Patient Encounter" else f"N{1 + sum(1 for kind, _ in self.model.docs if kind == 'Clinical Note')}"
         self.docstatus = 0
         self.modified = "1"
         self._persist()
@@ -227,6 +229,9 @@ class ModelDoc:
 
 
 class ModelFrappe:
+    PermissionError = PermissionError
+    DoesNotExistError = KeyError
+
     def __init__(self):
         self.session = SimpleNamespace(user="doctor")
         self.denied = set()
@@ -264,6 +269,11 @@ class ModelFrappe:
                 result.append({"name": name})
         return result[:limit_page_length]
 
+    def get_list(self, doctype, filters, fields, page_length, start=0, order_by=None):
+        if (doctype, "read") in self.denied:
+            raise PermissionError("native denial")
+        return self.get_all(doctype, filters, fields, start + page_length)[start:]
+
     def request(self, function, *args):
         before = copy.deepcopy(self.docs)
         try:
@@ -300,13 +310,13 @@ class NativeModelFlowTests(unittest.TestCase):
             "clinical": {"symptoms": ["Pain"], "diagnoses": ["D1"],
                          "note": {"id": None, "modified": None, "text": "Assessment"}}})
         self.assertEqual(first["context"]["status"], "Closed")
-        self.assertEqual(first["note"]["id"], "N1")
+        self.assertEqual(first["notes"]["items"][0]["id"], "N1")
         reopened = self.request(linked_encounter.open_for_appointment, "A1")
         self.assertEqual(reopened["encounter"]["id"], "E1")
         second = self.request(linked_encounter.save_linked, {
             "appointment_ref": "A1", "expected_version": "1",
             "clinical": {"note": {"id": "N1", "modified": "1", "text": "Updated"}}})
-        self.assertEqual(second["note"]["modified"], "2")
+        self.assertEqual(second["notes"]["items"][0]["modified"], "2")
         done = self.request(linked_encounter.complete_linked, {
             "appointment_ref": "A1", "encounter_id": "E1", "expected_version": "2"})
         self.assertEqual(done["encounter"]["docstatus"], 1)
@@ -362,4 +372,107 @@ class NativeModelFlowTests(unittest.TestCase):
             self.request(linked_encounter.save_linked, {
                 "appointment_ref": "A1", "expected_version": "1",
                 "clinical": {"note": {"id": "N1", "modified": "old", "text": "changed"}}})
+        self.assertEqual(self.frappe.docs, before)
+
+    def test_multiple_notes_open_edit_one_and_create_another(self):
+        self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": None,
+            "clinical": {"note": {"id": None, "modified": None, "text": "one"}}})
+        original = copy.deepcopy(self.frappe.docs[("Clinical Note", "N1")])
+        self.frappe.docs[("Clinical Note", "N2")] = dict(original, name="N2", note="two")
+        opened = self.request(linked_encounter.open_for_appointment, "A1")
+        self.assertEqual([n["id"] for n in opened["notes"]["items"]], ["N1", "N2"])
+        updated = self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": "1",
+            "clinical": {"note": {"id": "N1", "modified": "1", "text": "edited"}}})
+        self.assertEqual(self.frappe.docs[("Clinical Note", "N2")]["note"], "two")
+        self.assertEqual(updated["notes"]["items"][0]["text"], "edited")
+        result = self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": "2",
+            "clinical": {"note": {"id": None, "modified": None, "text": "three"}}})
+        self.assertEqual([n["id"] for n in result["notes"]["items"]], ["N1", "N2", "N3"])
+        self.assertEqual(self.frappe.docs[("Clinical Note", "N2")]["note"], "two")
+
+    def test_note_pagination_and_denied_document(self):
+        self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": None,
+            "clinical": {"note": {"id": None, "modified": None, "text": "one"}}})
+        original = self.frappe.docs[("Clinical Note", "N1")]
+        for index in range(2, 24):
+            name = f"N{index}"
+            self.frappe.docs[("Clinical Note", name)] = dict(original, name=name)
+        first = self.request(linked_encounter.open_for_appointment, "A1")
+        self.assertEqual(len(first["notes"]["items"]), 20)
+        self.assertEqual(first["notes"]["next_offset"], 20)
+        second = self.request(linked_encounter.open_for_appointment, "A1", 20)
+        self.assertEqual(len(second["notes"]["items"]), 3)
+        self.assertIsNone(second["notes"]["next_offset"])
+        self.frappe.denied.add(("Clinical Note", "read", "N1"))
+        denied = self.request(linked_encounter.open_for_appointment, "A1")
+        self.assertEqual(denied["notes"], {"state": "unavailable", "items": [], "next_offset": None})
+
+    def test_unexpected_note_list_failure_propagates(self):
+        self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": None, "clinical": {}})
+        for error in (RuntimeError("database error"), ValueError("unexpected native error")):
+            self.frappe.get_list = Mock(side_effect=error)
+            with self.subTest(error=error), self.assertRaises(type(error)):
+                self.request(linked_encounter.open_for_appointment, "A1")
+
+    def test_masked_note_fields_return_unavailable(self):
+        self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": None, "clinical": {}})
+        original = self.gateway._linked_fields
+        def fields(doctype, *args, **kwargs):
+            if doctype == "Clinical Note":
+                raise LinkedFieldAccessError("masked")
+            return original(doctype, *args, **kwargs)
+        self.gateway._linked_fields = fields
+        result = self.request(linked_encounter.open_for_appointment, "A1")
+        self.assertEqual(result["notes"], {"state": "unavailable", "items": [], "next_offset": None})
+
+    def test_denied_note_read_does_not_block_encounter_read_or_submit(self):
+        self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": None,
+            "clinical": {"note": {"id": None, "modified": None, "text": "secret"}}})
+        self.frappe.denied.add(("Clinical Note", "read"))
+        opened = self.request(linked_encounter.open_for_appointment, "A1")
+        self.assertEqual(opened["notes"], {"state": "unavailable", "items": [], "next_offset": None})
+        done = self.request(linked_encounter.complete_linked, {
+            "appointment_ref": "A1", "encounter_id": "E1", "expected_version": "1"})
+        self.assertEqual(done["encounter"]["docstatus"], 1)
+        self.assertEqual(done["notes"]["state"], "unavailable")
+
+    def test_denied_explicit_note_edit_rolls_back_encounter(self):
+        self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": None,
+            "clinical": {"note": {"id": None, "modified": None, "text": "one"}}})
+        self.frappe.denied.add(("Clinical Note", "write"))
+        before = copy.deepcopy(self.frappe.docs)
+        with self.assertRaises(PermissionError):
+            self.request(linked_encounter.save_linked, {
+                "appointment_ref": "A1", "expected_version": "1",
+                "clinical": {"note": {"id": "N1", "modified": "1", "text": "changed"}}})
+        self.assertEqual(self.frappe.docs, before)
+
+    def test_note_create_with_read_denied_and_plain_save_no_duplicate(self):
+        self.frappe.denied.add(("Clinical Note", "read"))
+        result = self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": None,
+            "clinical": {"note": {"id": None, "modified": None, "text": "new"}}})
+        self.assertEqual(result["notes"]["state"], "unavailable")
+        self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": "1", "clinical": {}})
+        self.assertEqual([name for kind, name in self.frappe.docs if kind == "Clinical Note"], ["N1"])
+
+    def test_note_from_other_context_cannot_be_updated(self):
+        self.request(linked_encounter.save_linked, {
+            "appointment_ref": "A1", "expected_version": None,
+            "clinical": {"note": {"id": None, "modified": None, "text": "original"}}})
+        self.frappe.docs[("Clinical Note", "N1")]["patient"] = "OTHER"
+        before = copy.deepcopy(self.frappe.docs)
+        with self.assertRaisesRegex(ValueError, "note identity mismatch"):
+            self.request(linked_encounter.save_linked, {
+                "appointment_ref": "A1", "expected_version": "1",
+                "clinical": {"note": {"id": "N1", "modified": "1", "text": "changed"}}})
         self.assertEqual(self.frappe.docs, before)

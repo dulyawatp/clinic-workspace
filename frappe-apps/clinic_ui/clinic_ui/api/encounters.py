@@ -31,13 +31,13 @@ from clinic_ui.runtime.frappe_gateway import Gateway
 def _linked_call(method, *args):
     try:
         return method(Gateway(), *args)
-    except ValueError as exc:
+    except linked_encounter.LinkedEncounterError as exc:
         frappe.throw(str(exc), frappe.ValidationError)
 
 
 @frappe.whitelist(methods=["GET"])
-def open_for_appointment(appointment_ref=None):
-    return _linked_call(linked_encounter.open_for_appointment, appointment_ref)
+def open_for_appointment(appointment_ref=None, note_offset=0):
+    return _linked_call(linked_encounter.open_for_appointment, appointment_ref, note_offset)
 
 
 @frappe.whitelist(methods=["POST"])
