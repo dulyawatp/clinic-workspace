@@ -1,12 +1,17 @@
+import { useQuery } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { ROUTES } from "../../app/routes";
+import { useSession } from "../../app/SessionProvider";
 import { Badge, Button, Drawer, SampleBanner } from "../../design/components";
+import { toI18nKey } from "../../domain/errors";
 import { coreData, type Visit } from "../../fixtures/data";
 import { translateClinicalText } from "../../i18n";
-import { formatDateTime } from "../../i18n/format";
+import { formatDate, formatDateTime } from "../../i18n/format";
 import { useLocale } from "../../i18n/LocaleProvider";
+import { type EncounterReadError, type NativeEncounterDetail, type NativeEncounterSummary, viewNativeEncounter } from "../../transport/native/encounter-read";
+import { StatePanel } from "../../ui/StatePanel";
 import { SampleLabFiles, SamplePhotos } from "./VisitEvidencePreview";
 import { approvedVisitNarrative, SAMPLE_REPORT, sampleLabFiles, samplePhotoSides, type SampleHistoryPreview } from "./visit-preview";
 import { PhotosSection } from "./VisitSampleSections";
@@ -112,6 +117,96 @@ export function EncounterLayout({ status, details, detailsLabel, note, medicatio
           {lab ?? <p className="pc-note">{t("workspace.nativeLabUnavailable")}</p>}
         </section>
       </aside>
+    </div>
+  );
+}
+
+export function EncounterStatus({ status }: { status: NativeEncounterSummary["docstatus"] }) {
+  const { t } = useTranslation();
+  const [label, tone] = ([
+    ["status.draft", "warning"],
+    ["status.submitted", "success"],
+    ["status.cancelled", "neutral"],
+  ] as const)[status];
+  return <Badge tone={tone}>{t(label)}</Badge>;
+}
+
+export function EncounterReadFailure({ error, onRetry }: {
+  error: EncounterReadError;
+  onRetry: () => void;
+}) {
+  const { t } = useTranslation();
+  if (error.code === "FORBIDDEN")
+    return <StatePanel kind="permission-denied" title={t("state.denied.title")} />;
+  const title = t(error.code === "MALFORMED" ? "workspace.nativeEncounterLoadError" : toI18nKey(error));
+  return error.retryable
+    ? <StatePanel kind="error" title={title} onRetry={onRetry} retryLabel={t("action.retry")} />
+    : <StatePanel kind="error" title={title} />;
+}
+
+function SavedTerms({ kind, items }: { kind: Kind; items: string[] | null }) {
+  const { t } = useTranslation();
+  return (
+    <div className="visit-preview-stack">
+      <h4>{t(`workspace.${kind}`)}</h4>
+      {items?.length ? (
+        <ul className="visit-saved-terms">
+          {items.map((term, index) => <li key={`${index}:${term}`}>{term}</li>)}
+        </ul>
+      ) : (
+        <p className="pc-note">{t(`workspace.${kind}.${items === null ? "unavailable" : "empty"}`)}</p>
+      )}
+    </div>
+  );
+}
+
+export function SavedEncounterWorkspace({ encounterId }: { encounterId: string }) {
+  const { t } = useTranslation();
+  const { locale } = useLocale();
+  const { authGeneration } = useSession();
+  const query = useQuery<NativeEncounterDetail | null, EncounterReadError>({
+    queryKey: ["native-saved-encounter", authGeneration, encounterId],
+    queryFn: ({ signal }) => viewNativeEncounter(encounterId, signal),
+    retry: false,
+    gcTime: 0,
+  });
+  if (query.isError)
+    return <EncounterReadFailure error={query.error} onRetry={() => void query.refetch()} />;
+  if (query.isPending || query.isFetching || !query.isFetchedAfterMount)
+    return <StatePanel kind="loading" title={t("common.loading")} />;
+  const encounter = query.data;
+  if (!encounter) return <StatePanel kind="empty" title={t("clinical.notFound")} />;
+  const unavailable = t("common.unavailable");
+  return (
+    <div className="visit-workspace visit-preview">
+      <header className="visit-identity visit-preview-identity">
+        <div className="visit-preview-head">
+          <div className="visit-identity-heading">
+            <span className="visit-avatar" aria-hidden="true">✚</span>
+            <div>
+              <p>{t("clinical.patient")} · {encounter.patientId}</p>
+              <h2>{encounter.patientName}</h2>
+            </div>
+          </div>
+          <Link className="pc-button pc-button--secondary" to={`${ROUTES.patient(encounter.patientId)}?view=history`}>
+            {t("workspace.history")}
+          </Link>
+        </div>
+        <dl>
+          <div><dt>{t("clinical.encounterId")}</dt><dd>{encounter.id}</dd></div>
+          <div><dt>{t("clinical.practitioner")}</dt><dd>{encounter.practitioner || unavailable}</dd></div>
+          <div><dt>{t("field.date")}</dt><dd>{encounter.encounterDate ? formatDate(encounter.encounterDate, locale) : unavailable}</dd></div>
+        </dl>
+      </header>
+      <EncounterLayout
+        status={<EncounterStatus status={encounter.docstatus} />}
+        details={<div className="visit-preview-stack">
+          <SavedTerms kind="symptoms" items={encounter.symptoms} />
+          <SavedTerms kind="diagnoses" items={encounter.diagnoses} />
+        </div>}
+        note={<p className="pc-note">{t("workspace.savedNoteUnavailable")}</p>}
+        medications={<p className="pc-note">{t("workspace.savedMedicationsUnavailable")}</p>}
+      />
     </div>
   );
 }

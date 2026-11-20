@@ -9,7 +9,7 @@ import { installDialogMethods } from "../../test/dialog";
 import { server } from "../../test/msw/server";
 import { NATIVE_BOOTSTRAP, nativeSession, postSpy } from "../../test/network-spy";
 import { renderWithFixtures, setViewport } from "../../test/render";
-import { http } from "msw";
+import { HttpResponse, http } from "msw";
 import { EncounterLayout } from "./ApprovedVisitWorkspace";
 import { VisitWorkspacePage } from "./VisitWorkspacePage";
 
@@ -88,7 +88,10 @@ it("saves and completes a sample locally, then locks draft saving", async () => 
 
 it("does not resolve a sample encounter in a live native session", async () => {
   vi.stubEnv("VITE_CLINIC_NATIVE", "1");
-  server.use(http.get(NATIVE_BOOTSTRAP, () => nativeSession("DOC", {})));
+  server.use(
+    http.get(NATIVE_BOOTSTRAP, () => nativeSession("DOC", {})),
+    http.get("/api/method/clinic_ui.api.encounters.view", () => new HttpResponse(null, { status: 404 })),
+  );
   renderVisit(ROUTES.visit("DC-VIS-2041"), "live");
   expect(await screen.findByText("Visit not found")).toBeVisible();
   expect(screen.queryByTestId("sample-visit-workspace")).not.toBeInTheDocument();

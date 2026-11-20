@@ -309,6 +309,14 @@ it.each([true, false])("posts once and requires matching draft readback (readabl
       requests("POST", await request.json());
       return HttpResponse.json({ message: { id: "ENC-1", docstatus: 0 } });
     }),
+    http.get("/api/method/clinic_ui.api.encounters.view", ({ request }) => {
+      const id = new URL(request.url).searchParams.get("encounter_id");
+      requests("VIEW", id);
+      return HttpResponse.json({ message: {
+        id, patientId: "PAT-002", patientName: "Saved Example", practitioner: "PRAC-1",
+        encounterDate: null, docstatus: 0, symptoms: [], diagnoses: [],
+      } });
+    }),
     http.get("/api/resource/Patient%20Encounter/ENC-1", async () => {
       requests("GET", "ENC-1");
       await readback;
@@ -327,7 +335,7 @@ it.each([true, false])("posts once and requires matching draft readback (readabl
     }),
   );
 
-  setup();
+  const { router } = setup();
   const user = await selectDetails();
   await user.dblClick(screen.getByRole("button", { name: save }));
   expect(screen.getByRole("button", { name: "กำลังบันทึกร่าง…" })).toBeDisabled();
@@ -348,6 +356,16 @@ it.each([true, false])("posts once and requires matching draft readback (readabl
     ["POST", { patient: "PAT-002", practitioner: "PRAC-1", appointment_type: "TYPE-2" }],
     ["GET", "ENC-1"],
   ]);
+  if (readable) {
+    const open = screen.getByRole("link", { name: "เปิดการตรวจ" });
+    expect(open).toHaveAttribute("href", ROUTES.visit("ENC-1"));
+    await user.click(open);
+    expect(router.state.location.pathname).toBe(ROUTES.visit("ENC-1"));
+    expect(await screen.findByRole("heading", { name: "Saved Example" })).toBeVisible();
+    expect(requests.mock.calls.slice(2)).toEqual([["VIEW", "ENC-1"]]);
+  } else {
+    expect(screen.queryByRole("link", { name: "เปิดการตรวจ" })).not.toBeInTheDocument();
+  }
 });
 
 it("keeps an uncertain result visible and does not retry", async () => {

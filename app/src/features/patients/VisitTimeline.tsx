@@ -1,12 +1,81 @@
+import { type InfiniteData, useInfiniteQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Link, useLocation } from "react-router-dom";
 import { ROUTES } from "../../app/routes";
+import { useSession } from "../../app/SessionProvider";
 import { Badge, SampleBanner } from "../../design/components";
 import { coreData } from "../../fixtures/data";
 import { formatDate, formatDateTime } from "../../i18n/format";
 import { useLocale } from "../../i18n/LocaleProvider";
+import { type EncounterReadError, listNativeEncounters, type NativeEncounterPage } from "../../transport/native/encounter-read";
+import { Button } from "../../ui/Button";
+import { StatePanel } from "../../ui/StatePanel";
+import { EncounterReadFailure, EncounterStatus } from "../clinical/ApprovedVisitWorkspace";
 import { SampleLabFiles, SamplePhotos } from "../clinical/VisitEvidencePreview";
 import { approvedVisitNarrative, SAMPLE_REPORT, sampleLabFiles, samplePhotoSides, sampleVisitHistory, type SampleHistoryPreview } from "../clinical/visit-preview";
+
+export function NativeVisitTimeline({ patientRef }: { patientRef: string }) {
+  const { t } = useTranslation();
+  const { locale } = useLocale();
+  const { authGeneration } = useSession();
+  const key = ["native-visit-history", authGeneration, patientRef] as const;
+  const query = useInfiniteQuery<NativeEncounterPage, EncounterReadError, InfiniteData<NativeEncounterPage>, typeof key, number>({
+    queryKey: key,
+    queryFn: ({ pageParam, signal }) => listNativeEncounters(patientRef, pageParam, signal),
+    initialPageParam: 0,
+    getNextPageParam: ({ nextOffset }) => nextOffset,
+    retry: false,
+    gcTime: 0,
+  });
+  const visits = query.data?.pages.flatMap(({ items }) => items) ?? [];
+  const patient = visits[0];
+  const loading = query.isPending || !query.isFetchedAfterMount || (query.isFetching && !query.isFetchingNextPage);
+
+  return (
+    <section className="visit-workspace visit-preview" aria-labelledby="visit-timeline-heading">
+      <div className="visit-preview-head visit-history-heading">
+        <h2 id="visit-timeline-heading">{t("workspace.history")}</h2>
+        {!loading && !query.isError && patient && <p className="pc-note">{patient.patientName}</p>}
+      </div>
+      {query.isError ? (
+        <EncounterReadFailure error={query.error} onRetry={() => void query.refetch()} />
+      ) : loading ? (
+        <StatePanel kind="loading" title={t("common.loading")} />
+      ) : !visits.length ? (
+        <StatePanel kind="empty" title={t("workspace.nativeHistoryEmpty")} />
+      ) : (
+        <>
+          <ol role="list" className="visit-history-list" aria-labelledby="visit-timeline-heading">
+            {visits.map((visit) => (
+              <li key={visit.id} className="visit-history-entry">
+                {visit.encounterDate ? (
+                  <time className="visit-history-date" dateTime={visit.encounterDate}>{formatDate(visit.encounterDate, locale)}</time>
+                ) : (
+                  <span className="visit-history-date">{t("common.unavailable")}</span>
+                )}
+                <div className="visit-history-spine" aria-hidden="true" />
+                <article className="visit-preview-card visit-native-history-card">
+                  <div className="visit-preview-head">
+                    <h3><Link to={ROUTES.visit(visit.id)}>{t("workspace.historyVisit", { id: visit.id })}</Link></h3>
+                    <EncounterStatus status={visit.docstatus} />
+                  </div>
+                  <p className="pc-note">{t("clinical.practitioner")}: {visit.practitioner || t("common.unavailable")}</p>
+                </article>
+              </li>
+            ))}
+          </ol>
+          {query.hasNextPage && (
+            <div className="pc-row">
+              <Button variant="secondary" disabled={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>
+                {t(query.isFetchingNextPage ? "common.loading" : "workspace.nativeHistoryMore")}
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
 
 export function VisitTimeline({ patientId, encounterId }: { patientId: string; encounterId: string | null }) {
   const { t } = useTranslation();

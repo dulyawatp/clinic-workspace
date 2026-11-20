@@ -38,6 +38,7 @@ export function RouteErrorFallback() {
  * the login route and the protected shell routes are covered.
  *
  * Designed surfaces come from `SURFACE_ROUTES` and retain their `RoleGuard`.
+ * DOC-02 applies it internally to its legacy branches; Frappe owns native reads.
  * The native draft has its own authenticated route; Frappe authorizes its
  * reads and write. Legacy React-era addresses stay as redirects only.
  */
@@ -58,7 +59,7 @@ export const appRoutes: RouteObject[] = [
         children: [
           ...SURFACE_ROUTES.map(({ surface, path, element }) => ({
             path,
-            element: <RoleGuard surface={surface}>{element}</RoleGuard>,
+            element: surface === "DOC-02" ? element : <RoleGuard surface={surface}>{element}</RoleGuard>,
           })),
           { path: ROUTES.nativeEncounterNew, element: <NativeEncounterDraftPage /> },
           { path: ROUTES.legacyFinance, element: <FinanceRedirect /> },

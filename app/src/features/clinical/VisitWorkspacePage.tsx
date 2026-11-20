@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { Link, useParams, useSearchParams } from "react-router-dom";
+import { RoleGuard } from "../../app/role-guard";
 import { ROUTES } from "../../app/routes";
 import { useSession } from "../../app/SessionProvider";
 import {
@@ -9,11 +10,12 @@ import {
 } from "../../domain/clinical";
 import { toI18nKey } from "../../domain/errors";
 import { coreData } from "../../fixtures/data";
+import { nativeTransportEnabled } from "../../transport/native/flag";
 import { useReadQuery } from "../../transport/read/query";
 import { PageHeader } from "../../ui/PageHeader";
 import { StatePanel } from "../../ui/StatePanel";
-import { ApprovedVisitWorkspace } from "./ApprovedVisitWorkspace";
-import { AuthoredVisitWorkspace } from "./AuthoredVisitWorkspace";
+import { ApprovedVisitWorkspace, SavedEncounterWorkspace } from "./ApprovedVisitWorkspace";
+import { AuthoredVisitWorkspace, type NativeVisitBinding } from "./AuthoredVisitWorkspace";
 import { DiagnosesSection } from "./DiagnosesSection";
 import { ExamSection } from "./ExamSection";
 import { HistorySection } from "./HistorySection";
@@ -100,8 +102,8 @@ function ReadVisitDetail({ id }: { id: string }) {
   );
 }
 
-function NativeVisitDetail({ id }: { id: string }) {
-  const [params] = useSearchParams();
+function legacyVisitBinding(id: string, params: URLSearchParams): NativeVisitBinding | null {
+  if (!id.startsWith("ENC-")) return null;
   const patientId = params.get("patient") ?? "";
   const appointment = params.get("appointment");
   const encounter = params.get("encounter");
@@ -111,23 +113,17 @@ function NativeVisitDetail({ id }: { id: string }) {
     ? encounter
     : null;
   const appointmentAlias =
-    appointment && /^wsa1_/.test(appointment) ? appointment : null;
-  // A native draft needs either an existing server-derived encounter alias or
-  // the server-derived appointment alias the draft will be opened against. The
-  // read-only proxy context does not carry either, so an `ENC-` address without
-  // them keeps the verified read view.
-  if (!patientId || (!alias && !appointmentAlias)) return <ReadVisitDetail id={id} />;
-  return (
-    <AuthoredVisitWorkspace
-      native={{
-        patientId,
-        appointmentId: appointmentAlias,
-        encounter: alias,
-        baseModified: params.get("modified"),
-        state: params.get("state") === "completed" ? "completed" : "draft",
-      }}
-    />
-  );
+    /^wsa1_[0-9a-f]{32}_[0-9a-f]{16}_[A-Za-z0-9_-]{16,128}$/.test(appointment ?? "")
+      ? appointment
+      : null;
+  if (!patientId.trim() || (!alias && !appointmentAlias)) return null;
+  return {
+    patientId,
+    appointmentId: appointmentAlias,
+    encounter: alias,
+    baseModified: params.get("modified"),
+    state: params.get("state") === "completed" ? "completed" : "draft",
+  };
 }
 
 function VisitDetail({ id }: { id: string }) {
@@ -140,21 +136,28 @@ function VisitDetail({ id }: { id: string }) {
       ? <ApprovedVisitWorkspace visit={authored} />
       : <StatePanel kind="empty" title={t("clinical.notFound")} />;
   }
-  if (id.startsWith("ENC-")) return <NativeVisitDetail id={id} />;
   return <ReadVisitDetail id={id} />;
 }
 
 export function VisitWorkspacePage() {
   const { t } = useTranslation();
   const { id } = useParams();
-  return (
+  const [params] = useSearchParams();
+  const { session, authGeneration } = useSession();
+  const binding = id ? legacyVisitBinding(id, params) : null;
+  const nativeRead = Boolean(id && !binding && nativeTransportEnabled() && session?.mode === "live");
+  const page = (
     <>
       <PageHeader
         title={t("surface.DOC-02")}
         breadcrumb={<Link to={ROUTES.home}>{t("nav.today")}</Link>}
       />
       <div className="shell-page-body">
-        {id ? (
+        {id && nativeRead ? (
+          <SavedEncounterWorkspace key={JSON.stringify([authGeneration, id])} encounterId={id} />
+        ) : binding ? (
+          <AuthoredVisitWorkspace key={JSON.stringify([authGeneration, id, binding])} native={binding} />
+        ) : id ? (
           <VisitDetail key={id} id={id} />
         ) : (
           <StatePanel kind="empty" title={t("clinical.notFound")} />
@@ -162,4 +165,5 @@ export function VisitWorkspacePage() {
       </div>
     </>
   );
+  return nativeRead ? page : <RoleGuard surface="DOC-02">{page}</RoleGuard>;
 }

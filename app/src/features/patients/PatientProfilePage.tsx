@@ -3,8 +3,9 @@ import access from "@clinic/contracts/fixtures/access.json" with {
 };
 import { type KeyboardEvent, type ReactNode, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useParams, useSearchParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { RequireSession } from "../../app/guards";
+import { ROUTES } from "../../app/routes";
 import { useSession } from "../../app/SessionProvider";
 import type { AppointmentSummary } from "../../domain/appointment";
 import {
@@ -40,7 +41,7 @@ import { RedactionNotice } from "./RedactionNotice";
 import { SummaryCard } from "./SummaryCard";
 import { PatientWriteForm } from "./PatientWriteForm";
 import { Timeline } from "./Timeline";
-import { VisitTimeline } from "./VisitTimeline";
+import { NativeVisitTimeline, VisitTimeline } from "./VisitTimeline";
 import { VitalsSummary } from "./VitalsSummary";
 
 const PROFILE_LIMIT = 20;
@@ -515,9 +516,8 @@ function ProfileView({
 /**
  * Native detail read for one allowlisted patient. It renders the same header
  * blocks and facts list as the existing profile, but only the fields the native
- * view returns: no history tabs, vitals or actions are requested, because those
- * reads are not part of this slice and their proxy transport must not be used
- * as a fallback.
+ * view returns. Visit history uses its own Frappe read in the existing history
+ * view; vitals and proxy history are not used as fallback.
  */
 function NativePatientProfile({
   workspacePatientId,
@@ -539,7 +539,6 @@ function NativePatientProfileContent({
   workspacePatientId: string;
 }) {
   const { t } = useTranslation();
-  const [params] = useSearchParams();
   const { locale } = useLocale();
   const { refresh, session } = useSession();
   const { caps } = useCapabilities();
@@ -669,11 +668,11 @@ function NativePatientProfileContent({
               </div>
             </dl>
           </div>
+          <Link className="ui-button ui-button--secondary" to={`${ROUTES.patient(workspacePatientId)}?view=history`}>
+            {t("workspace.history")}
+          </Link>
         </header>
         <RedactionNotice roles={session?.user.roles ?? []} />
-        {params.get("view") === "history" && (
-          <p role="status">{t("workspace.nativeHistoryUnavailable")}</p>
-        )}
         {getCapability(caps, "write.patient.update") === "enabled" && detail.editable === true && <PatientWriteForm patient={detail} />}
         {getCapability(caps, "write.patient.update") === "enabled" && detail.editable === false && <p role="status">{t("patientWrite.notEditable")}</p>}
       </div>
@@ -686,7 +685,7 @@ function AddressedProfile() {
   const { t } = useTranslation();
   const params = useParams();
   const [search] = useSearchParams();
-  const { session } = useSession();
+  const { session, authGeneration } = useSession();
   const { caps } = useCapabilities();
   const patientId = params.id;
 
@@ -702,8 +701,19 @@ function AddressedProfile() {
 
   // A live native session reads the record through the native method only. The
   // fixture and legacy proxy profiles stay exactly as they were.
-  if (nativeTransportEnabled() && session?.mode === "live")
-    return <NativePatientProfile workspacePatientId={patientId} />;
+  if (nativeTransportEnabled() && session?.mode === "live") {
+    const key = JSON.stringify([authGeneration, patientId]);
+    if (search.get("view") === "history")
+      return (
+        <>
+          <PageHeader title={t("surface.PAT-03")} breadcrumb={<Link to={ROUTES.patients}>{t("nav.patients")}</Link>} />
+          <div className="shell-page-body">
+            <NativeVisitTimeline key={key} patientRef={patientId} />
+          </div>
+        </>
+      );
+    return <NativePatientProfile key={key} workspacePatientId={patientId} />;
+  }
 
   // Explicit authored history; never use sample data as a fallback for a
   // failed patient read. Reuse the existing Visits tab audience.

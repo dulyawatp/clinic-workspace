@@ -267,18 +267,23 @@ function NativeEncounterDraft({ userId }: { userId: string }) {
                 {t(pending ? "nativeEncounter.saving" : "nativeEncounter.save")}
               </Button>
               {result.state === "created" && (
-                <Button
-                  variant="secondary"
-                  onClick={() => {
-                    setQuery("");
-                    setMatches(null);
-                    setPatientId("");
-                    setTypeId("");
-                    setResult({ state: "idle" });
-                  }}
-                >
-                  {t("nativeEncounter.startAnother")}
-                </Button>
+                <>
+                  <Link className="ui-button ui-button--secondary" to={ROUTES.visit(result.id)}>
+                    {t("workspace.openEncounter")}
+                  </Link>
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      setQuery("");
+                      setMatches(null);
+                      setPatientId("");
+                      setTypeId("");
+                      setResult({ state: "idle" });
+                    }}
+                  >
+                    {t("nativeEncounter.startAnother")}
+                  </Button>
+                </>
               )}
             </div>
           </div>

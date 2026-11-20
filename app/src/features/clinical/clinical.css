@@ -317,6 +317,14 @@
 }
 .visit-history-report .pc-button { background: var(--surface); }
 .visit-history-note { white-space: pre-line; }
+.visit-native-history-card {
+  display: grid;
+  gap: 6px;
+  padding: clamp(11px, 2vw, 18px);
+  overflow-wrap: anywhere;
+}
+.visit-native-history-card a { text-decoration: underline; text-underline-offset: .2em; }
+.visit-saved-terms { margin: 0; padding-inline-start: 1.25rem; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: no-preference) {
   .visit-preview-layout, .visit-history-list { animation: visit-preview-in .25s ease-out both; }
   @keyframes visit-preview-in {
