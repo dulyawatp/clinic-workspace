@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from clinic_ui.core import deployment_marker
+from clinic_ui.core import deployment_marker, finance_contract
 from clinic_ui.runtime import sit_payment_slot as slot
 
 
@@ -154,3 +154,55 @@ class SlotTests(unittest.TestCase):
         self.db.sql = unreadable
         with self.assertRaises(slot.SlotUnavailable):
             slot.consume_slot(self.gateway, slot.DEPLOYMENT_ID, "actor", "key", "PAY-1")
+
+    def test_slot_ack_verifies_persisted_receipt_idempotently_without_writes(self):
+        self.approve()
+        secret = b"x" * 32
+        key = "finance-write-key-0001"
+        receipt = finance_contract.encode_receipt(
+            kind=finance_contract.PAYMENT_KIND, reference="PE-1", invoice="INV-1",
+            customer="CUST-1", amount=20, mode_of_payment="Cash", status="Paid",
+        )
+        self.db.row = {"state": "spent", "actor": "actor", "operation_key": key, "receipt": receipt}
+        token = finance_contract.ack_token(secret, self.gateway.site, "actor", finance_contract.PAYMENT_KIND, key, receipt)
+        for _ in range(2):
+            self.assertEqual(slot.verify_slot_ack(self.gateway, slot.DEPLOYMENT_ID, secret, "actor", key, token), "acked")
+        self.assertEqual(self.db.row["state"], "spent")
+        self.assertTrue(all(q.lstrip().upper().startswith("SELECT") for q, _ in self.db.calls))
+        self.assertEqual(slot.verify_slot_ack(self.gateway, slot.DEPLOYMENT_ID, secret, "other", key, token), "invalid")
+        self.assertEqual(slot.verify_slot_ack(self.gateway, slot.DEPLOYMENT_ID, secret, "actor", key, "0" * 64), "invalid")
+        self.assertEqual(slot.verify_slot_ack(self.gateway, slot.DEPLOYMENT_ID, secret, "actor", key, "é" * 64), "invalid")
+        self.assertEqual(slot.verify_slot_ack(self.gateway, slot.DEPLOYMENT_ID, secret, "actor", "another-operation-key", token), "not_owned")
+        self.db.row["receipt"] = "malformed"
+        self.assertEqual(slot.verify_slot_ack(self.gateway, slot.DEPLOYMENT_ID, secret, "actor", key, token), "invalid")
+
+    def test_slot_ack_rejects_invoice_receipt(self):
+        self.approve()
+        key = "finance-write-key-0001"
+        receipt = finance_contract.encode_receipt(
+            kind=finance_contract.INVOICE_KIND, reference="INV-1", invoice="INV-1",
+            customer="CUST-1", amount=20, status="Submitted",
+        )
+        self.db.row = {"state": "spent", "actor": "actor", "operation_key": key, "receipt": receipt}
+        self.assertEqual(slot.verify_slot_ack(self.gateway, slot.DEPLOYMENT_ID, b"x" * 32, "actor", key, "0" * 64), "invalid")
+
+    def test_slot_ack_no_owned_operation_and_unavailable(self):
+        self.approve()
+        key = "finance-write-key-0001"
+        args = (self.gateway, slot.DEPLOYMENT_ID, b"x" * 32, "actor", key, "0" * 64)
+        self.db.row = {"state": "available", "actor": None, "operation_key": None, "receipt": None}
+        self.assertEqual(slot.verify_slot_ack(*args), "not_owned")
+        self.db.row = {"state": "spent", "actor": None, "operation_key": None, "receipt": None}
+        self.assertEqual(slot.verify_slot_ack(*args), "not_owned")
+        self.gateway.site = "other.local"
+        with self.assertRaises(slot.SlotUnavailable):
+            slot.verify_slot_ack(*args)
+        self.gateway.site = slot.SITE
+        self.db.row = None
+        with self.assertRaises(slot.SlotUnavailable):
+            slot.verify_slot_ack(*args)
+        def broken(*args, **kwargs):
+            raise RuntimeError("unreadable")
+        self.db.sql = broken
+        with self.assertRaises(slot.SlotUnavailable):
+            slot.verify_slot_ack(*args)

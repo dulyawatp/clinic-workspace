@@ -1,8 +1,9 @@
 """Private SIT deployment proof and transaction-local one-payment slot."""
 
+import hmac
 import os
 
-from clinic_ui.core import deployment_marker
+from clinic_ui.core import deployment_marker, finance_contract
 
 SITE = "marley-sit.local"
 DEPLOYMENT_ID = "clinic-shared-sit-payment-v1"
@@ -81,6 +82,35 @@ def _read(gateway, deployment_id, lock):
 
 def read_slot(gateway, deployment_id):
     return _read(gateway, deployment_id, False)
+
+
+def verify_slot_ack(gateway, deployment_id, secret, actor, operation_key, token):
+    """Return acked, invalid, or not_owned; unreadable slot raises SlotUnavailable.
+
+    Only not_owned permits a separately authorized historical lookup. A match
+    by operation key is owned even when its actor or receipt is invalid.
+    """
+    try:
+        row = read_slot(gateway, deployment_id)
+    except SlotUnavailable:
+        raise
+    except Exception as exc:
+        raise SlotUnavailable("payment slot is unreadable") from exc
+    if row["state"] != "spent" or row["operation_key"] != operation_key:
+        return "not_owned"
+    if row["actor"] != actor or not finance_contract.is_valid_ack_token(token):
+        return "invalid"
+    try:
+        receipt = row["receipt"]
+        if finance_contract.decode_receipt(receipt).kind != finance_contract.PAYMENT_KIND:
+            return "invalid"
+        expected = finance_contract.ack_token(
+            secret, gateway.site, actor, finance_contract.PAYMENT_KIND,
+            operation_key, receipt,
+        )
+    except (finance_contract.FinanceContractError, TypeError, ValueError):
+        return "invalid"
+    return "acked" if hmac.compare_digest(expected, token) else "invalid"
 
 
 def lock_slot(gateway, deployment_id):
