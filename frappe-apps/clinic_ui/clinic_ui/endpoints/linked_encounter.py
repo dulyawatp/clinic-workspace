@@ -34,8 +34,28 @@ def save_linked(gateway, payload):
     if not isinstance(payload, dict) or set(payload) != {"appointment_ref", "expected_version", "clinical"}:
         raise LinkedEncounterError("invalid request")
     clinical = payload["clinical"]
-    if not isinstance(clinical, dict) or not set(clinical) <= {"symptoms", "diagnoses", "note"}:
+    if not isinstance(clinical, dict) or not set(clinical) <= {"symptoms", "diagnoses", "note", "medications"}:
         raise LinkedEncounterError("invalid clinical payload")
+    if "medications" in clinical:
+        operations = clinical["medications"]
+        if not isinstance(operations, dict) or set(operations) != {"add", "edit"}:
+            raise LinkedEncounterError("invalid medication operations")
+        for action, keys in (
+            ("add", {"drug_code", "dosage", "period", "dosage_form"}),
+            ("edit", {"id", "dosage", "period", "dosage_form"}),
+        ):
+            rows = operations[action]
+            if not isinstance(rows, list) or len(rows) > 100:
+                raise LinkedEncounterError("invalid medication operations")
+            for row in rows:
+                if not isinstance(row, dict) or set(row) != keys or any(
+                    not is_valid_identifier(value) or value != value.strip()
+                    for value in row.values()
+                ):
+                    raise LinkedEncounterError("invalid medication row")
+        ids = [row["id"] for row in operations["edit"]]
+        if len(ids) != len(set(ids)):
+            raise LinkedEncounterError("repeated medication edit")
     for field in ("symptoms", "diagnoses"):
         if field in clinical and (not isinstance(clinical[field], list) or any(not isinstance(v, str) or not is_valid_identifier(v) for v in clinical[field])):
             raise LinkedEncounterError("invalid clinical rows")

@@ -562,10 +562,67 @@ class Gateway:
                 LinkedFieldAccessError, LinkedNoteMismatch):
             return unavailable
 
+    def _linked_medication_schema(self, ptype="read"):
+        parent = self._linked_fields("Patient Encounter", ("drug_prescription",), ptype)
+        table = parent.get_field("drug_prescription")
+        if table.options != "Drug Prescription":
+            raise LinkedFieldAccessError("medication table unavailable")
+        meta = self.frappe.get_meta("Drug Prescription")
+        layout = {"Section Break", "Column Break", "Tab Break", "HTML", "Heading"}
+        fields = [field.fieldname for field in meta.fields
+                  if field.fieldname and field.fieldtype not in layout]
+        required = {"drug_code", "dosage", "period", "dosage_form", "medication_request"}
+        if not required.issubset(fields):
+            raise LinkedFieldAccessError("medication fields unavailable")
+        links = {"drug_code": "Item", "dosage": "Prescription Dosage",
+                 "period": "Prescription Duration", "dosage_form": "Dosage Form"}
+        if any(not any(field.fieldname == key and field.fieldtype == "Link" and field.options == target
+                       for field in meta.fields) for key, target in links.items()):
+            raise LinkedFieldAccessError("medication link schema unavailable")
+        self._linked_fields("Drug Prescription", fields, "read", parent)
+        if ptype == "write":
+            self._linked_fields("Drug Prescription", ("drug_code", "dosage", "period", "dosage_form"), "write", parent)
+        return fields
+
+    def _linked_medication_supported(self, row, fields):
+        allowed = {"drug_code", "drug_name", "dosage", "period", "dosage_form",
+                   "medication", "medication_request", "update_schedule"}
+        return (
+            all(isinstance(self._row_value(row, key), str) and self._row_value(row, key).strip()
+                for key in ("drug_code", "dosage", "period", "dosage_form"))
+            and not self._row_value(row, "medication_request")
+            and all(self._row_value(row, key) in (None, "", 0, 0.0, False)
+                    for key in fields if key not in allowed)
+            and self._row_value(row, "update_schedule") in (None, 1, True)
+        )
+
+    def _linked_medications(self, doc):
+        unavailable = {"state": "unavailable", "items": [], "complete": False}
+        try:
+            fields = self._linked_medication_schema()
+        except (self.frappe.PermissionError, LinkedFieldAccessError):
+            return unavailable
+        rows = doc.drug_prescription
+        items = []
+        for row in rows[:100]:
+            items.append({
+                "id": self._row_value(row, "name"),
+                **{key: self._row_value(row, key) for key in
+                   ("drug_code", "dosage", "period", "dosage_form", "medication_request")},
+                "details": {key: self._row_value(row, key) for key in (
+                    "drug_name", "comment", "interval", "interval_uom", "strength",
+                    "strength_uom", "dosage_by_interval", "number_of_repeats_allowed",
+                    "intent", "priority", "update_schedule",
+                ) if key in fields},
+                "supported": self._linked_medication_supported(row, fields),
+            })
+        return {"state": "available", "items": items, "complete": len(rows) <= 100}
+
     def linked_project(self, context, encounter, note_offset=0):
         public_context = {key: value for key, value in context.items() if not key.startswith("_")}
         if encounter is None:
             return {"context": public_context, "encounter": None,
+                    "medications": {"state": "available", "items": [], "complete": True},
                     "notes": {"state": "available", "items": [], "next_offset": None}}
         doc = self._linked_doc(context, encounter["id"])
         meta = self.frappe.get_meta("Patient Encounter")
@@ -576,6 +633,7 @@ class Gateway:
         return {
             "context": public_context,
             "encounter": {**encounter, "symptoms": symptoms, "diagnoses": diagnoses},
+            "medications": self._linked_medications(doc),
             "notes": self._linked_notes(context, doc.name, note_offset),
         }
 
@@ -597,6 +655,27 @@ class Gateway:
                 doc.set(table, [])
                 for value in clinical[key]:
                     doc.append(table, {field: value})
+        if "medications" in clinical:
+            fields = self._linked_medication_schema("write")
+            operations = clinical["medications"]
+            if encounter is None and operations["edit"]:
+                raise LinkedEncounterError("medication edit requires a persisted draft")
+            for edit in operations["edit"]:
+                matches = [row for row in doc.drug_prescription if self._row_value(row, "name") == edit["id"]]
+                if len(matches) != 1 or not self._linked_medication_supported(matches[0], fields):
+                    raise LinkedEncounterError("medication row unavailable or unsupported")
+                row = matches[0]
+                self.frappe.get_doc("Item", self._row_value(row, "drug_code")).check_permission("read")
+                for key, doctype in (("dosage", "Prescription Dosage"), ("period", "Prescription Duration"), ("dosage_form", "Dosage Form")):
+                    self.frappe.get_doc(doctype, edit[key]).check_permission("read")
+                    if isinstance(row, dict):
+                        row[key] = edit[key]
+                    else:
+                        row.set(key, edit[key])
+            for add in operations["add"]:
+                for key, doctype in (("drug_code", "Item"), ("dosage", "Prescription Dosage"), ("period", "Prescription Duration"), ("dosage_form", "Dosage Form")):
+                    self.frappe.get_doc(doctype, add[key]).check_permission("read")
+                doc.append("drug_prescription", add)
         self._linked_fields("Patient Encounter", ("submit_orders_on_save",), "write")
         doc.submit_orders_on_save = 0
         if encounter is None:
