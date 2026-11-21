@@ -37,6 +37,7 @@ from clinic_ui.core.policy import (
     SUPPORTED_ROLE_CODES,
 )
 from clinic_ui.endpoints import common
+from clinic_ui.runtime import sit_payment_slot
 
 def _patient_write_flags(gateway, settings, role):
     """Return ``(create, update)`` after the converted native write gate.
@@ -328,23 +329,40 @@ def _finance_write_flags(gateway, settings, role, actor):
     except Exception:
         return disabled
     try:
-        payment_ok = (
-            role in PAYMENT_ROLE_CODES
-            and actor != write_fence.LATCH_ACTOR
-            and gateway.native_finance_settlement_verified() is True
-            and gateway.native_finance_payment_install_problem() is None
-            and gateway.write_deployment_approved() is True
-            and gateway.write_fence_ready() is True
-            and gateway.native_finance_can_write("Payment Entry") is True
-            and gateway.native_finance_can_submit("Payment Entry") is True
-            and gateway.native_doctype_can_read("Sales Invoice") is True
-        )
-        if payment_ok:
-            limit = finance_contract.budget(finance_contract.PAYMENT_KIND)
-            records = gateway.list_committed_finance_receipts(
-                limit, kind=finance_contract.PAYMENT_KIND
+        lane = sit_payment_slot.payment_lane(gateway)
+        if lane == "shared_slot_v1":
+            payment_ok = (
+                role in PAYMENT_ROLE_CODES
+                and actor != write_fence.LATCH_ACTOR
+                and gateway.native_finance_settlement_verified() is True
+                and gateway.native_finance_payment_install_problem() is None
+                and gateway.native_finance_can_write("Payment Entry") is True
+                and gateway.native_finance_can_submit("Payment Entry") is True
+                and gateway.native_doctype_can_read("Sales Invoice") is True
+                and sit_payment_slot.read_slot(
+                    gateway, sit_payment_slot.DEPLOYMENT_ID
+                )["state"] == "available"
             )
-            payment_ok = len(records) < limit
+        elif lane == "legacy":
+            payment_ok = (
+                role in PAYMENT_ROLE_CODES
+                and actor != write_fence.LATCH_ACTOR
+                and gateway.native_finance_settlement_verified() is True
+                and gateway.native_finance_payment_install_problem() is None
+                and gateway.write_deployment_approved() is True
+                and gateway.write_fence_ready() is True
+                and gateway.native_finance_can_write("Payment Entry") is True
+                and gateway.native_finance_can_submit("Payment Entry") is True
+                and gateway.native_doctype_can_read("Sales Invoice") is True
+            )
+            if payment_ok:
+                limit = finance_contract.budget(finance_contract.PAYMENT_KIND)
+                records = gateway.list_committed_finance_receipts(
+                    limit, kind=finance_contract.PAYMENT_KIND
+                )
+                payment_ok = len(records) < limit
+        else:
+            payment_ok = False
     except Exception:
         payment_ok = False
     return invoice_ok, payment_ok
