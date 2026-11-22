@@ -17,9 +17,15 @@ extend_doctype_class = {
 # stay scoped to one storage key and never return their rows to a client.
 permission_query_conditions = {
     "File": "clinic_photos.access.permissions.file_permission_query_conditions",
+    "Clinic Photo": "clinic_photos.access.permissions.photo_permission_query_conditions",
+    "Clinic Photo Draft": "clinic_photos.access.permissions.draft_permission_query_conditions",
+    "Clinic Photo Annotation Version": "clinic_photos.access.permissions.version_permission_query_conditions",
 }
 has_permission = {
     "File": "clinic_photos.access.permissions.file_has_permission",
+    "Clinic Photo": "clinic_photos.access.permissions.photo_has_permission",
+    "Clinic Photo Draft": "clinic_photos.access.permissions.draft_has_permission",
+    "Clinic Photo Annotation Version": "clinic_photos.access.permissions.version_has_permission",
 }
 
 # Narrow external raw-reader overrides. Only the two installed callables are
@@ -30,6 +36,8 @@ has_permission = {
 # authorization/streaming. The Chart of Accounts importer is untouched: its local
 # helper already resolves through File methods.
 override_whitelisted_methods = {
+    "healthcare.healthcare.doctype.patient_appointment.patient_appointment."
+    "check_in_appointment": "clinic_photos.visit.checkin.check_in_appointment",
     "erpnext.accounts.doctype.bank_statement_import.bank_statement_import."
     "convert_mt940_to_csv": "clinic_photos.access.entrypoints.convert_mt940_to_csv",
     "frappe.core.api.file.zip_files": "clinic_photos.access.entrypoints.zip_files",
@@ -57,4 +65,8 @@ scheduler_events = {
     },
 }
 
-# No doc_event is registered; feature controllers enforce their own lifecycle guards.
+doc_events = {
+    "DocShare": {
+        "validate": "clinic_photos.access.share.validate_docshare",
+    },
+}

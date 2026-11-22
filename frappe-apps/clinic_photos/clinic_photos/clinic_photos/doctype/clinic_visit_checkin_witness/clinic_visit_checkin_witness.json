@@ -1,0 +1,20 @@
+{
+ "doctype": "DocType",
+ "name": "Clinic Visit Checkin Witness",
+ "module": "Clinic Photos",
+ "engine": "InnoDB",
+ "autoname": "field:appointment",
+ "naming_rule": "By fieldname",
+ "allow_rename": 0,
+ "field_order": ["appointment", "patient", "appointment_snapshot", "patient_snapshot", "appointment_creation", "patient_creation", "actor"],
+ "fields": [
+  {"fieldname": "appointment", "fieldtype": "Link", "options": "Patient Appointment", "label": "Appointment", "reqd": 1, "unique": 1, "read_only": 1},
+  {"fieldname": "patient", "fieldtype": "Link", "options": "Patient", "label": "Patient", "reqd": 1, "read_only": 1},
+  {"fieldname": "appointment_snapshot", "fieldtype": "Data", "label": "Original Appointment", "reqd": 1, "read_only": 1},
+  {"fieldname": "patient_snapshot", "fieldtype": "Data", "label": "Original Patient", "reqd": 1, "read_only": 1},
+  {"fieldname": "appointment_creation", "fieldtype": "Data", "label": "Original Appointment Creation", "reqd": 1, "read_only": 1},
+  {"fieldname": "patient_creation", "fieldtype": "Data", "label": "Original Patient Creation", "reqd": 1, "read_only": 1},
+  {"fieldname": "actor", "fieldtype": "Data", "label": "Actor", "reqd": 1, "read_only": 1}
+ ],
+ "permissions": []
+}

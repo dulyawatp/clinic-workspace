@@ -15,6 +15,7 @@ import { StatePanel } from "../../ui/StatePanel";
 import { SampleLabFiles, SamplePhotos } from "./VisitEvidencePreview";
 import { approvedVisitNarrative, SAMPLE_REPORT, sampleLabFiles, samplePhotoSides, type SampleHistoryPreview } from "./visit-preview";
 import { PhotosSection } from "./VisitSampleSections";
+import { NativeVisitPhotos } from "./NativeVisitPhotos";
 
 type Kind = "symptoms" | "diagnoses";
 const terms = {
@@ -206,6 +207,7 @@ export function SavedEncounterWorkspace({ encounterId }: { encounterId: string }
         </div>}
         note={<p className="pc-note">{t("workspace.savedNoteUnavailable")}</p>}
         medications={<p className="pc-note">{t("workspace.savedMedicationsUnavailable")}</p>}
+        photos={<NativeVisitPhotos source={{ encounterId: encounter.id, patientId: encounter.patientId }} />}
       />
     </div>
   );

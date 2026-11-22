@@ -103,6 +103,16 @@ def _classify(file_doc):
     return frappe_context.classify_file(file_doc)
 
 
+def _is_protected_file(file_doc):
+    from clinic_photos.access import frappe_context
+
+    persisted = frappe_context._file_row(file_doc)
+    record = frappe_context.classify_file(file_doc, persisted=persisted)
+    return record is not None or frappe_context.is_managed_annotation_file(
+        file_doc, persisted=persisted, record=record
+    )
+
+
 # ---------------------------------------------------------------------------
 # Response cache closure (supported after_request / before_request hooks)
 # ---------------------------------------------------------------------------
@@ -180,7 +190,30 @@ def _protected_path(value: str) -> bool:
 
     if storage.is_reserved_key(key):
         return True
-    return _classify({"file_url": key}) is not None
+    if _classify({"file_url": key}) is not None:
+        return True
+    import frappe
+
+    for path in dict.fromkeys((value, key)):
+        rows = frappe.db.get_all(
+            "File", filters={"file_url": path}, fields=list(FILE_LOOKUP_FIELDS), limit=0
+        )
+        if any(_is_protected_file(row) for row in rows or ()):
+            return True
+    # Only encoded URLs can canonicalise to this key without already matching it.
+    rows = frappe.db.sql(
+        "SELECT `name`, `file_url`, `file_name` FROM `tabFile` "
+        "WHERE LOCATE(CHAR(37), `file_url`) > 0",
+        as_dict=True,
+    )
+    for row in rows:
+        try:
+            candidate = storage.canonical_private_key(row.get("file_url"))
+        except storage.InvalidStoragePath:
+            continue
+        if candidate == key and _is_protected_file(row):
+            return True
+    return False
 
 
 def _matching_file_rows(value: str) -> list:
@@ -221,7 +254,7 @@ def _matching_rows_include_protected(value: str) -> bool:
     references. A mixed protected/unrelated match is refused by approved contract; an
     all-unrelated match set is delegated unchanged.
     """
-    return any(_classify(row) is not None for row in _matching_file_rows(value))
+    return any(_is_protected_file(row) for row in _matching_file_rows(value))
 
 
 def input_reaches_protected_bytes(value) -> bool:
@@ -316,7 +349,7 @@ def mark_protected_zip_entries(files) -> None:
     for entry in _zip_entries(files):
         if not isinstance(entry, str):
             continue
-        if any(_classify(row) is not None for row in _zip_entry_rows(entry)):
+        if any(_is_protected_file(row) for row in _zip_entry_rows(entry)):
             mark_protected_request()
             return
 

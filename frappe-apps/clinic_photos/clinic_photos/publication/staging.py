@@ -64,6 +64,7 @@ implement publication; it is a bounded seam for the integrating caller.
 """
 
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -71,6 +72,7 @@ import stat
 from dataclasses import dataclass
 
 from clinic_photos.publication import validation
+from clinic_photos.publication.visit_annotation_intent import VisitAnnotationBinding, VisitAnnotationIntent
 
 STAGING_DIRECTORY = "clinic_photo_staging"
 PRIVATE_DIRECTORY = "private"
@@ -86,6 +88,8 @@ SAFE_STAGED_REFUSED = "Staged photo image cannot be read"
 _EXTENSIONS = {"JPEG": "jpg", "PNG": "png"}
 _FORMATS_BY_EXTENSION = {extension: form for form, extension in _EXTENSIONS.items()}
 _KEY_PATTERN = re.compile(r"[0-9a-f]{32}\.(?:jpg|png)")
+_ANNOTATION_KEY_PATTERN = re.compile(r"[0-9a-f]{32}\.json")
+VISIT_ANNOTATION_JSON = "VISIT_ANNOTATION_JSON"
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _JPEG_MAGIC = b"\xff\xd8\xff"
@@ -116,11 +120,14 @@ _REQUIRED_FILE_FLAGS = ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")
 
 __all__ = [
     "StagedImage",
+    "StagedVisitAnnotation",
     "StagedImageRefused",
     "StagingError",
     "StagingRefused",
     "read_staged_image",
+    "read_staged_visit_annotation",
     "stage_image",
+    "stage_visit_annotation",
     "validate_staged_metadata",
 ]
 
@@ -164,6 +171,33 @@ class StagedImage:
 
     def __post_init__(self) -> None:
         validate_staged_metadata(self.key, self.sha256, self.size, self.format)
+
+
+@dataclass(frozen=True, slots=True)
+class StagedVisitAnnotation:
+    key: str
+    sha256: str
+    size: int
+    format: str
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.key, str) or _ANNOTATION_KEY_PATTERN.fullmatch(self.key) is None
+                or not isinstance(self.sha256, str) or _SHA256_PATTERN.fullmatch(self.sha256) is None
+                or type(self.size) is not int or not 0 < self.size <= validation.MAX_ANNOTATION_BYTES
+                or self.format != VISIT_ANNOTATION_JSON):
+            raise StagedImageRefused(SAFE_STAGED_REFUSED)
+
+
+def _validated_visit_annotation(data: bytes) -> None:
+    if type(data) is not bytes or not 0 < len(data) <= validation.MAX_ANNOTATION_BYTES:
+        _refuse()
+    try:
+        text = data.decode("utf-8")
+        parsed = json.loads(text)
+        if validation.canonical_visit_annotation(parsed) != text:
+            _refuse()
+    except (UnicodeError, ValueError, RecursionError, validation.PublicationValidationError):
+        raise _Refusal() from None
 
 
 def validate_staged_metadata(key, sha256, size, image_format) -> None:
@@ -290,7 +324,7 @@ def _require_bound_site_root() -> str:
     return real_root
 
 
-def _open_staging_directory(*, create: bool) -> int:
+def _open_staging_directory(*, create: bool, expected_site=None) -> int:
     """Directory descriptor for ``<site>/private/clinic_photo_staging``.
 
     The site root is opened first, then ``private`` (which must already exist) and the
@@ -302,6 +336,8 @@ def _open_staging_directory(*, create: bool) -> int:
     group/other permission. If the host lacks the required open flags, nothing is opened.
     """
     site_root = _require_bound_site_root()
+    if expected_site is not None and os.path.basename(site_root) != expected_site:
+        _refuse()
     _require_flags(*_REQUIRED_DIRECTORY_FLAGS, *_REQUIRED_FILE_FLAGS)
 
     try:
@@ -445,12 +481,15 @@ def _read_verified(
         _refuse()
     if hashlib.sha256(data).hexdigest() != expected_sha256:
         _refuse()
-    try:
-        validation.validate_image_bytes(data)
-    except validation.PublicationValidationError:
-        raise _Refusal() from None
-    if _format_of(data) != expected_format:
-        _refuse()
+    if expected_format == VISIT_ANNOTATION_JSON:
+        _validated_visit_annotation(data)
+    else:
+        try:
+            validation.validate_image_bytes(data)
+        except validation.PublicationValidationError:
+            raise _Refusal() from None
+        if _format_of(data) != expected_format:
+            _refuse()
     return data
 
 
@@ -473,12 +512,16 @@ def stage_image(image_bytes) -> StagedImage:
         raise StagingRefused(SAFE_STAGING_REFUSED) from None
 
 
-def _stage(data: bytes, image_format: str) -> StagedImage:
-    key = f"{secrets.token_hex(KEY_HEX_CHARS // 2)}.{_EXTENSIONS[image_format]}"
+def _stage(data: bytes, image_format: str, *, expected_site=None) -> StagedImage | StagedVisitAnnotation:
+    extension = "json" if image_format == VISIT_ANNOTATION_JSON else _EXTENSIONS[image_format]
+    key = f"{secrets.token_hex(KEY_HEX_CHARS // 2)}.{extension}"
     digest = hashlib.sha256(data).hexdigest()
     size = len(data)
 
-    directory_descriptor = _open_staging_directory(create=True)
+    if expected_site is None:
+        directory_descriptor = _open_staging_directory(create=True)
+    else:
+        directory_descriptor = _open_staging_directory(create=True, expected_site=expected_site)
     try:
         try:
             descriptor = os.open(
@@ -527,7 +570,42 @@ def _stage(data: bytes, image_format: str) -> StagedImage:
     finally:
         _close_quietly(directory_descriptor)
 
-    return StagedImage(key=key, sha256=digest, size=size, format=image_format)
+    reference = StagedVisitAnnotation if image_format == VISIT_ANNOTATION_JSON else StagedImage
+    return reference(key=key, sha256=digest, size=size, format=image_format)
+
+
+def stage_visit_annotation(intent: VisitAnnotationIntent) -> StagedVisitAnnotation:
+    try:
+        if type(intent) is not VisitAnnotationIntent:
+            _refuse()
+        if type(intent.binding) is not VisitAnnotationBinding or type(intent.binding.site) is not str or not intent.binding.site:
+            _refuse()
+        text = intent.canonical_visit_annotation
+        if type(text) is not str or len(text) > validation.MAX_ANNOTATION_BYTES:
+            _refuse()
+        try:
+            data = text.encode("utf-8")
+        except UnicodeError:
+            _refuse()
+        _validated_visit_annotation(data)
+        return _stage(data, VISIT_ANNOTATION_JSON, expected_site=intent.binding.site)
+    except (_Refusal, OSError):
+        raise StagingRefused("Visit annotation cannot be staged") from None
+
+
+def read_staged_visit_annotation(staged: StagedVisitAnnotation) -> bytes:
+    if type(staged) is not StagedVisitAnnotation:
+        raise StagedImageRefused("Staged visit annotation cannot be read")
+    try:
+        staged.__post_init__()
+        directory_descriptor = _open_staging_directory(create=False)
+        try:
+            return _read_verified(directory_descriptor, staged.key, staged.sha256,
+                                  staged.size, staged.format)
+        finally:
+            _close_quietly(directory_descriptor)
+    except (_Refusal, OSError, StagedImageRefused):
+        raise StagedImageRefused("Staged visit annotation cannot be read") from None
 
 
 def read_staged_image(staged) -> bytes:
@@ -536,6 +614,7 @@ def read_staged_image(staged) -> bytes:
         raise StagedImageRefused(SAFE_STAGED_REFUSED)
 
     try:
+        _check_metadata(staged.key, staged.sha256, staged.size, staged.format)
         directory_descriptor = _open_staging_directory(create=False)
         try:
             return _read_verified(

@@ -147,6 +147,53 @@ def enqueue_submission(operation_id: str) -> None:
     )
 
 
+def _visit_server_site(frappe) -> str:
+    from clinic_photos.publication import process
+
+    site = getattr(getattr(frappe, "local", None), "site", "")
+    if (not process._valid_visit_site(site) or
+        not process._visit_gate_enabled(site, getattr(frappe, "conf", None))):
+        raise LauncherUnavailable
+    return site
+
+
+def enqueue_visit_submission(operation_id: str) -> None:
+    """After-commit callback target; enqueue only the opaque visit identity."""
+    if not _valid_operation_id(operation_id):
+        raise LauncherUnavailable
+    frappe = _frappe()
+    _visit_server_site(frappe)
+    frappe.enqueue(
+        "clinic_photos.publication.launcher.launch_visit_submission",
+        queue=QUEUE, timeout=LAUNCHER_JOB_TIMEOUT_SECONDS, operation_id=operation_id,
+    )
+
+
+def launch_visit_submission(operation_id: str) -> None:
+    """Launch at most one visit child for an exact committed SUBMITTED operation."""
+    if not _valid_operation_id(operation_id):
+        return None
+    try:
+        frappe = _frappe()
+        site = _visit_server_site(frappe)
+        if (type(getattr(frappe.db, "transaction_writes", None)) is not int or
+            frappe.db.transaction_writes != 0):
+            return None
+        from clinic_photos.publication import journal
+        from clinic_photos.publication.contracts import SubmittedOperation, VISIT_ORIGINAL_CREATE
+
+        submitted = journal.load_submission(operation_id)
+        if (not isinstance(submitted, SubmittedOperation) or submitted.id != operation_id or
+            submitted.site != site or submitted.kind != VISIT_ORIGINAL_CREATE or
+            _visit_server_site(frappe) != site):
+            return None
+        argv = [PYTHON_EXECUTABLE, "-m", PROCESS_MODULE, "--visit",
+                "--site", site, "--operation-id", operation_id]
+        _execute_child(argv)
+    except Exception:
+        return None
+
+
 def _execute_child(
     argv,
     *,

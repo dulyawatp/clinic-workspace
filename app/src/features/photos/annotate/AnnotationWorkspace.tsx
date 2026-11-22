@@ -1,5 +1,4 @@
-import { useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import { type CSSProperties, type ReactNode, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSession } from "../../../app/SessionProvider";
 import { Badge, Button, Card, SampleBanner } from "../../../design/components";
@@ -29,10 +28,10 @@ import {
   selectShape,
   undo,
 } from "./engine";
+import { KonvaAnnotationSurface } from "./KonvaAnnotationSurface";
 import { draftsFor, sampleFramesFor, versionsFor } from "./sample-frames";
+import { MAX_VISIT_SHAPES, MAX_VISIT_STROKE_POINTS, MAX_VISIT_TEXT } from "./visit-drawing";
 import "./annotate.css";
-
-const VIEW = 100;
 
 function seedShapes(versions: readonly AnnotationVersion[]): LayerShape[] {
   const latest = versions.at(-1);
@@ -65,29 +64,16 @@ function clamp(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
-/**
- * Pointer → normalized 0..1 coordinates over the stage box, not the visible
- * image: the original is `object-fit: contain`, so its letterboxing is
- * deliberately ignored and shapes stay on the stage grid. jsdom has no layout,
- * so a fixed 800×500 fallback keeps the conversion deterministic.
- */
-function pointOf(
-  event: { clientX: number; clientY: number },
-  element: Element,
-): Point {
-  const rect = element.getBoundingClientRect();
-  const width = rect.width || 800;
-  const height = rect.height || 500;
-  return {
-    x: clamp((event.clientX - rect.left) / width),
-    y: clamp((event.clientY - rect.top) / height),
-  };
-}
-
-function shapeOffset(shape: LayerShape, dx: number, dy: number): LayerShape {
+function shapeOffset(shape: LayerShape, dx: number, dy: number, boundBox: boolean): LayerShape {
   switch (shape.kind) {
     case "rect":
     case "ellipse":
+      if (boundBox) {
+        const width = shape.kind === "rect" ? shape.width : shape.radiusX * 2;
+        const height = shape.kind === "rect" ? shape.height : shape.radiusY * 2;
+        return { ...shape, x: Math.min(1 - width, clamp(shape.x + dx)), y: Math.min(1 - height, clamp(shape.y + dy)) };
+      }
+      return { ...shape, x: clamp(shape.x + dx), y: clamp(shape.y + dy) };
     case "text":
       return { ...shape, x: clamp(shape.x + dx), y: clamp(shape.y + dy) };
     case "arrow":
@@ -107,21 +93,98 @@ function shapeOffset(shape: LayerShape, dx: number, dy: number): LayerShape {
   }
 }
 
-type Gesture =
-  | {
-      readonly kind: "move";
-      readonly id: string;
-      readonly start: Point;
-      readonly original: LayerShape;
+type Gesture = {
+  readonly start: Point;
+  draft: LayerShape;
+} & (
+  | { readonly kind: "draw" }
+  | { readonly kind: "move"; readonly original: LayerShape }
+  | { readonly kind: "resize"; readonly original: BoxShape }
+);
+
+type BoxShape = Extract<LayerShape, { kind: "rect" | "ellipse" }>;
+
+function withBox(shape: BoxShape, a: Point, b: Point): BoxShape {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  const width = Math.abs(a.x - b.x);
+  const height = Math.abs(a.y - b.y);
+  return shape.kind === "rect"
+    ? { ...shape, x, y, width, height }
+    : { ...shape, x, y, radiusX: width / 2, radiusY: height / 2 };
+}
+
+function dragEdge(edge: number, anchor: number, delta: number, pixel: number) {
+  // A moved box may already extend beyond the stage. Let it shrink back in
+  // without snapping an untouched edge or growing beyond its current reach.
+  return Math.min(Math.max(1, edge), Math.max(Math.min(edge, anchor + pixel), edge + delta));
+}
+
+function updateDraft(active: Gesture, point: Point, pixel: Point, bounded: boolean): LayerShape {
+  const { start, draft } = active;
+  const dx = point.x - start.x;
+  const dy = point.y - start.y;
+  if (active.kind === "move") return shapeOffset(active.original, dx, dy, bounded);
+  if (active.kind === "resize") {
+    const shape = active.original;
+    if (dx === 0 && dy === 0) return shape;
+    const right = shape.x + (shape.kind === "rect" ? shape.width : shape.radiusX * 2);
+    const bottom = shape.y + (shape.kind === "rect" ? shape.height : shape.radiusY * 2);
+    return withBox(shape, shape, {
+      x: dragEdge(right, shape.x, dx, pixel.x),
+      y: dragEdge(bottom, shape.y, dy, pixel.y),
+    });
+  }
+  switch (draft.kind) {
+    case "rect":
+    case "ellipse":
+      return withBox(draft, start, point);
+    case "arrow":
+      return { ...draft, to: point };
+    case "freehand": {
+      const last = draft.points.at(-1);
+      if (last?.x === point.x && last.y === point.y) return draft;
+      const points = bounded && draft.points.length >= MAX_VISIT_STROKE_POINTS
+        ? draft.points.filter((_, i) => i % 2 === 0 || i === draft.points.length - 1)
+        : draft.points;
+      return { ...draft, points: [...points, point] };
     }
-  | { readonly kind: "draw"; readonly id: string; readonly start: Point }
-  | { readonly kind: "freehand"; readonly id: string };
+    case "text":
+      return draft;
+  }
+}
+
+function hasVisibleMark(shape: LayerShape, pixel: Point): boolean {
+  switch (shape.kind) {
+    case "rect":
+      return shape.width >= pixel.x || shape.height >= pixel.y;
+    case "ellipse":
+      return shape.radiusX * 2 >= pixel.x || shape.radiusY * 2 >= pixel.y;
+    case "arrow":
+      return Math.abs(shape.to.x - shape.from.x) >= pixel.x ||
+        Math.abs(shape.to.y - shape.from.y) >= pixel.y;
+    case "freehand":
+      return shape.points.length > 1;
+    case "text":
+      return true;
+  }
+}
 
 interface WorkspaceFrame {
   readonly id: string;
   readonly url: string;
   readonly name: string;
   readonly category: string;
+}
+
+interface LiveFrame {
+  readonly frame: WorkspaceFrame;
+  readonly shapes: readonly LayerShape[];
+  readonly editable: boolean;
+  readonly saveEnabled: boolean;
+  readonly onSave: (shapes: readonly LayerShape[]) => void;
+  readonly feedback?: ReactNode;
+  readonly version?: ReactNode;
 }
 
 /**
@@ -132,15 +195,17 @@ interface WorkspaceFrame {
 export function AnnotationWorkspace({
   patientId,
   photos = [],
+  live,
 }: {
   patientId: string;
   photos?: readonly Photo[];
+  live?: LiveFrame;
 }) {
   const { t } = useTranslation();
   const { locale } = useLocale();
   const { session } = useSession();
-  const authoredFrames = sampleFramesFor(patientId);
-  const frames: readonly WorkspaceFrame[] = authoredFrames.length
+  const authoredFrames = live ? [] : sampleFramesFor(patientId);
+  const frames: readonly WorkspaceFrame[] = live ? [live.frame] : authoredFrames.length
     ? authoredFrames.map((frame) => ({
         id: frame.id,
         url: frame.url,
@@ -156,20 +221,22 @@ export function AnnotationWorkspace({
   const hasAuthoredFrames = authoredFrames.length > 0;
   const [frameId, setFrameId] = useState(frames[0]?.id ?? "");
   const [annotation, setAnnotation] = useState<AnnotationState>(() =>
-    createState(seedShapes(frameId === "" ? [] : versionsFor(frameId))),
+    createState(live?.shapes ?? seedShapes(frameId === "" ? [] : versionsFor(frameId))),
   );
   const [versions, setVersions] = useState<
     Record<string, SavedAnnotationVersion[]>
   >(() =>
     Object.fromEntries(
-      frames.map((frame) => [frame.id, seedVersions(versionsFor(frame.id))]),
+      live ? [] : frames.map((frame) => [frame.id, seedVersions(versionsFor(frame.id))]),
     ),
   );
   const [textValue, setTextValue] = useState("");
   const [zoom, setZoom] = useState(1);
   const [status, setStatus] = useState<"none" | "textRequired" | "saved">("none");
   const gesture = useRef<Gesture | null>(null);
+  const [preview, setPreview] = useState<LayerShape | null>(null);
   const sequence = useRef(0);
+  const [photoRatio, setPhotoRatio] = useState<number | null>();
 
   if (frames.length === 0)
     return (
@@ -187,14 +254,18 @@ export function AnnotationWorkspace({
   const frame = frames.find((row) => row.id === frameId) ?? frames[0];
   if (frame === undefined) return null;
   const frameVersions = versions[frame.id] ?? [];
-  const frameDrafts = draftsFor(frame.id);
+  const frameDrafts = live ? [] : draftsFor(frame.id);
+  const editable = live ? Boolean(photoRatio && live.editable) : true;
 
   function nextId(): string {
-    sequence.current += 1;
-    return `LOCAL-SHAPE-${sequence.current}`;
+    let id: string;
+    do { id = `LOCAL-SHAPE-${++sequence.current}`; }
+    while (annotation.shapes.some((shape) => shape.id === id) || live?.shapes.some((shape) => shape.id === id));
+    return id;
   }
 
   function changeFrame(id: string) {
+    cancelGesture();
     setFrameId(id);
     setAnnotation(createState(seedShapes(versionsFor(id))));
     setStatus("none");
@@ -202,175 +273,108 @@ export function AnnotationWorkspace({
   }
 
   function pickTool(tool: AnnotationTool) {
+    cancelGesture();
     setAnnotation((current) => chooseTool(current, tool));
     setStatus("none");
   }
 
-  function startPoint(event: ReactPointerEvent<SVGSVGElement>): Point {
-    return pointOf(event, event.currentTarget);
-  }
-
-  function onPointerDown(event: ReactPointerEvent<SVGSVGElement>) {
-    const svg = event.currentTarget;
-    if (typeof svg.setPointerCapture === "function")
-      svg.setPointerCapture(event.pointerId);
-    const point = startPoint(event);
-    const target = event.target as Element | null;
-    const hit = target?.closest("[data-shape-id]")?.getAttribute("data-shape-id");
+  function startGesture(point: Point, hit: { id: string; resize: boolean } | null) {
+    if (!editable) return false;
     if (annotation.tool === "select") {
-      const original = annotation.shapes.find((shape) => shape.id === hit);
-      // One checkpoint at gesture start: a drag is a single undo step.
-      setAnnotation((current) =>
-        hit
-          ? checkpoint(selectShape(current, hit))
-          : selectShape(current, null),
-      );
-      gesture.current =
-        hit && original
-          ? { kind: "move", id: hit, start: point, original }
-          : null;
-      return;
+      const original = annotation.shapes.find((shape) => shape.id === hit?.id);
+      setAnnotation((current) => selectShape(current, original?.id ?? null));
+      if (!original) return false;
+      const resize = hit?.resize && (original.kind === "rect" || original.kind === "ellipse");
+      gesture.current = resize
+        ? { kind: "resize", start: point, original, draft: original }
+        : { kind: "move", start: point, original, draft: original };
+      return true;
     }
-    if (annotation.tool === "text") {
-      if (textValue.trim() === "") {
-        setStatus("textRequired");
-        return;
-      }
-      const id = nextId();
-      setAnnotation((current) =>
-        addShape(current, {
-          id,
-          kind: "text",
-          x: point.x,
-          y: point.y,
-          text: textValue.trim(),
-          stroke: "#0f766e",
-        }),
-      );
-      return;
+    if (live && annotation.shapes.length >= MAX_VISIT_SHAPES) return false;
+    const text = textValue.trim();
+    if (annotation.tool === "text" && !text) {
+      setStatus("textRequired");
+      return false;
     }
-    const id = nextId();
-    gesture.current =
-      annotation.tool === "freehand"
-        ? { kind: "freehand", id }
-        : { kind: "draw", id, start: point };
-    setAnnotation((current) => {
-      if (annotation.tool === "freehand")
-        return addShape(current, {
-          id,
-          kind: "freehand",
-          points: [point],
-          strokeWidth: 0.8,
-          stroke: "#155e75",
-        });
-      if (annotation.tool === "arrow")
-        return addShape(current, {
-          id,
-          kind: "arrow",
-          from: point,
-          to: point,
-          stroke: "#0f766e",
-        });
-      if (annotation.tool === "ellipse")
-        return addShape(current, {
-          id,
-          kind: "ellipse",
-          x: point.x,
-          y: point.y,
-          radiusX: 0,
-          radiusY: 0,
-          stroke: "#0f766e",
-        });
-      return addShape(current, {
-        id,
-        kind: "rect",
-        x: point.x,
-        y: point.y,
-        width: 0,
-        height: 0,
-        stroke: "#0f766e",
-      });
-    });
+    setStatus("none");
+    const common = { id: nextId(), stroke: "#0f766e" };
+    const anchor = { ...common, ...point };
+    let draft: LayerShape;
+    switch (annotation.tool) {
+      case "text":
+        draft = { ...anchor, kind: "text", text };
+        break;
+      case "freehand":
+        draft = { ...common, kind: "freehand", points: [point], stroke: "#155e75", strokeWidth: 0.8 };
+        break;
+      case "arrow":
+        draft = { ...common, kind: "arrow", from: point, to: point };
+        break;
+      case "ellipse":
+        draft = { ...anchor, kind: "ellipse", radiusX: 0, radiusY: 0 };
+        break;
+      case "rect":
+        draft = { ...anchor, kind: "rect", width: 0, height: 0 };
+        break;
+    }
+    gesture.current = { kind: "draw", start: point, draft };
+    setPreview(draft);
+    return true;
   }
 
-  function onPointerMove(event: ReactPointerEvent<SVGSVGElement>) {
+  function moveGesture(point: Point, pixel: Point) {
     const active = gesture.current;
-    if (active === null) return;
-    const point = startPoint(event);
+    if (!editable || active === null) return;
+    active.draft = updateDraft(active, point, pixel, Boolean(live));
+    setPreview(active.draft);
+  }
+
+  function cancelGesture() {
+    gesture.current = null;
+    setPreview(null);
+  }
+
+  function finishGesture(point: Point, pixel: Point) {
+    const active = gesture.current;
+    cancelGesture();
+    if (!editable || active === null) return;
+    const shape = updateDraft(active, point, pixel, Boolean(live));
+    if (active.kind === "draw") {
+      if (live && (shape.kind === "rect" && (!shape.width || !shape.height) ||
+          shape.kind === "ellipse" && (!shape.radiusX || !shape.radiusY))) return;
+      if (hasVisibleMark(shape, pixel))
+        setAnnotation((current) => addShape(current, shape));
+      return;
+    }
+    if (
+      (Math.abs(point.x - active.start.x) < pixel.x &&
+        Math.abs(point.y - active.start.y) < pixel.y) ||
+      JSON.stringify(shape) === JSON.stringify(active.original)
+    ) return;
     setAnnotation((current) =>
       replaceShapes(
-        current,
-        current.shapes.map((shape) => {
-          if (shape.id !== active.id) return shape;
-          if (active.kind === "move")
-            return shapeOffset(
-              active.original,
-              point.x - active.start.x,
-              point.y - active.start.y,
-            );
-          if (active.kind === "freehand" && shape.kind === "freehand")
-            return { ...shape, points: [...shape.points, point] };
-          if (active.kind !== "draw") return shape;
-          if (shape.kind === "arrow")
-            return { ...shape, to: point };
-          if (shape.kind === "ellipse")
-            return {
-              ...shape,
-              x: Math.min(active.start.x, point.x),
-              y: Math.min(active.start.y, point.y),
-              radiusX: Math.abs(point.x - active.start.x) / 2,
-              radiusY: Math.abs(point.y - active.start.y) / 2,
-            };
-          if (shape.kind === "rect")
-            return {
-              ...shape,
-              x: Math.min(active.start.x, point.x),
-              y: Math.min(active.start.y, point.y),
-              width: Math.abs(point.x - active.start.x),
-              height: Math.abs(point.y - active.start.y),
-            };
-          return shape;
-        }),
+        checkpoint(current),
+        current.shapes.map((row) => row.id === shape.id ? shape : row),
       ),
     );
   }
 
-  function onPointerUp(event: ReactPointerEvent<SVGSVGElement>) {
-    const active = gesture.current;
-    gesture.current = null;
-    // A click without a drag must not leave a zero-size shape or a history
-    // entry behind: below one stage pixel the gesture is discarded whole.
-    if (active === null || active.kind !== "draw") return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const minX = 1 / (rect.width || 800);
-    const minY = 1 / (rect.height || 500);
-    setAnnotation((current) => {
-      const shape = current.shapes.find((row) => row.id === active.id);
-      if (shape === undefined) return current;
-      const tiny =
-        shape.kind === "rect"
-          ? shape.width < minX && shape.height < minY
-          : shape.kind === "ellipse"
-            ? shape.radiusX * 2 < minX && shape.radiusY * 2 < minY
-            : shape.kind === "arrow"
-              ? Math.abs(shape.to.x - shape.from.x) < minX &&
-                Math.abs(shape.to.y - shape.from.y) < minY
-              : false;
-      if (!tiny) return current;
-      const previous = current.past.at(-1);
-      if (previous === undefined) return current;
-      return {
-        ...current,
-        shapes: previous,
-        past: current.past.slice(0, -1),
-        selectedId: null,
-      };
-    });
+  function applyEdit(edit: (current: AnnotationState) => AnnotationState) {
+    if (!editable) return;
+    cancelGesture();
+    setAnnotation(edit);
   }
 
   const activeFrame = frame;
 
   function save() {
+    if (live) {
+      if (photoRatio && live.saveEnabled) {
+        cancelGesture();
+        live.onSave(annotation.shapes);
+      }
+      return;
+    }
     const at = new Date().toISOString();
     const author = session?.user.id ?? "demo";
     setVersions((current) => ({
@@ -385,17 +389,25 @@ export function AnnotationWorkspace({
   }
 
   function loadVersion(version: SavedAnnotationVersion) {
-    setAnnotation((current) =>
-      replaceShapes(checkpoint(current), version.shapes),
+    applyEdit((current) =>
+      replaceShapes(checkpoint(selectShape(current, null)), version.shapes),
     );
     setStatus("none");
   }
 
+  // The preview never changes saved layers or history. A completed gesture
+  // promotes it to one engine edit; cancel leaves both undo and redo intact.
+  const visibleShapes = preview === null
+    ? annotation.shapes
+    : annotation.shapes.some((shape) => shape.id === preview.id)
+      ? annotation.shapes.map((shape) => shape.id === preview.id ? preview : shape)
+      : [...annotation.shapes, preview];
+
   return (
     <Card title={t("annotation.title")}>
-      <SampleBanner label={t("app.demoTag")} title={t("annotation.title")}>
+      {!live && <SampleBanner label={t("app.demoTag")} title={t("annotation.title")}>
         <p>{t("annotation.sampleBody")}</p>
-      </SampleBanner>
+      </SampleBanner>}
 
       {hasAuthoredFrames ? (
         <div className="annotation-frame">
@@ -416,8 +428,8 @@ export function AnnotationWorkspace({
         </div>
       ) : (
         <p className="annotation-status">
-          {t("annotation.frame")}: {frame.name} ·{" "}
-          {t(`photos.category.${frame.category}`)}
+          {t("annotation.frame")}: {frame.name}
+          {!live && <> · {t(`photos.category.${frame.category}`)}</>}
         </p>
       )}
 
@@ -428,6 +440,7 @@ export function AnnotationWorkspace({
             size="sm"
             variant={annotation.tool === tool ? "cyan" : "secondary"}
             aria-pressed={annotation.tool === tool}
+            disabled={!editable}
             onClick={() => pickTool(tool)}
           >
             {t(`annotation.tool.${tool}`)}
@@ -438,22 +451,22 @@ export function AnnotationWorkspace({
       <div className="annotation-toolbar">
         <Button
           size="sm"
-          onClick={() => setAnnotation((current) => undo(current))}
-          disabled={!canUndo(annotation)}
+          onClick={() => applyEdit(undo)}
+          disabled={!editable || !canUndo(annotation)}
         >
           {t("action.undo")}
         </Button>
         <Button
           size="sm"
-          onClick={() => setAnnotation((current) => redo(current))}
-          disabled={!canRedo(annotation)}
+          onClick={() => applyEdit(redo)}
+          disabled={!editable || !canRedo(annotation)}
         >
           {t("action.redo")}
         </Button>
         <Button
           size="sm"
-          onClick={() => setAnnotation((current) => deleteSelected(current))}
-          disabled={annotation.selectedId === null}
+          onClick={() => applyEdit(deleteSelected)}
+          disabled={!editable || annotation.selectedId === null}
         >
           {t("annotation.delete")}
         </Button>
@@ -472,130 +485,53 @@ export function AnnotationWorkspace({
         <input
           id={`annotation-text-${patientId}`}
           value={textValue}
+          disabled={!editable}
+          maxLength={live ? MAX_VISIT_TEXT : undefined}
           onChange={(event) => setTextValue(event.target.value)}
         />
       </div>
 
-      <div className="annotation-stage">
+      <div className={live ? "annotation-stage annotation-stage--visit" : "annotation-stage"}>
         <div
           className="annotation-stage__inner"
           style={{
             transform: `scale(${zoom})`,
             transformOrigin: "center",
-          }}
+            ...(live && { "--annotation-photo-ratio": photoRatio ?? 1 }),
+          } as CSSProperties}
         >
-          <img src={frame.url} alt={frame.name} />
-          <svg
-            viewBox={`0 0 ${VIEW} ${VIEW}`}
-            preserveAspectRatio="none"
-            role="application"
-            aria-label={t("annotation.canvas")}
-            tabIndex={0}
-            onPointerDown={onPointerDown}
-            onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
-            onPointerCancel={onPointerUp}
-            onKeyDown={(event) => {
-              if (event.key === "Delete")
-                setAnnotation((current) => deleteSelected(current));
-            }}
-          >
-            {annotation.shapes.map((shape) => {
-              const selected = shape.id === annotation.selectedId;
-              const className = selected ? "annotation-shape is-selected" : "annotation-shape";
-              const common = {
-                "data-shape-id": shape.id,
-                className,
-                stroke: shape.stroke,
-                fill: "none",
-              } as const;
-              if (shape.kind === "rect")
-                return (
-                  <rect
-                    key={shape.id}
-                    {...common}
-                    strokeWidth={0.8}
-                    x={shape.x * VIEW}
-                    y={shape.y * VIEW}
-                    width={shape.width * VIEW}
-                    height={shape.height * VIEW}
-                  />
-                );
-              if (shape.kind === "ellipse")
-                return (
-                  <ellipse
-                    key={shape.id}
-                    {...common}
-                    strokeWidth={0.8}
-                    cx={(shape.x + shape.radiusX) * VIEW}
-                    cy={(shape.y + shape.radiusY) * VIEW}
-                    rx={shape.radiusX * VIEW}
-                    ry={shape.radiusY * VIEW}
-                  />
-                );
-              if (shape.kind === "arrow")
-                return (
-                  <line
-                    key={shape.id}
-                    {...common}
-                    strokeWidth={0.8}
-                    markerEnd="url(#annotation-arrowhead)"
-                    x1={shape.from.x * VIEW}
-                    y1={shape.from.y * VIEW}
-                    x2={shape.to.x * VIEW}
-                    y2={shape.to.y * VIEW}
-                  />
-                );
-              if (shape.kind === "freehand")
-                return (
-                  <polyline
-                    key={shape.id}
-                    {...common}
-                    strokeWidth={shape.strokeWidth}
-                    points={shape.points
-                      .map((point) => `${point.x * VIEW},${point.y * VIEW}`)
-                      .join(" ")}
-                  />
-                );
-              return (
-                <text
-                  key={shape.id}
-                  {...common}
-                  strokeWidth={0}
-                  fill={shape.stroke}
-                  fontSize={4}
-                  x={shape.x * VIEW}
-                  y={shape.y * VIEW}
-                >
-                  {shape.text}
-                </text>
-              );
-            })}
-            <defs>
-              <marker
-                id="annotation-arrowhead"
-                markerWidth="8"
-                markerHeight="8"
-                refX="6"
-                refY="3"
-                orient="auto"
-              >
-                <path d="M0,0 L0,6 L6,3 z" fill="currentColor" />
-              </marker>
-            </defs>
-          </svg>
+          <img src={frame.url} alt={frame.name} draggable={false}
+            onLoad={live ? ({ currentTarget: { naturalWidth, naturalHeight } }) =>
+              setPhotoRatio(naturalWidth && naturalHeight ? naturalWidth / naturalHeight : null) : undefined}
+            onError={live ? () => setPhotoRatio(null) : undefined} />
+          {(!live || photoRatio) && <KonvaAnnotationSurface
+            label={t("annotation.canvas")}
+            shapes={visibleShapes}
+            selectedId={annotation.selectedId}
+            selecting={annotation.tool === "select"}
+            zoom={zoom}
+            onStart={startGesture}
+            onMove={moveGesture}
+            onFinish={finishGesture}
+            onCancel={cancelGesture}
+            onDelete={() => applyEdit(deleteSelected)}
+          />}
         </div>
       </div>
+      {live && photoRatio === null && <p className="annotation-status" role="status">
+        {t("workspace.visitPhotos.imageUnavailable")}
+      </p>}
 
       <div className="annotation-save">
-        <Button variant="primary" size="sm" onClick={save}>
+        <Button variant="primary" size="sm" onClick={save} disabled={live && (!photoRatio || !live.saveEnabled)}>
           {t("action.saveVersion")}
         </Button>
         <p className="annotation-status" role="status">
-          {t("annotation.versions", { count: frameVersions.length })} ·{" "}
+          {!live && <>{t("annotation.versions", { count: frameVersions.length })} ·{" "}</>}
           {t("annotation.shapes", { count: annotation.shapes.length })}
         </p>
       </div>
+      {live?.feedback}
       {status === "textRequired" && (
         <p className="annotation-status" role="alert">
           {t("annotation.textRequired")}
@@ -617,6 +553,7 @@ export function AnnotationWorkspace({
           </p>
         ))}
         <ul>
+          {live?.version}
           {[...frameVersions].reverse().map((version) => (
             <li key={version.id} className="annotation-layer">
               <Badge tone={version.state === "pending" ? "warning" : "success"}>

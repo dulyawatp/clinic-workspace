@@ -179,6 +179,10 @@
 }
 .native-lab-preview[open] { display: grid; grid-template-rows: auto minmax(0, 1fr); }
 .native-lab-preview::backdrop { background: rgba(10, 27, 57, 0.64); }
+.visit-photo-drawing-body {
+  overflow: auto;
+  padding: clamp(8px, 2vw, 20px);
+}
 .native-lab-preview-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -221,7 +225,13 @@
 }
 .native-lab-upload { margin-top: 0.75rem; padding-top: 0.875rem; border-top: 1px solid var(--border); }
 .native-lab-upload input { max-width: 100%; }
-.native-lab-disclosure summary { min-height: 2.75rem; align-content: center; cursor: pointer; color: var(--primary); font-weight: 650; }
+:is(.native-lab-disclosure, .visit-photo-disclosure) summary { min-height: 2.75rem; align-content: center; cursor: pointer; color: var(--primary); font-weight: 650; }
+.visit-photo-capture { min-width: 0; }
+div.visit-photo-capture { margin-top: var(--pc-sp-3); padding-top: var(--pc-sp-3); border-top: var(--pc-hair); }
+.visit-photo-capture input:not([type="checkbox"]) { width: 100%; min-width: 0; max-width: 100%; }
+.visit-photo-capture dd { overflow-wrap: anywhere; }
+.visit-photo-attest { display: flex; align-items: center; gap: var(--pc-sp-2); min-height: 2.75rem; cursor: pointer; }
+.visit-photo-attest input { flex-shrink: 0; }
 .visit-linked-formatted { white-space: pre-wrap; overflow-wrap: anywhere; }
 .visit-linked-formatted :is(ul, ol) { padding-inline-start: 1.5rem; }
 .visit-linked-formatted-editor .ql-editor { min-height: 8.75rem; background: var(--surface); border: 1px solid var(--border); }

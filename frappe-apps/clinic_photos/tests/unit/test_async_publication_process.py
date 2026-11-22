@@ -15,6 +15,7 @@ child refuses before bytes. Timeout and exit codes never establish a saved outco
 """
 
 import contextlib
+import base64
 import inspect
 import io
 import json
@@ -462,6 +463,77 @@ def _all_permissions():
     }
 
 
+class VisitChildTests(unittest.TestCase):
+    def test_visit_mode_requires_explicit_gate_and_adopts_persisted_actor(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-child-key-001", visit_binding=binding,
+            image_bytes=base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGM4wcUFAAJ6AN1nJ0J9AAAAAElFTkSuQmCC"))
+        submitted = contracts.SubmittedOperation(
+            id=OPERATION_ID, site=SITE, actor=ACTOR, kind=request.kind,
+            request_key=request.request_key, payload_digest="a" * 64, request=request,
+        )
+        coordinator = types.SimpleNamespace(
+            child_process_publication=lambda **kw: contextlib.nullcontext(),
+            publish_visit_submission=mock.Mock(return_value=contracts.SaveOutcome("saved", OPERATION_ID)),
+        )
+        with fake_runtime(_target_docs()) as frappe, \
+             mock.patch.object(process, "_visit_gate_enabled", return_value=True, create=True), \
+             mock.patch.object(journal, "load_submission", return_value=submitted), \
+             mock.patch.dict(sys.modules, {"clinic_photos.publication.coordinator": coordinator}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(process.run_visit(OPERATION_ID, site=SITE), process.EXIT_COMPLETED)
+            self.assertEqual(frappe.set_user_calls, [ACTOR])
+            coordinator.publish_visit_submission.assert_called_once_with(submitted)
+            coordinator.publish_visit_submission.return_value = contracts.SaveOutcome("unknown", OPERATION_ID)
+            self.assertEqual(process.run_visit(OPERATION_ID, site=SITE), process.EXIT_UNAVAILABLE)
+            coordinator.publish_visit_submission.return_value = contracts.SaveOutcome("saved", "b" * 32)
+            self.assertEqual(process.run_visit(OPERATION_ID, site=SITE), process.EXIT_UNAVAILABLE)
+
+    def test_visit_invalid_site_refuses_before_bootstrap(self):
+        with fake_runtime(_target_docs()) as frappe, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(process.run_visit(OPERATION_ID, site="../other"), process.EXIT_REFUSED)
+            self.assertEqual(frappe.init_calls, [])
+
+    def test_visit_default_off_and_wrong_initialized_site_refuse(self):
+        self.assertFalse(process._visit_gate_enabled(SITE, {}))
+        self.assertFalse(process._visit_gate_enabled(SITE, {
+            "clinic_visit_photos_enabled": True, "clinic_visit_photos_site": "other.local",
+        }))
+        self.assertTrue(process._visit_gate_enabled(SITE, {
+            "clinic_visit_photos_enabled": True, "clinic_visit_photos_site": SITE,
+        }))
+        with fake_runtime(_target_docs(), conf={}) as frappe, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(process.run_visit(OPERATION_ID, site=SITE), process.EXIT_REFUSED)
+            self.assertEqual(frappe.set_user_calls, [])
+        with fake_runtime(_target_docs(), actual_site="other.local") as frappe, \
+             mock.patch.object(process, "_visit_gate_enabled", return_value=True), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(process.run_visit(OPERATION_ID, site=SITE), process.EXIT_REFUSED)
+            self.assertEqual(frappe.set_user_calls, [])
+
+    def test_visit_rejects_legacy_kind_and_cli_requires_explicit_mode(self):
+        request = contracts.SaveRequest(kind=contracts.ANNOTATION_APPEND,
+            request_key=REQUEST_KEY, draft=DRAFT, expected_version=0,
+            original=PHOTO, annotation=ANNOTATION)
+        submitted = contracts.SubmittedOperation(id=OPERATION_ID, site=SITE, actor=ACTOR,
+            kind=request.kind, request_key=request.request_key, payload_digest="a" * 64, request=request)
+        with fake_runtime(_target_docs()) as frappe, \
+             mock.patch.object(process, "_visit_gate_enabled", return_value=True), \
+             mock.patch.object(journal, "load_submission", return_value=submitted), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(process.run_visit(OPERATION_ID, site=SITE), process.EXIT_REFUSED)
+            self.assertEqual(frappe.set_user_calls, [])
+        with mock.patch.object(process, "run_visit", return_value=42) as run:
+            self.assertEqual(process.main(["--visit", "--site", SITE, "--operation-id", OPERATION_ID]), 42)
+            run.assert_called_once_with(OPERATION_ID, site=SITE)
+
+
 class ProcessEntryTests(unittest.TestCase):
     def run_child(self, frappe, operation_id=OPERATION_ID, site=SITE):
         output = io.StringIO()
@@ -772,6 +844,114 @@ class ProcessOutcomeTests(unittest.TestCase):
         self.assertEqual(frappe.destroy_calls, 1)
         self.assertEqual(frappe.db.commit_calls, 0)
         self.assertEqual(frappe.db.rollback_calls, 0)
+
+
+class VisitLauncherTests(unittest.TestCase):
+    def test_visit_launcher_rejects_invalid_foreign_advanced_and_dirty(self):
+        from dataclasses import replace
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-launch-key-02", visit_binding=binding,
+            image_bytes=base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGM4wcUFAAJ6AN1nJ0J9AAAAAElFTkSuQmCC"))
+        submitted = contracts.SubmittedOperation(id=OPERATION_ID, site=SITE, actor=ACTOR,
+            kind=request.kind, request_key=request.request_key, payload_digest="a" * 64, request=request)
+        annotation = contracts.SaveRequest(kind=contracts.ANNOTATION_APPEND,
+            request_key=REQUEST_KEY, draft=DRAFT, expected_version=0,
+            original=PHOTO, annotation=ANNOTATION)
+        legacy = contracts.SubmittedOperation(id=OPERATION_ID, site=SITE, actor=ACTOR,
+            kind=annotation.kind, request_key=annotation.request_key, payload_digest="a" * 64,
+            request=annotation)
+        conf = {"clinic_visit_photos_enabled": True, "clinic_visit_photos_site": SITE}
+        with fake_runtime(_target_docs(), conf=conf) as frappe, \
+             mock.patch.object(journal, "load_submission") as load, \
+             mock.patch.object(launcher, "_execute_child") as child:
+            frappe.local.site = SITE
+            launcher.launch_visit_submission("../invalid")
+            load.assert_not_called()
+            for wrong in (legacy, replace(submitted, site="other.local"),
+                          replace(submitted, id="b" * 32)):
+                load.return_value = wrong
+                launcher.launch_visit_submission(OPERATION_ID)
+            load.side_effect = journal.JournalStateError("advanced")
+            launcher.launch_visit_submission(OPERATION_ID)
+            load.side_effect = None
+            load.reset_mock()
+            frappe.db.transaction_writes = 1
+            launcher.launch_visit_submission(OPERATION_ID)
+            load.assert_not_called()
+            child.assert_not_called()
+
+    def test_visit_launcher_child_failure_is_not_retried(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-launch-key-03", visit_binding=binding,
+            image_bytes=base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGM4wcUFAAJ6AN1nJ0J9AAAAAElFTkSuQmCC"))
+        submitted = contracts.SubmittedOperation(id=OPERATION_ID, site=SITE, actor=ACTOR,
+            kind=request.kind, request_key=request.request_key, payload_digest="a" * 64, request=request)
+        conf = {"clinic_visit_photos_enabled": True, "clinic_visit_photos_site": SITE}
+        with fake_runtime(_target_docs(), conf=conf) as frappe, \
+             mock.patch.object(journal, "load_submission", return_value=submitted) as load, \
+             mock.patch.object(launcher, "_execute_child", side_effect=TimeoutError) as child:
+            frappe.local.site = SITE
+            self.assertIsNone(launcher.launch_visit_submission(OPERATION_ID))
+            load.assert_called_once_with(OPERATION_ID)
+            child.assert_called_once()
+
+    def test_visit_enqueue_and_launch_fixed_child_once(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-launch-key-01", visit_binding=binding,
+            image_bytes=base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGM4wcUFAAJ6AN1nJ0J9AAAAAElFTkSuQmCC"))
+        submitted = contracts.SubmittedOperation(id=OPERATION_ID, site=SITE, actor=ACTOR,
+            kind=request.kind, request_key=request.request_key, payload_digest="a" * 64, request=request)
+        conf = {"clinic_visit_photos_enabled": True, "clinic_visit_photos_site": SITE}
+        with fake_runtime(_target_docs(), conf=conf) as frappe, \
+             mock.patch.object(journal, "load_submission", return_value=submitted), \
+             mock.patch.object(launcher, "_execute_child", return_value=(0, False, b"", b"")) as child:
+            frappe.local.site = SITE
+            launcher.enqueue_visit_submission(OPERATION_ID)
+            self.assertEqual(frappe.enqueue_calls[0]["method"],
+                             "clinic_photos.publication.launcher.launch_visit_submission")
+            self.assertEqual(frappe.enqueue_calls[0]["kwargs"], {"operation_id": OPERATION_ID})
+            self.assertEqual(frappe.enqueue_calls[0]["queue"], launcher.QUEUE)
+            self.assertEqual(frappe.enqueue_calls[0]["timeout"], launcher.LAUNCHER_JOB_TIMEOUT_SECONDS)
+            self.assertIsNone(launcher.launch_visit_submission(OPERATION_ID))
+            child.assert_called_once_with([
+                launcher.PYTHON_EXECUTABLE, "-m", launcher.PROCESS_MODULE, "--visit",
+                "--site", SITE, "--operation-id", OPERATION_ID,
+            ])
+
+    def test_visit_launcher_default_off(self):
+        with fake_runtime(_target_docs(), conf={}) as frappe, \
+             mock.patch.object(launcher, "_execute_child") as child:
+            frappe.local.site = SITE
+            with self.assertRaises(launcher.LauncherUnavailable):
+                launcher.enqueue_visit_submission(OPERATION_ID)
+            self.assertIsNone(launcher.launch_visit_submission(OPERATION_ID))
+            child.assert_not_called()
+        with fake_runtime(_target_docs(), conf={
+            "clinic_visit_photos_enabled": True, "clinic_visit_photos_site": "other.local",
+        }) as frappe, mock.patch.object(launcher, "_execute_child") as child:
+            frappe.local.site = SITE
+            with self.assertRaises(launcher.LauncherUnavailable):
+                launcher.enqueue_visit_submission(OPERATION_ID)
+            launcher.launch_visit_submission(OPERATION_ID)
+            child.assert_not_called()
 
 
 class LauncherAdapterTests(unittest.TestCase):

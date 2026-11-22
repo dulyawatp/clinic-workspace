@@ -43,7 +43,9 @@ can commit the coherent outcome atomically.
 """
 
 import hashlib
-from dataclasses import dataclass
+import json
+from contextlib import contextmanager, nullcontext
+from dataclasses import asdict, dataclass
 
 from clinic_photos.access import frappe_context, storage
 from clinic_photos.access.policy import NON_CLINICAL_SESSION_IDENTITIES
@@ -53,11 +55,14 @@ from clinic_photos.publication.contracts import (
     DURABLE_STATES,
     SUBMITTED_STATE,
     SYNTHETIC_ORIGINAL_CREATE,
+    VISIT_ORIGINAL_CREATE,
     PreparedOperation,
     PublicationValidationError,
     PublishedOutcome,
     SaveRequest,
     SubmittedOperation,
+    VisitBinding,
+    visit_target_identity,
 )
 
 OPERATION_DOCTYPE = "Clinic Photo Save Operation"
@@ -69,6 +74,7 @@ QUARANTINED_STATE = "QUARANTINED"
 DOMAIN_DOCTYPES = {
     ANNOTATION_APPEND: "Clinic Photo Annotation Version",
     SYNTHETIC_ORIGINAL_CREATE: "Clinic Photo",
+    VISIT_ORIGINAL_CREATE: "Clinic Photo",
 }
 
 # Bounded identity registry of the exact ``PreparedOperation`` values this process
@@ -98,6 +104,7 @@ PREPARED_GENERATION = 1
 _RESERVATION_BASENAMES = {
     ANNOTATION_APPEND: "clinic-annotation-",
     SYNTHETIC_ORIGINAL_CREATE: "clinic-photo-",
+    VISIT_ORIGINAL_CREATE: "clinic-visit-photo-",
 }
 # The metadata-only staged reference persisted for an accepted image. The row names
 # the object in the bound site's private staging area; it never carries the bytes.
@@ -222,9 +229,15 @@ def payload_digest(request: SaveRequest) -> str:
                 request.image_bytes,
             )
         )
+    elif request.kind == VISIT_ORIGINAL_CREATE:
+        parts.extend((_utf8(_visit_json(request.visit_binding)), request.image_bytes))
     else:
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
     return _digest(_PAYLOAD_DOMAIN, parts)
+
+
+def _visit_json(binding: VisitBinding) -> str:
+    return json.dumps(asdict(binding), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def _clean_text(value) -> bool:
@@ -256,6 +269,57 @@ def require_service_authorization(actor: str, site: str) -> None:
         or actor in NON_CLINICAL_SESSION_IDENTITIES
     ):
         raise JournalAuthorityDenied(SAFE_JOURNAL_DENIAL)
+
+
+def require_visit_authorization(request: SaveRequest, actor: str, site: str) -> None:
+    """Recheck exact native visit authority, without broadening legacy roles."""
+    import frappe
+    from clinic_photos.visit import capture
+
+    if (not isinstance(request, SaveRequest) or request.kind != VISIT_ORIGINAL_CREATE or
+        type(request.visit_binding) is not VisitBinding or not _clean_text(actor) or
+        not _clean_text(site) or actor in NON_CLINICAL_SESSION_IDENTITIES or
+        (frappe.session.user or "") != actor or
+        (getattr(frappe.local, "site", "") or "") != site):
+        raise JournalAuthorityDenied(SAFE_JOURNAL_DENIAL)
+    try:
+        capture.check_visit_authority(request.visit_binding)
+    except Exception:
+        raise JournalAuthorityDenied(SAFE_JOURNAL_DENIAL) from None
+
+
+@contextmanager
+def _visit_submission_insertion(doc, request, actor, site, values):
+    import frappe
+
+    if getattr(frappe.local, "_clinic_visit_submission_insert", None) is not None:
+        raise JournalAuthorityDenied(SAFE_JOURNAL_DENIAL)
+    expected = _document_values(
+        request, actor=actor, site=site,
+        identity=identity_digest(site, actor, request.kind, request.request_key),
+        payload=payload_digest(request), staged=None,
+    )
+    if any(values.get(field) != value for field, value in expected.items()
+           if field not in _STAGED_FIELDS):
+        raise JournalAuthorityDenied(SAFE_JOURNAL_DENIAL)
+    frappe.local._clinic_visit_submission_insert = (doc, request, actor, site, dict(values))
+    try:
+        yield
+    finally:
+        frappe.local._clinic_visit_submission_insert = None
+
+
+def require_visit_submission_insertion(doc):
+    """Controller check bound to the repository's exact native document object."""
+    import frappe
+
+    scope = getattr(frappe.local, "_clinic_visit_submission_insert", None)
+    if not scope or scope[0] is not doc:
+        raise JournalAuthorityDenied(SAFE_JOURNAL_DENIAL)
+    _, request, actor, site, values = scope
+    if any(doc.get(field) != value for field, value in values.items() if field != "doctype"):
+        raise JournalAuthorityDenied(SAFE_JOURNAL_DENIAL)
+    require_visit_authorization(request, actor, site)
 
 
 def _row_get(row, fieldname):
@@ -292,6 +356,7 @@ def _request_from_row(row, kind: str, request_key: str) -> SaveRequest:
         if (
             _row_present(row, "image_base64")
             or _row_present(row, "synthetic_patient")
+            or _row_present(row, "visit_binding_json")
             or any(_row_present(row, fieldname) for fieldname in _STAGED_TEXT_FIELDS)
             or not _row_absent_int(row, "staged_size")
         ):
@@ -312,7 +377,7 @@ def _request_from_row(row, kind: str, request_key: str) -> SaveRequest:
             annotation=_row_text(row, "annotation_json"),
         )
 
-    if kind == SYNTHETIC_ORIGINAL_CREATE:
+    if kind in (SYNTHETIC_ORIGINAL_CREATE, VISIT_ORIGINAL_CREATE):
         if _row_present(row, "image_base64"):
             # A legacy row that stored the image bytes in the database. It is refused,
             # never read back, migrated or republished by this module.
@@ -324,6 +389,27 @@ def _request_from_row(row, kind: str, request_key: str) -> SaveRequest:
         ):
             raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
         if _row_get(row, "expected_version") not in (None, 0):
+            raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
+        if kind == VISIT_ORIGINAL_CREATE:
+            if _row_present(row, "synthetic_patient") or not _row_absent_int(row, "expected_version"):
+                raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
+            encoded = _row_text(row, "visit_binding_json")
+            if len(encoded) > 20000:
+                raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
+            try:
+                value = json.loads(encoded)
+                if not isinstance(value, dict):
+                    raise ValueError
+                binding = VisitBinding(**value)
+                if _visit_json(binding) != encoded:
+                    raise ValueError
+            except (TypeError, ValueError, RecursionError):
+                raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY) from None
+            return SaveRequest(
+                kind=kind, request_key=request_key, visit_binding=binding,
+                image_bytes=_staged_payload(_staged_from_row(row)),
+            )
+        if _row_present(row, "visit_binding_json"):
             raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
         return SaveRequest(
             kind=kind,
@@ -445,6 +531,14 @@ def _submitted_operation(verified: _VerifiedOperation) -> SubmittedOperation:
     ):
         # Prepared byte/generation evidence on a SUBMITTED row is inconsistent.
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
+    if verified.kind == VISIT_ORIGINAL_CREATE and (
+        any(_row_present(verified.row, field) for field in (
+            "published_file", "published_domain_doctype", "published_domain_name",
+            "creation_identity",
+        ))
+        or not _row_absent_int(verified.row, "published_version")
+    ):
+        raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
     try:
         return SubmittedOperation(
             id=verified.id,
@@ -503,6 +597,7 @@ def _document_values(
         "original": request.original,
         "synthetic_patient": request.synthetic_patient,
         "annotation_json": request.annotation,
+        "visit_binding_json": _visit_json(request.visit_binding) if request.visit_binding else None,
         "reservation_key": None,
     }
     values.update(_staged_values(staged))
@@ -525,7 +620,7 @@ def _stage_accepted_image(request: SaveRequest):
     """Stage the accepted image once, durably, before any metadata row exists."""
     if request.kind == ANNOTATION_APPEND:
         return None
-    if request.kind != SYNTHETIC_ORIGINAL_CREATE:
+    if request.kind not in (SYNTHETIC_ORIGINAL_CREATE, VISIT_ORIGINAL_CREATE):
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
     try:
         return staging.stage_image(request.image_bytes)
@@ -534,7 +629,7 @@ def _stage_accepted_image(request: SaveRequest):
 
 
 def stage_submission(
-    request: SaveRequest, *, actor: str, site: str
+    request: SaveRequest, *, actor: str, site: str, on_created=None
 ) -> SubmittedOperation:
     """Persist one SUBMITTED row in the caller's transaction.
 
@@ -547,7 +642,14 @@ def stage_submission(
     """
     if not isinstance(request, SaveRequest):
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
-    require_service_authorization(actor, site)
+    if on_created is not None and (
+        request.kind != VISIT_ORIGINAL_CREATE or not callable(on_created)
+    ):
+        raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
+    if request.kind == VISIT_ORIGINAL_CREATE:
+        require_visit_authorization(request, actor, site)
+    else:
+        require_service_authorization(actor, site)
 
     identity = identity_digest(site, actor, request.kind, request.request_key)
     payload = payload_digest(request)
@@ -563,17 +665,14 @@ def stage_submission(
     import frappe
 
     try:
-        operation = frappe.get_doc(
-            _document_values(
-                request,
-                actor=actor,
-                site=site,
-                identity=identity,
-                payload=payload,
-                staged=staged,
-            )
+        values = _document_values(
+            request, actor=actor, site=site, identity=identity, payload=payload, staged=staged,
         )
-        operation.insert(ignore_permissions=True)
+        operation = frappe.get_doc(values)
+        scope = (_visit_submission_insertion(operation, request, actor, site, values)
+                 if request.kind == VISIT_ORIGINAL_CREATE else nullcontext())
+        with scope:
+            operation.insert(ignore_permissions=True)
     except (frappe.UniqueValidationError, frappe.DuplicateEntryError):
         # The unique identity index is the arbiter. A locking recovery read sees the
         # committed winner even under REPEATABLE READ; never overwrite or blindly retry.
@@ -584,7 +683,10 @@ def stage_submission(
             raise JournalConflict(SAFE_JOURNAL_CONFLICT) from None
         return _resolve_existing(existing, payload)
 
-    return _submission_from_row(operation)
+    submitted = _submission_from_row(operation)
+    if on_created is not None:
+        on_created(submitted)
+    return submitted
 
 
 def load_submission(
@@ -718,7 +820,7 @@ def _prepared_evidence(request: SaveRequest) -> tuple[str, int]:
     """Exact expected byte evidence of the immutable request content."""
     if request.kind == ANNOTATION_APPEND:
         data = _utf8(request.annotation)
-    elif request.kind == SYNTHETIC_ORIGINAL_CREATE:
+    elif request.kind in (SYNTHETIC_ORIGINAL_CREATE, VISIT_ORIGINAL_CREATE):
         data = request.image_bytes
         if not isinstance(data, bytes) or not data:
             raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
@@ -765,6 +867,8 @@ def target_identity(request: SaveRequest) -> str:
         return "draft:" + request.draft
     if request.kind == SYNTHETIC_ORIGINAL_CREATE:
         return "patient-creation:" + request.synthetic_patient
+    if request.kind == VISIT_ORIGINAL_CREATE:
+        return visit_target_identity(request.visit_binding)
     raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
 
 
@@ -802,6 +906,8 @@ def _published_outcome(row) -> PublishedOutcome:
     if domain_doctype != DOMAIN_DOCTYPES[reservation.kind]:
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
     domain_name = _row_text(row, "published_domain_name")
+    if reservation.kind == VISIT_ORIGINAL_CREATE:
+        _require_published_visit_slot(reservation, domain_name)
 
     if reservation.kind == ANNOTATION_APPEND:
         version = _row_get(row, "published_version")
@@ -830,6 +936,26 @@ def _published_outcome(row) -> PublishedOutcome:
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY) from None
 
 
+def _require_published_visit_slot(reservation, photo_name):
+    """Read-only verification of exact immutable slot metadata for this outcome."""
+    import frappe
+    from clinic_photos.visit.capture import slot_key
+
+    binding = reservation.visit_binding
+    key = slot_key(binding.appointment, binding.slot)
+    fields = ("name", "slot_key", "appointment", "patient", "slot",
+              "appointment_creation", "patient_creation", "body_area", "viewpoint",
+              "operation", "photo")
+    row = frappe.db.get_value(
+        "Clinic Visit Photo Slot", {"slot_key": key}, list(fields), as_dict=True,
+    )
+    expected = (key, key, binding.appointment, binding.patient, binding.slot,
+                binding.appointment_creation, binding.patient_creation,
+                binding.body_area, binding.viewpoint, reservation.id, photo_name)
+    if row is None or tuple(row.get(field) for field in fields) != expected:
+        raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
+
+
 def _register_issued_preparation(prepared: PreparedOperation) -> None:
     """Register this exact issued value; ``id()`` reuse cannot alias it."""
     _ISSUED_PREPARATIONS[id(prepared)] = prepared
@@ -855,6 +981,17 @@ def _reservation_operation(row, expected_state: str) -> PreparedOperation:
         isinstance(generation, bool)
         or not isinstance(generation, int)
         or generation < 1
+    ):
+        raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
+    if verified.kind == VISIT_ORIGINAL_CREATE and (
+        generation != PREPARED_GENERATION or (
+            expected_state == PREPARED_STATE and (
+                any(_row_present(row, field) for field in (
+                    "published_file", "published_domain_doctype", "published_domain_name",
+                    "creation_identity",
+                )) or not _row_absent_int(row, "published_version")
+            )
+        )
     ):
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
     size = _row_get(row, "expected_size")
@@ -892,6 +1029,7 @@ def _reservation_operation(row, expected_state: str) -> PreparedOperation:
             expected_sha256=sha256,
             expected_size=size,
             state=verified.state,
+            visit_binding=verified.request.visit_binding,
         )
     except PublicationValidationError:
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY) from None
@@ -945,7 +1083,8 @@ def prepare(submission: SubmittedOperation) -> PreparedOperation:
         owner.poison("submission_binding_mismatch")
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
 
-    require_service_authorization(submission.actor, submission.site)
+    if submission.kind != VISIT_ORIGINAL_CREATE:
+        require_service_authorization(submission.actor, submission.site)
 
     row = frappe_context.get_save_operation(submission.id, for_update=True)
     if row is None:
@@ -957,11 +1096,15 @@ def prepare(submission: SubmittedOperation) -> PreparedOperation:
             operation_id=verified.id,
             state=verified.state,
         )
+    if verified.kind == VISIT_ORIGINAL_CREATE:
+        _submitted_operation(verified)
     if (
         verified.payload_digest != submission.payload_digest
         or verified.request != submission.request
     ):
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
+    if submission.kind == VISIT_ORIGINAL_CREATE:
+        require_visit_authorization(verified.request, submission.actor, submission.site)
     if verified.reservation_key is not None or not _row_absent_int(
         row, "generation"
     ):
@@ -1080,6 +1223,8 @@ def publish(
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
     if linkage.doctype != DOMAIN_DOCTYPES[operation.kind]:
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
+    if operation.kind == VISIT_ORIGINAL_CREATE:
+        _require_published_visit_slot(operation, linkage.name)
     if operation.kind == ANNOTATION_APPEND:
         if version != (operation.expected_version or 0) + 1:
             raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
@@ -1138,6 +1283,9 @@ def abort(submission: SubmittedOperation) -> None:
             operation_id=verified.id,
             state=verified.state,
         )
+    if (verified.kind == VISIT_ORIGINAL_CREATE and
+        _submitted_operation(verified) != submission):
+        raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
     if verified.payload_digest != submission.payload_digest:
         raise JournalIntegrityError(SAFE_JOURNAL_INTEGRITY)
     if verified.reservation_key is not None or not _row_absent_int(row, "generation"):

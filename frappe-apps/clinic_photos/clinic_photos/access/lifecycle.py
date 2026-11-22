@@ -72,6 +72,7 @@ class PublicationContext:
     storage_key: str
     synthetic_patient: str | None = None
     operation_id: str | None = None
+    visit_operation: bool = False
 
     def __post_init__(self):
         if not isinstance(self.actor, str) or not self.actor.strip():
@@ -91,14 +92,18 @@ class PublicationContext:
             raise PublicationContextError(
                 "publication context requires a patient reference"
             )
-        if bool(draft) == bool(synthetic):
+        if type(self.visit_operation) is not bool or sum(
+            (bool(draft), bool(synthetic), self.visit_operation)
+        ) != 1:
             raise PublicationContextError(
                 "publication context requires exactly one target binding"
             )
+        if self.visit_operation and self.operation != "pending_insert":
+            raise PublicationContextError("visit context allows first insertion only")
         object.__setattr__(self, "draft", draft)
 
         operation_id = self.operation_id
-        if synthetic:
+        if synthetic or self.visit_operation:
             if not isinstance(operation_id, str) or not operation_id.strip():
                 raise PublicationContextError(
                     "synthetic publication context requires an operation identity"

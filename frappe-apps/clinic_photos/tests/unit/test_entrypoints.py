@@ -373,6 +373,13 @@ class AdapterTestCase(unittest.TestCase):
         self.context = fake_frappe(docs=protected_docs(), user=AUTHOR)
         self.fake = self.context.__enter__()
         self.addCleanup(self.context.__exit__, None, None, None)
+        original_sql = self.fake.db.sql
+        def sql(query, values=(), **kwargs):
+            if "LOCATE(CHAR(37), `file_url`)" in query:
+                return [dict(row) for row in self.fake.db.docs.get("File", {}).values()
+                        if "%" in (row.get("file_url") or "")]
+            return original_sql(query, values, **kwargs)
+        self.fake.db.sql = sql
 
     def marked(self):
         return bool(
@@ -383,6 +390,30 @@ class AdapterTestCase(unittest.TestCase):
 
 
 class BankImportRawReaderGuardTests(AdapterTestCase):
+    def test_attachment_only_encoded_stored_url_denies_canonical_direct_path(self):
+        self.fake.db.add("Clinic Photo Annotation Version", "V-MANAGED",
+                         draft="clinic-visit-annotation-draft-123")
+        self.fake.db.add("File", "ENCODED-MANAGED", file_url="/private/files/%64irect.png",
+                         file_name="different.png", attached_to_doctype="Clinic Photo Annotation Version",
+                         attached_to_name="V-MANAGED")
+        self.assert_rejected_before_raw_reader("/private/files/direct.png")
+
+    def test_attachment_only_managed_direct_path_denied(self):
+        self.fake.db.add("Clinic Photo Annotation Version", "V-MANAGED",
+                         draft="clinic-visit-annotation-draft-123")
+        self.fake.db.add("File", "ATTACHED-MANAGED", file_url="/private/files/direct.png",
+                         file_name="direct.png", attached_to_doctype="Clinic Photo Annotation Version",
+                         attached_to_name="V-MANAGED")
+        self.assert_rejected_before_raw_reader("/private/files/direct.png")
+
+    def test_attachment_only_managed_input_denied_before_raw_reader(self):
+        self.fake.db.add("Clinic Photo Annotation Version", "V-MANAGED",
+                         draft="clinic-visit-annotation-draft-123")
+        self.fake.db.add("File", "ATTACHED-MANAGED", file_url="/private/files/ordinary.png",
+                         file_name="ordinary.png", attached_to_doctype="Clinic Photo Annotation Version",
+                         attached_to_name="V-MANAGED")
+        self.assert_rejected_before_raw_reader("ATTACHED-MANAGED")
+
     PROTECTED_INPUTS = (
         ("registered original key", ORIGINAL_KEY),
         ("registered annotation key", ANNOTATION_KEY),
@@ -688,6 +719,15 @@ class NativeZipPrefilterMarkerTests(AdapterTestCase):
         self.assertEqual(response.headers["Pragma"], "no-cache")
         self.assertEqual(response.headers["Expires"], "0")
 
+    def test_attachment_only_managed_entry_marked_before_prefilter(self):
+        self.fake.db.add("Clinic Photo Annotation Version", "V-MANAGED",
+                         draft="clinic-visit-annotation-draft-123")
+        self.fake.db.add("File", "ATTACHED-MANAGED", file_url="/private/files/ordinary.png",
+                         file_name="ordinary.png", attached_to_doctype="Clinic Photo Annotation Version",
+                         attached_to_name="V-MANAGED")
+        self.entrypoints.mark_protected_zip_entries(["ATTACHED-MANAGED"])
+        self.assertTrue(self.marked())
+
     def test_denied_only_protected_entry_is_marked_before_native_skip(self):
         probe = NativeZipProbe(self.fake)
         payload = json.dumps([FILE_ORIGINAL])
@@ -865,6 +905,8 @@ class HookRegistrationTests(unittest.TestCase):
             {
                 RAW_READER_PATH: WRAPPER_PATH,
                 NATIVE_ZIP_PATH: ZIP_WRAPPER_PATH,
+                "healthcare.healthcare.doctype.patient_appointment.patient_appointment."
+                "check_in_appointment": "clinic_photos.visit.checkin.check_in_appointment",
             },
         )
         self.assertEqual(
@@ -875,7 +917,9 @@ class HookRegistrationTests(unittest.TestCase):
             self.hooks.before_request,
             ["clinic_photos.access.entrypoints.mark_direct_private_request"],
         )
-        self.assertFalse(getattr(self.hooks, "doc_events", None))
+        self.assertEqual(self.hooks.doc_events, {
+            "DocShare": {"validate": "clinic_photos.access.share.validate_docshare"},
+        })
 
     def test_module_import_without_frappe_is_framework_free(self):
         previous = sys.modules.pop("frappe", None)

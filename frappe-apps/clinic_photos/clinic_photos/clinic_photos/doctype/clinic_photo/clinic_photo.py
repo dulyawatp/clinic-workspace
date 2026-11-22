@@ -2,9 +2,11 @@ import frappe
 from frappe.model.document import Document
 
 from clinic_photos.access.frappe_context import (
+    current_publication,
     require_original_delete,
     require_original_registration,
     require_original_update,
+    require_visit_photo_insertion,
 )
 
 
@@ -18,6 +20,9 @@ class ClinicPhoto(Document):
     """
 
     def before_insert(self):
+        context = current_publication()
+        if context is not None and getattr(context, "visit_operation", False):
+            require_visit_photo_insertion(self)
         # Pass the stored field untouched: stripping here would validate a different
         # value than the one that ends up persisted.
         storage_key = self.get("storage_key")

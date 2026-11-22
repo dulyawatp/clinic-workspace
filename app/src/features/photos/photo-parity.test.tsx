@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
@@ -6,11 +6,16 @@ import { ROUTES } from "../../app/routes";
 import { server } from "../../test/msw/server";
 import { renderWithFixtures } from "../../test/render";
 import { clearNativeCsrfToken } from "../../transport/native/session";
+import { draw, expectCount, getSurface, mockKonvaLayout } from "./annotate/konva-test-support";
 import { PhotoComparePage, PhotoGalleryPage } from "./PhotoPages";
+
+vi.mock("react-konva", () => import("./annotate/konva-test-support"));
 
 const PATH = "/clinic/patients/PAT-1/photos";
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   clearNativeCsrfToken();
 });
@@ -111,6 +116,7 @@ it("edits body-area tags locally and never writes them to a server", async () =>
 });
 
 it("keeps the fixture annotation workspace network-free in native mode", async () => {
+  mockKonvaLayout();
   vi.stubEnv("VITE_CLINIC_NATIVE", "1");
   const network = postSpy();
   renderWithFixtures(
@@ -132,6 +138,7 @@ it("keeps the fixture annotation workspace network-free in native mode", async (
 });
 
 it("annotates the compared originals in place, with no extra selector", async () => {
+  mockKonvaLayout();
   const user = userEvent.setup();
   const network = postSpy();
   renderWithFixtures(
@@ -141,21 +148,15 @@ it("annotates the compared originals in place, with no extra selector", async ()
     { role: "DOC", path: ROUTES.photoCompare("PAT-1") },
   );
   await screen.findByTestId("compare-pair");
-  const canvas = await screen.findByLabelText("พื้นที่วาดกำกับ");
+  const surface = await getSurface();
   // The proxy compare already owns the before/after selectors; the annotation
   // workspace draws on the displayed original instead of adding a third.
   expect(screen.getAllByRole("combobox")).toHaveLength(2);
-  expect(canvas.querySelectorAll("[data-shape-id]")).toHaveLength(0);
+  expectCount(0);
 
   await user.click(screen.getByRole("button", { name: "สี่เหลี่ยม" }));
-  fireEvent.pointerDown(canvas, { clientX: 40, clientY: 40 });
-  fireEvent.pointerMove(canvas, { clientX: 160, clientY: 120 });
-  fireEvent.pointerUp(canvas, { clientX: 160, clientY: 120 });
-  expect(
-    screen
-      .getByLabelText("พื้นที่วาดกำกับ")
-      .querySelectorAll("[data-shape-id]"),
-  ).toHaveLength(1);
+  draw(surface, [40, 40], [160, 120]);
+  expectCount(1);
 
   await user.click(
     screen.getByRole("button", { name: "บันทึกเวอร์ชันคำอธิบาย" }),

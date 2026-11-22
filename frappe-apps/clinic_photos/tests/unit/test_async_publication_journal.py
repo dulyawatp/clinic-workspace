@@ -28,6 +28,7 @@ import types
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from clinic_photos.publication import contracts, journal, validation
 
@@ -263,7 +264,11 @@ def fake_frappe(**kwargs):
     previous = sys.modules.get("frappe")
     sys.modules["frappe"] = module
     try:
-        yield module
+        # Repository-shape tests do not model Appointment/Encounter/consent rows.
+        # Role and visit-guard cases override this seam explicitly below.
+        from clinic_photos.visit import capture
+        with patch.object(capture, "check_visit_authority"):
+            yield module
     finally:
         if previous is None:
             sys.modules.pop("frappe", None)
@@ -296,6 +301,327 @@ def seed_hidden_winner(fake, request, *, state="SUBMITTED", reservation_key=None
 
 
 class SubmittedDurabilityTests(unittest.TestCase):
+    def test_visit_new_submission_callback_once_replay_never_notifies(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-notify-key-01", visit_binding=binding, image_bytes=PNG_1X1_BYTES)
+        with fake_frappe():
+            created = []
+            first = journal.stage_submission(request, actor=ACTOR, site=SITE, on_created=created.append)
+            second = journal.stage_submission(request, actor=ACTOR, site=SITE, on_created=created.append)
+            self.assertEqual(first, second)
+            self.assertEqual(created, [first])
+
+    def test_visit_callback_setup_failure_escapes_after_insert(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-notify-key-02", visit_binding=binding, image_bytes=PNG_1X1_BYTES)
+        with fake_frappe() as fake:
+            def fail(_operation):
+                raise RuntimeError("callback registration failed")
+            with self.assertRaisesRegex(RuntimeError, "callback registration failed"):
+                journal.stage_submission(request, actor=ACTOR, site=SITE, on_created=fail)
+            self.assertEqual(len(operation_rows(fake)), 1)  # fake has no rollback
+
+    def test_visit_admin_before_only_and_legacy_roles_remain_unchanged(self):
+        from dataclasses import replace
+        from clinic_photos.visit import actor
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-role-key-0001", visit_binding=binding, image_bytes=PNG_1X1_BYTES)
+        with fake_frappe(roles=("Healthcare Administrator",)) as fake:
+            from clinic_photos.visit import capture
+            with patch.object(fake.db, "sql", return_value=[("Healthcare Administrator",)], create=True), \
+                 patch.object(capture, "check_visit_authority",
+                              side_effect=lambda b: actor.require_visit_actor(doctor=b.slot == "After")):
+                journal.require_visit_authorization(request, ACTOR, SITE)
+                after = replace(request, visit_binding=replace(
+                    binding, slot="After", encounter="ENC", encounter_creation="ec"))
+                with self.assertRaises(journal.JournalAuthorityDenied):
+                    journal.require_visit_authorization(after, ACTOR, SITE)
+                with self.assertRaises(journal.JournalAuthorityDenied):
+                    journal.require_service_authorization(ACTOR, SITE)
+
+    def test_visit_controller_scope_is_exact_document_and_fields(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-scope-key-001", visit_binding=binding, image_bytes=PNG_1X1_BYTES)
+        with fake_frappe() as fake:
+            values = journal._document_values(request, actor=ACTOR, site=SITE,
+                identity=journal.identity_digest(SITE, ACTOR, request.kind, request.request_key),
+                payload=journal.payload_digest(request), staged=None)
+            doc = FakeOperationDocument(values, fake.db)
+            with self.assertRaises(journal.JournalAuthorityDenied):
+                journal.require_visit_submission_insertion(doc)
+            with journal._visit_submission_insertion(doc, request, ACTOR, SITE, values):
+                journal.require_visit_submission_insertion(doc)
+                with self.assertRaises(journal.JournalAuthorityDenied):
+                    journal.require_visit_submission_insertion(FakeOperationDocument(values, fake.db))
+                doc["visit_binding_json"] = "tampered"
+                with self.assertRaises(journal.JournalAuthorityDenied):
+                    journal.require_visit_submission_insertion(doc)
+
+    def test_visit_prepare_rechecks_guard_before_reservation_update(self):
+        from unittest.mock import Mock
+        from clinic_photos.publication import exclusion
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-recheck-0001", visit_binding=binding, image_bytes=PNG_1X1_BYTES)
+        with fake_frappe() as fake:
+            from clinic_photos.visit import capture
+            submission = journal.stage_submission(request, actor=ACTOR, site=SITE)
+            snapshot = copy.deepcopy(operation_rows(fake)[submission.id])
+            owner = Mock()
+            locked = types.SimpleNamespace(kind=request.kind, draft=None, original=None,
+                                           synthetic_patient=None)
+            with patch.object(exclusion, "require_locked_owner", return_value=owner), \
+                 patch.object(exclusion, "reread_locked_operation", return_value=locked), \
+                 patch.object(capture, "check_visit_authority", side_effect=PermissionError("revoked")) as check:
+                with self.assertRaises(journal.JournalAuthorityDenied):
+                    journal.prepare(submission)
+                check.assert_called_once_with(binding)
+            self.assertEqual(operation_rows(fake)[submission.id], snapshot)
+
+    def test_visit_authorization_binds_session_and_rechecks_visit_guard(self):
+        from unittest.mock import patch
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-auth-key-001", visit_binding=binding, image_bytes=PNG_1X1_BYTES)
+        with fake_frappe() as fake:
+            from clinic_photos.visit import capture
+            with patch.object(capture, "check_visit_authority") as check:
+                journal.require_visit_authorization(request, ACTOR, SITE)
+                check.assert_called_once_with(binding)
+                with self.assertRaises(journal.JournalAuthorityDenied):
+                    journal.require_visit_authorization(request, "other", SITE)
+                with self.assertRaises(journal.JournalAuthorityDenied):
+                    journal.require_visit_authorization(request, ACTOR, "other")
+
+    def test_visit_published_outcome_requires_exact_matching_slot(self):
+        binding = contracts.VisitBinding(
+            appointment="APT-1", patient="PAT-1", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="AUDIT-1",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-published-001", visit_binding=binding, image_bytes=PNG_1X1_BYTES)
+        with fake_frappe() as fake:
+            from clinic_photos.visit.capture import slot_key
+            submitted = journal.stage_submission(request, actor=ACTOR, site=SITE)
+            row = operation_rows(fake)[submitted.id]
+            sha, size = journal._prepared_evidence(request)
+            row.update(state="PUBLISHED", generation=1, expected_sha256=sha, expected_size=size,
+                       reservation_key=journal._reservation_key(request, site=SITE,
+                           operation_id=submitted.id, generation=1, payload=submitted.payload_digest),
+                       published_file="FILE", published_domain_doctype="Clinic Photo",
+                       published_domain_name="PHOTO", published_version=0, creation_identity="1:2")
+            key = slot_key(binding.appointment, binding.slot)
+            fake.db.add("Clinic Visit Photo Slot", key, slot_key=key, appointment="APT-1",
+                        patient="PAT-1", slot="Before", appointment_creation="ac",
+                        patient_creation="pc", body_area="Arm", viewpoint="Front",
+                        operation=submitted.id, photo="PHOTO")
+            outcome = journal._published_outcome(row)
+            self.assertEqual(outcome.domain_name, "PHOTO")
+            self.assertEqual(outcome.reservation.visit_binding, binding)
+            fake.db.docs["Clinic Visit Photo Slot"][key]["photo"] = "OTHER"
+            with self.assertRaises(journal.JournalIntegrityError):
+                journal._published_outcome(row)
+
+    def test_visit_prepared_reservation_roundtrip_and_tampering(self):
+        from dataclasses import replace
+        binding = contracts.VisitBinding(
+            appointment="APT-1", patient="PAT-1", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="AUDIT-1",
+        )
+        with fake_frappe() as fake:
+            for index, current in enumerate((
+                binding, replace(binding, slot="After", encounter="ENC-1", encounter_creation="ec"),
+            )):
+                request = contracts.SaveRequest(
+                    kind=contracts.VISIT_ORIGINAL_CREATE,
+                    request_key=f"visit-prep-key-{index:04d}", visit_binding=current,
+                    image_bytes=PNG_1X1_BYTES,
+                )
+                submitted = journal.stage_submission(request, actor=ACTOR, site=SITE)
+                row = operation_rows(fake)[submitted.id]
+                sha, size = journal._prepared_evidence(request)
+                row.update(state="PREPARED", generation=1, expected_sha256=sha,
+                           expected_size=size, reservation_key=journal._reservation_key(
+                               request, site=SITE, operation_id=submitted.id, generation=1,
+                               payload=submitted.payload_digest))
+                prepared = journal._prepared_operation(row)
+                self.assertEqual(prepared.visit_binding, current)
+                self.assertEqual(prepared.expected_sha256, hashlib.sha256(PNG_1X1_BYTES).hexdigest())
+                self.assertEqual(prepared.expected_size, len(PNG_1X1_BYTES))
+                self.assertNotIn("APT-1", prepared.key)
+                self.assertNotIn("APT-1", prepared.target_identity)
+                self.assertEqual(prepared.target_identity, journal.target_identity(request))
+                for field, value in (("expected_size", size + 1), ("reservation_key", "/bad"),
+                                     ("expected_sha256", "0" * 64),
+                                     ("generation", 2), ("published_file", "file"),
+                                     ("visit_binding_json", row["visit_binding_json"].replace("Arm", "Leg")),
+                                     ("synthetic_patient", "other")):
+                    original = row.get(field)
+                    row[field] = value
+                    with self.subTest(slot=current.slot, field=field), self.assertRaises(journal.JournalIntegrityError):
+                        journal._prepared_operation(row)
+                    row[field] = original
+            after_request = replace(request, visit_binding=binding)
+            self.assertEqual(journal.target_identity(request), journal.target_identity(after_request))
+
+    def test_visit_submission_roundtrip_conflicts_and_tamper(self):
+        from dataclasses import replace
+
+        binding = contracts.VisitBinding(
+            appointment="APT-1", patient="PAT-1", slot="After", encounter="ENC-1",
+            body_area="Arm", viewpoint="Front", appointment_creation="2026-01-01 10:00:00",
+            patient_creation="2026-01-01 09:00:00",
+            encounter_creation="2026-01-01 11:00:00", grant_audit="AUDIT-1",
+        )
+        request = contracts.SaveRequest(
+            kind=contracts.VISIT_ORIGINAL_CREATE, request_key="visit-key-0000001",
+            visit_binding=binding, image_bytes=PNG_1X1_BYTES,
+        )
+        with fake_frappe() as fake:
+            first = journal.stage_submission(request, actor=ACTOR, site=SITE)
+            self.assertEqual(journal.load_submission(first.id), first)
+            self.assertEqual(journal.load_submission(first.id).request, request)
+            self.assertEqual(journal.stage_submission(request, actor=ACTOR, site=SITE).id, first.id)
+            self.assertEqual(journal.target_identity(request),
+                             journal.exclusion.target_identity_for_operation(first.id))
+            from clinic_photos.publication import submission
+            with self.assertRaises(submission.SubmissionTargetDenied):
+                submission.require_target_authority(request, ACTOR, SITE)
+            for field in binding.__dataclass_fields__:
+                if field == "slot":
+                    changed = replace(binding, slot="Before", encounter=None, encounter_creation=None)
+                elif field == "encounter":
+                    changed = replace(binding, encounter="ENC-2")
+                else:
+                    changed = replace(binding, **{field: getattr(binding, field) + "2"})
+                with self.subTest(field=field), self.assertRaises(journal.JournalConflict):
+                    journal.stage_submission(replace(request, visit_binding=changed), actor=ACTOR, site=SITE)
+            with self.assertRaises(journal.JournalConflict):
+                journal.stage_submission(
+                    replace(request, image_bytes=base64.b64decode(JPEG_2X2_BASE64)),
+                    actor=ACTOR, site=SITE,
+                )
+            row = operation_rows(fake)[first.id]
+            row["visit_binding_json"] = row["visit_binding_json"].replace("AUDIT-1", "AUDIT-2")
+            with self.assertRaises(journal.JournalIntegrityError):
+                journal.load_submission(first.id)
+            self.assertEqual(fake.db.commit_calls, 0)
+            self.assertNotIn("File", fake.db.docs)
+
+    def test_visit_rejects_mixed_and_noncanonical_stored_metadata(self):
+        binding = contracts.VisitBinding(
+            appointment="APT-1", patient="PAT-1", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="a",
+            patient_creation="p", encounter_creation=None, grant_audit="AUDIT-1",
+        )
+        request = contracts.SaveRequest(
+            kind=contracts.VISIT_ORIGINAL_CREATE, request_key="visit-key-0000002",
+            visit_binding=binding, image_bytes=PNG_1X1_BYTES,
+        )
+        with fake_frappe() as fake:
+            operation = journal.stage_submission(request, actor=ACTOR, site=SITE)
+            self.assertEqual(journal.load_submission(operation.id).request, request)
+            row = operation_rows(fake)[operation.id]
+            for field, value in (("synthetic_patient", "P"), ("draft", "D"),
+                                 ("annotation_json", "{}"), ("image_base64", "unsafe"),
+                                 ("visit_binding_json", "{}")):
+                old = row.get(field)
+                row[field] = value
+                with self.subTest(field=field), self.assertRaises(journal.JournalIntegrityError):
+                    journal.load_submission(operation.id)
+                row[field] = old
+            row["visit_binding_json"] = " " + row["visit_binding_json"]
+            with self.assertRaises(journal.JournalIntegrityError):
+                journal.load_submission(operation.id)
+
+    def test_visit_submitted_rejects_publication_evidence_but_accepts_defaults(self):
+        binding = contracts.VisitBinding(
+            appointment="APT-1", patient="PAT-1", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="a",
+            patient_creation="p", encounter_creation=None, grant_audit="AUDIT-1",
+        )
+        request = contracts.SaveRequest(
+            kind=contracts.VISIT_ORIGINAL_CREATE, request_key="visit-key-0000004",
+            visit_binding=binding, image_bytes=PNG_1X1_BYTES,
+        )
+        with fake_frappe() as fake:
+            operation = journal.stage_submission(request, actor=ACTOR, site=SITE)
+            row = operation_rows(fake)[operation.id]
+            fields = ("published_file", "published_domain_doctype", "published_domain_name",
+                      "creation_identity")
+            for empty in (None, ""):
+                for field in fields:
+                    row[field] = empty
+                for empty_version in (None, "", 0):
+                    row["published_version"] = empty_version
+                    self.assertEqual(journal.load_submission(operation.id).request, request)
+            for field in fields:
+                row[field] = "unexpected"
+                with self.subTest(field=field), self.assertRaises(journal.JournalIntegrityError):
+                    journal.load_submission(operation.id)
+                row[field] = None
+            for value in (1, -1, True):
+                row["published_version"] = value
+                with self.subTest(published_version=value), self.assertRaises(journal.JournalIntegrityError):
+                    journal.load_submission(operation.id)
+
+    def test_legacy_submitted_publication_evidence_behavior_unchanged(self):
+        request = contracts.validate_request(annotation_payload())
+        with fake_frappe() as fake:
+            operation = journal.stage_submission(request, actor=ACTOR, site=SITE)
+            row = operation_rows(fake)[operation.id]
+            row.update(published_file="legacy", published_domain_doctype="legacy",
+                       published_domain_name="legacy", creation_identity="1:2",
+                       published_version=1)
+            self.assertEqual(journal.load_submission(operation.id).request, request)
+
+    def test_visit_staged_byte_tampering_is_denied(self):
+        binding = contracts.VisitBinding(
+            appointment="APT-1", patient="PAT-1", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="a",
+            patient_creation="p", encounter_creation=None, grant_audit="AUDIT-1",
+        )
+        request = contracts.SaveRequest(
+            kind=contracts.VISIT_ORIGINAL_CREATE, request_key="visit-key-0000003",
+            visit_binding=binding, image_bytes=PNG_1X1_BYTES,
+        )
+        with fake_frappe() as fake:
+            operation = journal.stage_submission(request, actor=ACTOR, site=SITE)
+            row = operation_rows(fake)[operation.id]
+            row["staged_sha256"] = "0" * 64
+            with self.assertRaises(journal.JournalIntegrityError):
+                journal.load_submission(operation.id)
+
     def test_submission_survives_lost_notification_without_reserved_bytes(self):
         request = contracts.validate_request(annotation_payload())
 
@@ -895,6 +1221,41 @@ class LaterStageRefusalTests(unittest.TestCase):
 
 
 class OperationSchemaTests(unittest.TestCase):
+    def test_visit_controller_requires_exact_repository_scope(self):
+        controller_name = (
+            "clinic_photos.clinic_photos.doctype."
+            "clinic_photo_save_operation.clinic_photo_save_operation"
+        )
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-controller-01", visit_binding=binding, image_bytes=PNG_1X1_BYTES)
+        model = types.ModuleType("frappe.model")
+        document = types.ModuleType("frappe.model.document")
+        document.Document = type("Document", (), {})
+        with fake_frappe(roles=("Healthcare Administrator",)) as fake, \
+             patch.dict(sys.modules, {"frappe.model": model, "frappe.model.document": document}):
+            sys.modules.pop(controller_name, None)
+            controller = importlib.import_module(controller_name)
+            class Doc(controller.ClinicPhotoSaveOperation):
+                kind = contracts.VISIT_ORIGINAL_CREATE
+                def get(self, key):
+                    return values.get(key)
+            values = journal._document_values(request, actor=ACTOR, site=SITE,
+                identity=journal.identity_digest(SITE, ACTOR, request.kind, request.request_key),
+                payload=journal.payload_digest(request), staged=None)
+            doc = Doc()
+            with self.assertRaises(fake.PermissionError):
+                doc.before_insert()
+            with journal._visit_submission_insertion(doc, request, ACTOR, SITE, values):
+                doc.before_insert()
+                with self.assertRaises(fake.PermissionError):
+                    Doc().before_insert()
+            sys.modules.pop(controller_name, None)
+
     @staticmethod
     def schema():
         path = (

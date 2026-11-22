@@ -49,6 +49,7 @@ commits and this attempt's own rollback.
 import contextlib
 import hashlib
 import os
+from dataclasses import replace
 
 from clinic_photos.access import frappe_context
 from clinic_photos.publication import (
@@ -62,8 +63,11 @@ from clinic_photos.publication import (
 )
 from clinic_photos.publication.contracts import (
     ANNOTATION_APPEND,
+    PreparedOperation,
     SaveOutcome,
     SubmittedOperation,
+    VISIT_ORIGINAL_CREATE,
+    visit_target_identity,
 )
 
 CHILD_MARKER_ATTR = "clinic_photos_child_publication"
@@ -78,7 +82,7 @@ _ENTRY_TOKENS: dict = {}
 class _ChildEntry:
     """Opaque child-entry identity; construction is refused outside the factory."""
 
-    __slots__ = ("_pid", "_site", "_sites_path")
+    __slots__ = ("_pid", "_site", "_sites_path", "_mode")
 
     def __init__(self, *args, **kwargs):
         raise TypeError("child publication entry is issued only by the child scope")
@@ -115,7 +119,7 @@ class CoordinatorUnknown(CoordinatorError):
 
 
 @contextlib.contextmanager
-def child_process_publication():
+def child_process_publication(*, mode="legacy"):
     """Mint this process's child publication capability for one verified scope.
 
     Called only by ``clinic_photos.publication.process`` after its bootstrap, site,
@@ -128,13 +132,18 @@ def child_process_publication():
     """
     import frappe
 
+    if mode not in ("legacy", "visit"):
+        raise CoordinatorUnavailable(SAFE_COORDINATOR_DENIED)
     existing = getattr(frappe.local, CHILD_MARKER_ATTR, None)
     if type(existing) is _ChildEntry and _ENTRY_TOKENS.get(id(existing)) is existing:
+        if existing._mode != mode:
+            raise CoordinatorUnavailable(SAFE_COORDINATOR_DENIED)
         yield existing
         return
 
     token = object.__new__(_ChildEntry)
     object.__setattr__(token, "_pid", os.getpid())
+    object.__setattr__(token, "_mode", mode)
     object.__setattr__(
         token, "_site", getattr(frappe.local, "site", "") or ""
     )
@@ -153,7 +162,7 @@ def child_process_publication():
             pass
 
 
-def _require_child_entry(frappe) -> None:
+def _require_child_entry(frappe, *, mode="legacy") -> None:
     """Refuse anything that is not this process's verified child entry, clean frame.
 
     The capability alone is not enough: a request, a queued job, an inherited
@@ -162,6 +171,8 @@ def _require_child_entry(frappe) -> None:
     """
     token = getattr(frappe.local, CHILD_MARKER_ATTR, None)
     if type(token) is not _ChildEntry or _ENTRY_TOKENS.get(id(token)) is not token:
+        raise CoordinatorUnavailable(SAFE_COORDINATOR_DENIED)
+    if token._mode != mode:
         raise CoordinatorUnavailable(SAFE_COORDINATOR_DENIED)
     if token._pid != os.getpid():
         raise CoordinatorUnavailable(SAFE_COORDINATOR_DENIED)
@@ -599,6 +610,201 @@ def _publish_phase(owner, prepared, fresh: SubmittedOperation) -> SaveOutcome:
     return _verify_saved(prepared, published)
 
 
+def _publish_prepared_visit(owner, prepared, data: bytes):
+    """Private final transaction for an already-continued visit reservation.
+
+    Returned journal outcome only means commit returned; it is not a saved/readback
+    claim. No external dispatcher invokes this internal function.
+    """
+    import frappe
+    from clinic_photos.visit import capture
+
+    if (not isinstance(prepared, PreparedOperation) or
+        prepared.kind != VISIT_ORIGINAL_CREATE or prepared.state != "PREPARED" or
+        type(data) is not bytes or len(data) != prepared.expected_size or
+        hashlib.sha256(data).hexdigest() != prepared.expected_sha256):
+        raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+    try:
+        if writer._live_owner(prepared) is not owner:
+            raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+        owner.require_continued()
+        with frappe_context.owned_publication_transaction(owner):
+            db = frappe.local.db
+            bound = None
+            try:
+                writer._require_persisted_prepared(prepared)
+                capture.check_slot_availability(prepared.visit_binding)
+                file_doc = _exact_file_document(prepared, data)
+                bound = writer.write_first_object(prepared, file_doc)
+                width, height = validation.image_dimensions(data)
+                photo = frappe.get_doc({
+                    "doctype": PHOTO_DOCTYPE,
+                    "patient_reference": prepared.visit_binding.patient,
+                    "storage_key": prepared.key,
+                    "original_file": bound.file_name,
+                    "original_sha256": prepared.expected_sha256,
+                    "original_width": width,
+                    "original_height": height,
+                })
+                with frappe_context.visit_photo_insertion(prepared, bound, file_doc, photo):
+                    photo.insert(ignore_permissions=True)
+                linkage = writer.domain_linkage(prepared, PHOTO_DOCTYPE, photo.name, bound.file_name)
+                with frappe_context.visit_file_attachment(prepared, bound, file_doc, photo):
+                    file_doc.attached_to_doctype = PHOTO_DOCTYPE
+                    file_doc.attached_to_name = photo.name
+                    previous_ignore = getattr(file_doc.flags, "ignore_permissions", None)
+                    if previous_ignore:
+                        raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+                    try:
+                        file_doc.save(ignore_permissions=True)
+                    finally:
+                        file_doc.flags.ignore_permissions = previous_ignore
+                file_name = writer.consume_persisted_object(prepared, bound, domain_linkage=linkage)
+                capture.insert_prepared_slot_link(prepared, bound)
+                published = journal.publish(prepared, bound, file_name, None)
+                writer.arm_visit_final_commit(prepared, bound)
+            except BaseException:
+                try:
+                    writer.rollback_visit_transaction(prepared, owner, db)
+                except BaseException:
+                    pass
+                owner.poison("visit_publication_uncertain")
+                raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN) from None
+            try:
+                writer.finish_visit_transaction(prepared, owner, "commit")
+            except BaseException:
+                owner.poison("visit_commit_uncertain")
+                raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN) from None
+            return published
+    except CoordinatorUnknown:
+        raise
+    except BaseException:
+        owner.poison("visit_publication_uncertain")
+        raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN) from None
+
+
+def _readback_visit(fresh, prepared, staged):
+    """Verify committed visit identity in a clean read transaction, without public reads."""
+    import frappe
+
+    if (type(getattr(frappe.db, "transaction_writes", None)) is not int or
+        frappe.db.transaction_writes != 0 or
+        (frappe.session.user or "") != fresh.actor or
+        (getattr(frappe.local, "site", "") or "") != fresh.site):
+        raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+    try:
+        verified = journal.load_verified_operation(fresh.id)
+        published = verified.published
+        if (verified.state != "PUBLISHED" or verified.kind != VISIT_ORIGINAL_CREATE or
+            verified.id != fresh.id or verified.request_key != fresh.request_key or
+            verified.actor != fresh.actor or verified.site != fresh.site or
+            verified.request != fresh.request or verified.payload_digest != fresh.payload_digest or
+            not published or published != staged or
+            published.reservation != replace(prepared, state="PUBLISHED") or
+            published.domain_doctype != PHOTO_DOCTYPE):
+            raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+        photos = frappe.db.get_all(
+            PHOTO_DOCTYPE, filters={"storage_key": prepared.key},
+            fields=["name", "storage_key", "patient_reference", "original_file", "original_sha256"],
+            limit=0,
+        )
+        if (len(photos) != 1 or photos[0].get("name") != published.domain_name or
+            photos[0].get("storage_key") != prepared.key or
+            photos[0].get("patient_reference") != prepared.visit_binding.patient or
+            photos[0].get("original_file") != published.file_name or
+            photos[0].get("original_sha256") != prepared.expected_sha256):
+            raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+        file_row = frappe.db.get_value(
+            FILE_DOCTYPE, published.file_name,
+            ["name", "file_url", "file_name", "is_private", "owner", "file_size",
+             "attached_to_doctype", "attached_to_name", "attached_to_field"], as_dict=True,
+        )
+        if (not file_row or file_row.get("name") != published.file_name or
+            file_row.get("file_url") != prepared.key or
+            file_row.get("file_name") != prepared.key.rsplit("/", 1)[-1] or
+            file_row.get("is_private") != 1 or file_row.get("owner") != prepared.actor or
+            file_row.get("file_size") != prepared.expected_size or
+            file_row.get("attached_to_doctype") != PHOTO_DOCTYPE or
+            file_row.get("attached_to_name") != published.domain_name or
+            file_row.get("attached_to_field") not in (None, "")):
+            raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+        writer.verify_published_object(
+            published.reservation, published.file_name, creation_identity=published.creation_identity,
+        )
+        return SaveOutcome("saved", prepared.id, file_name=published.file_name)
+    except BaseException:
+        raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN) from None
+
+
+def _execute_private_visit(submission):
+    """Private attempt; future dispatch must separately authorize its entry."""
+    import frappe
+    from clinic_photos.visit import capture
+
+    if (not isinstance(submission, SubmittedOperation) or
+        submission.kind != VISIT_ORIGINAL_CREATE or
+        type(getattr(frappe.db, "transaction_writes", None)) is not int or
+        frappe.db.transaction_writes != 0 or
+        (frappe.session.user or "") != submission.actor or
+        (getattr(frappe.local, "site", "") or "") != submission.site):
+        raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+    try:
+        target = exclusion.target_identity_for_operation(submission.id)
+        if target != visit_target_identity(submission.request.visit_binding):
+            raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+        with exclusion.hold_exclusion(submission.id, target) as owner:
+            db = frappe.local.db
+            rejected = False
+            try:
+                fresh = journal.load_submission(submission.id, for_update=True)
+                if fresh != submission:
+                    raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+                try:
+                    capture.check_slot_availability(fresh.request.visit_binding)
+                except capture.VisitEligibilityRejected:
+                    if (getattr(frappe.local, "db", None) is not db or
+                        type(getattr(frappe.db, "transaction_writes", None)) is not int or
+                        frappe.db.transaction_writes != 0 or
+                        (frappe.session.user or "") != fresh.actor or
+                        (getattr(frappe.local, "site", "") or "") != fresh.site):
+                        raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+                    journal.abort(fresh)
+                    rejected = True
+                if not rejected:
+                    prepared = journal.prepare(fresh)
+                    _require_prepared_bindings(prepared, fresh)
+                    if (prepared.id != fresh.id or prepared.actor != fresh.actor or
+                        prepared.site != fresh.site or prepared.visit_binding != fresh.request.visit_binding or
+                        prepared.target_identity != target):
+                        raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+            except BaseException:
+                try:
+                    _rollback()
+                except BaseException:
+                    pass
+                owner.poison("visit_preparation_uncertain")
+                raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN) from None
+            if rejected:
+                try:
+                    _commit()
+                except BaseException:
+                    owner.poison("visit_abort_commit_uncertain")
+                    raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN) from None
+                return SaveOutcome("rejected", fresh.id)
+            try:
+                _commit()
+                owner.continue_after_own_preparation(prepared)
+            except BaseException:
+                owner.poison("visit_preparation_commit_uncertain")
+                raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN) from None
+            staged = _publish_prepared_visit(owner, prepared, fresh.request.image_bytes)
+            if getattr(frappe.local, "db", None) is not db:
+                raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN)
+            return _readback_visit(fresh, prepared, staged)
+    except BaseException:
+        raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN) from None
+
+
 def _discard_transaction() -> None:
     """Discard this attempt's staged rows; never unlinks protected bytes."""
     try:
@@ -637,11 +843,39 @@ def _execute(fresh: SubmittedOperation) -> SaveOutcome:
         raise CoordinatorUnknown(SAFE_COORDINATOR_UNKNOWN) from None
 
 
+def publish_visit_submission(submission_operation: SubmittedOperation) -> SaveOutcome:
+    """Visit child only; fresh gate, actor and durable submission are rechecked."""
+    import frappe
+
+    _require_child_entry(frappe, mode="visit")
+    if (not isinstance(submission_operation, SubmittedOperation) or
+        submission_operation.kind != VISIT_ORIGINAL_CREATE or
+        not process._valid_visit_site(submission_operation.site)):
+        raise CoordinatorUnavailable(SAFE_COORDINATOR_DENIED)
+    site, sites_path = frappe_context.current_site_context()
+    if (site != submission_operation.site or
+        (frappe.session.user or "") != submission_operation.actor or
+        not isinstance(sites_path, str) or not os.path.isabs(sites_path) or
+        os.path.realpath(sites_path) != sites_path or
+        not process._visit_gate_enabled(site, getattr(frappe, "conf", None))):
+        raise CoordinatorUnavailable(SAFE_COORDINATOR_DENIED)
+    try:
+        fresh = journal.load_submission(submission_operation.id)
+    except journal.JournalError:
+        raise CoordinatorUnavailable(SAFE_COORDINATOR_DENIED) from None
+    if fresh != submission_operation:
+        raise CoordinatorUnavailable(SAFE_COORDINATOR_DENIED)
+    _require_clean_frame(frappe)
+    return _execute_private_visit(fresh)
+
+
 def publish_submission(submission_operation: SubmittedOperation) -> SaveOutcome:
     """Publish one committed SUBMITTED operation; the sole publication entry."""
     import frappe
 
     if not isinstance(submission_operation, SubmittedOperation):
+        raise CoordinatorDenied(SAFE_COORDINATOR_DENIED)
+    if submission_operation.kind == VISIT_ORIGINAL_CREATE:
         raise CoordinatorDenied(SAFE_COORDINATOR_DENIED)
     _require_child_entry(frappe)
     _require_runtime(frappe, submission_operation.site)

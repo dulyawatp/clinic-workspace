@@ -1016,7 +1016,8 @@ it("opens the same read-only patient timeline from Patient History and the encou
         ".visit-history-report, .visit-history-evidence, .visit-history-narrative",
       ));
       expect(lab).toHaveTextContent("Lab reports");
-      expect(photo).toHaveTextContent("Same-visit photo status is not available here.");
+      expect(photo).toHaveTextContent("View visit photos");
+      expect(photo?.querySelector("details")).not.toHaveAttribute("open");
       expect(narrative).toHaveTextContent("Read visit note");
       const detail = narrative?.querySelector("details");
       expect(detail).not.toHaveAttribute("open");

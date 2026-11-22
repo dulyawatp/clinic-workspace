@@ -4,6 +4,8 @@ import frappe
 from frappe.model.document import Document
 
 from clinic_photos.publication import journal
+from clinic_photos.publication import visit_annotation_insert_guard
+from clinic_photos.publication.visit_annotation_intent import VISIT_ANNOTATION_APPEND
 
 
 SAFE_SERVER_OWNED = "Durable photo-save operation fields are server-owned."
@@ -42,15 +44,28 @@ class ClinicPhotoSaveOperation(Document):
 
     def before_insert(self):
         try:
-            journal.require_service_authorization(
-                frappe.session.user or "",
-                getattr(frappe.local, "site", "") or "",
-            )
+            if (visit_annotation_insert_guard._active()
+                    or getattr(self, "kind", None) == VISIT_ANNOTATION_APPEND):
+                visit_annotation_insert_guard._require_phase(self, "before_insert")
+            elif getattr(self, "kind", None) == journal.VISIT_ORIGINAL_CREATE:
+                journal.require_visit_submission_insertion(self)
+            else:
+                journal.require_service_authorization(
+                    frappe.session.user or "",
+                    getattr(frappe.local, "site", "") or "",
+                )
         except journal.JournalAuthorityDenied:
             frappe.throw(SAFE_SERVER_OWNED, frappe.PermissionError)
 
     def validate(self):
         if self.is_new():
+            if (visit_annotation_insert_guard._active()
+                    or getattr(self, "kind", None) == VISIT_ANNOTATION_APPEND):
+                try:
+                    visit_annotation_insert_guard._require_phase(self, "validate")
+                except journal.JournalAuthorityDenied:
+                    frappe.throw(SAFE_SERVER_OWNED, frappe.PermissionError)
+                return
             journal.assert_submission_row(self)
             return
 

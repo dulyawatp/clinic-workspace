@@ -6,6 +6,8 @@ the standard library. The tests for these guards are local stand-ins for
 controller decisions; they do not prove installed Frappe enforcement.
 """
 
+import hashlib
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -32,6 +34,23 @@ SERVER_OWNED_DRAFT_FIELDS = (
 
 class DraftIdentityError(ValueError):
     """Raised when a draft insert/update would forge a server-owned value."""
+
+
+VISIT_DRAFT_PREFIX = "clinic-visit-annotation-draft-"
+
+
+def visit_draft_name(site: str, appointment: str, slot: str, original: str, author: str) -> str:
+    """Derive an identity from exact server-resolved values, without normalization."""
+    values = (site, appointment, slot, original, author)
+    if any(not isinstance(value, str) or not value for value in values):
+        raise DraftIdentityError("visit draft identity requires five nonempty strings")
+    encoded = json.dumps(values, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    return VISIT_DRAFT_PREFIX + hashlib.sha256(encoded).hexdigest()
+
+
+def is_reserved_visit_identity(name: Any) -> bool:
+    """Reserve the whole namespace, including malformed names and versions."""
+    return isinstance(name, str) and name.lower().startswith(VISIT_DRAFT_PREFIX)
 
 
 def initialize_new_draft(

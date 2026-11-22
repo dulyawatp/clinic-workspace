@@ -19,12 +19,15 @@ import {
   saveLinkedEncounter,
   searchClinicalMaster,
 } from "../../transport/native/linked-encounter";
+import type { VisitAnnotationCallbacks } from "../../transport/native/visit-annotations";
+import { nativeVisitAnnotationCallbacks } from "../../transport/native/visit-annotations";
 import { StatePanel } from "../../ui/StatePanel";
 import { useLiveAppointment } from "../appointments/live-appointment";
 import { EncounterLayout, EncounterReadFailure, EncounterStatus, SavedTerms } from "./ApprovedVisitWorkspace";
 import { FormattedNoteEditor, FormattedNotePreview } from "./LinkedFormattedNote";
 import { LinkedPrescriptions, prescriptionChange, type PrescriptionDraft, PrescriptionRecovery } from "./LinkedPrescriptions";
 import { NativeLabReportPanel } from "./NativeLabReports";
+import { NativeVisitPhotos } from "./NativeVisitPhotos";
 import { encodeNoteText, noteContent, notePlainText, type NoteLine, parseFormattedNote, serializeFormattedNote } from "./linked-note-format";
 
 type Kind = "symptoms" | "diagnoses";
@@ -132,9 +135,10 @@ function sameContext(a: LinkedEncounter, b: LinkedEncounter): boolean {
     a.context.practitioner === b.context.practitioner;
 }
 
-export function LinkedVisitWorkspace({ appointmentRef, encounterId }: {
+export function LinkedVisitWorkspace({ appointmentRef, encounterId, annotationCallbacks }: {
   appointmentRef: string;
   encounterId: string | null;
+  annotationCallbacks?: VisitAnnotationCallbacks;
 }) {
   const { t } = useTranslation();
   const { authGeneration } = useSession();
@@ -155,7 +159,7 @@ export function LinkedVisitWorkspace({ appointmentRef, encounterId }: {
   if (encounterId === null && query.data.encounter) {
     return <Navigate replace to={ROUTES.linkedVisit(appointmentRef, query.data.encounter.id)} />;
   }
-  return <LinkedVisit initial={query.data} appointmentRef={appointmentRef} />;
+  return <LinkedVisit initial={query.data} appointmentRef={appointmentRef} annotationCallbacks={annotationCallbacks} />;
 }
 
 type NoteEdit = {
@@ -212,7 +216,9 @@ function deskEncounterHref(id: string): string | null {
   }
 }
 
-function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; appointmentRef: string }) {
+function LinkedVisit({ initial, appointmentRef, annotationCallbacks }: {
+  initial: LinkedEncounter; appointmentRef: string; annotationCallbacks?: VisitAnnotationCallbacks;
+}) {
   const { t } = useTranslation();
   const { locale } = useLocale();
   const { authGeneration } = useSession();
@@ -248,9 +254,9 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
   const encounterId = encounter?.id;
   const appointment = useLiveAppointment(appointmentRef);
   // Confirm the original ref resolves to the same non-fixture native appointment.
-  const labUploadRef = appointment.isFetchedAfterMount && !appointment.isError &&
-    appointment.data?.is_fixture === false && appointment.data.native_appointment_id === context.appointment
-    ? appointmentRef : undefined;
+  const confirmedNativeAppointment = appointment.isFetchedAfterMount && !appointment.isError &&
+    appointment.data?.is_fixture === false && appointment.data.native_appointment_id === context.appointment;
+  const labUploadRef = confirmedNativeAppointment ? appointmentRef : undefined;
   const identity = useQuery({
     queryKey: ["linked-visit-identity", authGeneration, encounterId],
     queryFn: ({ signal }) => encounterId ? viewNativeEncounter(encounterId, signal) : null,
@@ -539,6 +545,12 @@ function LinkedVisit({ initial, appointmentRef }: { initial: LinkedEncounter; ap
           </div>}
         medications={<LinkedPrescriptions medications={medications} draft={prescription} editable={!readOnly}
           locked={locked} onChange={setPrescription} />}
+        photos={confirmedNativeAppointment
+          ? <NativeVisitPhotos source={{ appointment: context.appointment }}
+            drawing={encounter?.docstatus === 0
+              ? { callbacks: annotationCallbacks ?? nativeVisitAnnotationCallbacks, writesBlocked: locked } : undefined}
+            staffTarget={encounter?.docstatus === 0 ? { appointment: context.appointment, encounter: encounter.id } : undefined} />
+          : undefined}
         lab={<NativeLabReportPanel context={encounter
           ? { kind: "encounter", id: encounter.id }
           : { kind: "appointment", id: appointmentRef }} uploadAppointmentRef={labUploadRef} />}

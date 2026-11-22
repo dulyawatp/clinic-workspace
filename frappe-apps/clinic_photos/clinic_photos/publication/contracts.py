@@ -15,6 +15,7 @@ deduplication or truncation happens here.
 Direct construction enforces the same bounds as the public validator.
 """
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping
@@ -34,7 +35,8 @@ from clinic_photos.access import storage
 
 ANNOTATION_APPEND = "annotation_append"
 SYNTHETIC_ORIGINAL_CREATE = "synthetic_original_create"
-REQUEST_KINDS = frozenset({ANNOTATION_APPEND, SYNTHETIC_ORIGINAL_CREATE})
+VISIT_ORIGINAL_CREATE = "visit_original_create"
+REQUEST_KINDS = frozenset({ANNOTATION_APPEND, SYNTHETIC_ORIGINAL_CREATE, VISIT_ORIGINAL_CREATE})
 
 SAVE_STATUSES = frozenset({"pending", "saved", "conflict", "rejected", "unknown"})
 DURABLE_STATES = frozenset(
@@ -112,6 +114,47 @@ def _require_canonical_annotation(value) -> str:
 
 
 @dataclass(frozen=True)
+class VisitBinding:
+    """Server-derived ordinary-workflow snapshots, not authorization evidence."""
+
+    appointment: str
+    patient: str
+    slot: str
+    encounter: str | None
+    body_area: str
+    viewpoint: str
+    appointment_creation: str
+    patient_creation: str
+    encounter_creation: str | None
+    grant_audit: str
+
+    def __post_init__(self) -> None:
+        for value in (self.appointment, self.patient, self.body_area, self.viewpoint,
+                      self.appointment_creation, self.patient_creation, self.grant_audit):
+            require_reference(value)
+            if not value.isprintable():
+                raise PublicationValidationError(SAFE_VALIDATION)
+        if self.slot == "After":
+            for value in (self.encounter, self.encounter_creation):
+                require_reference(value)
+                if not value.isprintable():
+                    raise PublicationValidationError(SAFE_VALIDATION)
+        elif self.slot == "Before":
+            _forbid(self.encounter)
+            _forbid(self.encounter_creation)
+        else:
+            raise PublicationValidationError(SAFE_VALIDATION)
+
+
+def visit_target_identity(binding: VisitBinding) -> str:
+    """Appointment-wide opaque target, independent of slot and encounter."""
+    if type(binding) is not VisitBinding:
+        raise PublicationValidationError(SAFE_VALIDATION)
+    encoded = binding.appointment.encode("utf-8")
+    return "visit:" + hashlib.sha256(b"clinic-photos-visit-target-v1\0" + encoded).hexdigest()
+
+
+@dataclass(frozen=True)
 class SaveRequest:
     kind: str
     request_key: str
@@ -121,12 +164,14 @@ class SaveRequest:
     annotation: str | None = None
     synthetic_patient: str | None = None
     image_bytes: bytes | None = None
+    visit_binding: VisitBinding | None = None
 
     def __post_init__(self) -> None:
         kind = _require_kind(self.kind)
         require_request_key(self.request_key)
 
         if kind == ANNOTATION_APPEND:
+            _forbid(self.visit_binding)
             require_reference(self.draft)
             _require_non_negative_int(self.expected_version)
             require_reference(self.original)
@@ -135,7 +180,13 @@ class SaveRequest:
             _forbid(self.image_bytes)
             return
 
-        require_reference(self.synthetic_patient)
+        if kind == VISIT_ORIGINAL_CREATE:
+            if type(self.visit_binding) is not VisitBinding:
+                raise PublicationValidationError(SAFE_VALIDATION)
+            _forbid(self.synthetic_patient)
+        else:
+            _forbid(self.visit_binding)
+            require_reference(self.synthetic_patient)
         validate_image_bytes(self.image_bytes)
         _forbid(self.draft)
         _forbid(self.expected_version)
@@ -168,6 +219,7 @@ class PreparedOperation:
     expected_sha256: str
     expected_size: int
     state: str
+    visit_binding: VisitBinding | None = None
 
     def __post_init__(self) -> None:
         kind = _require_kind(self.kind)
@@ -195,6 +247,7 @@ class PreparedOperation:
             raise PublicationValidationError(SAFE_VALIDATION)
 
         if kind == ANNOTATION_APPEND:
+            _forbid(self.visit_binding)
             require_reference(self.draft)
             _require_non_negative_int(self.expected_version)
             _forbid(self.synthetic_patient)
@@ -204,6 +257,16 @@ class PreparedOperation:
                 raise PublicationValidationError(SAFE_VALIDATION)
             return
 
+        if kind == VISIT_ORIGINAL_CREATE:
+            if (type(self.visit_binding) is not VisitBinding or
+                self.state not in ("PREPARED", "PUBLISHED") or
+                self.generation != 1 or _SHA256.fullmatch(self.payload_digest) is None or
+                self.target_identity != visit_target_identity(self.visit_binding) or
+                self.draft is not None or self.expected_version is not None or
+                self.synthetic_patient is not None or not key.endswith((".png", ".jpg"))):
+                raise PublicationValidationError(SAFE_VALIDATION)
+            return
+        _forbid(self.visit_binding)
         require_reference(self.synthetic_patient)
         _forbid(self.draft)
         if self.expected_version is not None:
@@ -295,7 +358,9 @@ class PublishedOutcome:
         if not isinstance(self.reservation, PreparedOperation):
             raise PublicationValidationError(SAFE_VALIDATION)
         _require_text(self.file_name)
-        if _DOMAIN_DOCTYPES.get(self.domain_doctype) != self.reservation.kind:
+        if (_DOMAIN_DOCTYPES.get(self.domain_doctype) != self.reservation.kind and
+            not (self.domain_doctype == "Clinic Photo" and
+                 self.reservation.kind == VISIT_ORIGINAL_CREATE)):
             raise PublicationValidationError(SAFE_VALIDATION)
         _require_text(self.domain_name)
         if self.version is not None:
@@ -348,6 +413,8 @@ def _validate_payload(payload) -> SaveRequest:
         raise PublicationValidationError(SAFE_VALIDATION)
 
     kind = _require_kind(payload.get("kind"))
+    if kind == VISIT_ORIGINAL_CREATE:
+        raise PublicationValidationError(SAFE_VALIDATION)
     request_key = payload.get("request_key")
 
     if kind == ANNOTATION_APPEND:

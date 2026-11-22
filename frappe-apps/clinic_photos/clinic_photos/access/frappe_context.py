@@ -45,8 +45,11 @@ acceptance gates; this module stays fail-closed instead of guessing.
 """
 
 import hashlib
+import errno
 import os
+import re
 from contextlib import contextmanager
+from datetime import datetime
 
 from clinic_photos.access import storage
 from clinic_photos.access.lifecycle import (
@@ -93,6 +96,9 @@ FILE_IDENTITY_FIELDS = (
     "file_size",
     "is_private",
     "owner",
+    "attached_to_doctype",
+    "attached_to_name",
+    "attached_to_field",
 )
 
 VERSION_STATE_FIELDS = (
@@ -193,6 +199,7 @@ SAVE_OPERATION_FIELDS = (
     "original",
     "synthetic_patient",
     "annotation_json",
+    "visit_binding_json",
     "staged_key",
     "staged_sha256",
     "staged_size",
@@ -288,7 +295,7 @@ def _file_row(file_doc) -> dict | None:
     if not name:
         return None
     row = frappe.db.get_value(
-        "File", name, list(FILE_IDENTITY_FIELDS), as_dict=True
+        "File", name, ["name", *FILE_IDENTITY_FIELDS], as_dict=True
     )
     return row or None
 
@@ -395,6 +402,242 @@ def _synthetic_patient_binding(context) -> str:
     except PublicationContextError:
         return ""
     return operation.synthetic_patient or ""
+
+
+def _visit_operation(context):
+    """Resolve exact visit PREPARED row and its continued live owner."""
+    import frappe
+    from clinic_photos.publication import exclusion, journal
+
+    operation_id = getattr(context, "operation_id", None)
+    rows = frappe.db.get_all(
+        SAVE_OPERATION_DOCTYPE, filters={"reservation_key": context.storage_key},
+        fields=["name"], limit=0,
+    )
+    if len(rows) != 1 or rows[0].get("name") != operation_id:
+        raise PublicationContextError("visit publication reservation is not unique")
+    row = get_save_operation(operation_id, for_update=True) if operation_id else None
+    try:
+        operation = journal._prepared_operation(row)
+        if (operation.id != operation_id or operation.kind != "visit_original_create" or
+            operation.key != context.storage_key or operation.actor != context.actor or
+            operation.site != (getattr(frappe.local, "site", "") or "") or
+            operation.visit_binding is None):
+            raise PublicationContextError("visit publication binding mismatch")
+        owner = exclusion.require_locked_owner(operation.id).require_bindings(
+            actor=operation.actor, site=operation.site, target_identity=operation.target_identity,
+        )
+        if current_publication_owner() is not owner:
+            raise PublicationContextError("visit publication owner mismatch")
+        owner.require_continued()
+        return operation
+    except (journal.JournalError, exclusion.ExclusionError, TypeError, AttributeError) as error:
+        raise PublicationContextError("visit publication binding is not verifiable") from error
+
+
+@contextmanager
+def visit_photo_insertion(operation, bound, file_doc, photo):
+    """Scope one Photo insertion to this transaction's exact first-write objects."""
+    import frappe
+    from clinic_photos.publication import exclusion, writer
+
+    owner = exclusion.require_locked_owner(operation.id)
+    entry = writer._intent_for_document(file_doc)
+    writer._require_visit_lifetime(operation, owner, entry)
+    if (operation.visit_binding is None or entry.get("operation") != operation or
+        entry.get("bound") is not bound or entry.get("used") or
+        writer._issued().get(id(bound)) is not bound or
+        getattr(frappe.local, "_clinic_visit_photo_insert", None) is not None):
+        _raise_permission()
+    with bound_publication(
+        actor=operation.actor, operation="pending_insert", storage_key=operation.key,
+        operation_id=operation.id, visit_operation=True,
+    ):
+        _visit_operation(current_publication())
+        witness = {"operation": operation, "bound": bound, "file": file_doc,
+                   "photo": photo, "validated": False}
+        frappe.local._clinic_visit_photo_insert = witness
+        try:
+            yield
+            if not witness["validated"]:
+                _raise_permission()
+            _require_visit_photo_row(operation, bound, photo)
+            entry["visit_photo_witness"] = witness
+        finally:
+            frappe.local._clinic_visit_photo_insert = None
+
+
+def require_visit_photo_insertion(photo):
+    """Validate exact Photo object and values at its native before-insert hook."""
+    import frappe
+    from clinic_photos.publication import exclusion, validation, writer
+
+    scope = getattr(frappe.local, "_clinic_visit_photo_insert", None)
+    if not scope or scope["photo"] is not photo:
+        _raise_permission()
+    operation, bound, file_doc = scope["operation"], scope["bound"], scope["file"]
+    entry = writer._intent_for_document(file_doc)
+    owner = exclusion.require_locked_owner(operation.id)
+    writer._require_visit_lifetime(operation, owner, entry)
+    if (entry.get("operation") != operation or entry.get("bound") is not bound or
+        entry.get("used") or writer._issued().get(id(bound)) is not bound or
+        _visit_operation(current_publication()) != operation):
+        _raise_permission()
+    writer._require_persisted_file(operation, bound.receipt, bound.file_name)
+    data = writer._read_exact_target(bound.receipt)
+    width, height = validation.image_dimensions(data)
+    if (getattr(photo, "patient_reference", None) != operation.visit_binding.patient or
+        getattr(photo, "storage_key", None) != operation.key or
+        getattr(photo, "original_file", None) != bound.file_name or
+        getattr(photo, "original_sha256", None) != operation.expected_sha256 or
+        getattr(photo, "original_width", None) != width or
+        getattr(photo, "original_height", None) != height):
+        _raise_permission()
+    scope["validated"] = True
+
+
+def _require_visit_photo_row(operation, bound, photo):
+    import frappe
+    from clinic_photos.publication import validation, writer
+
+    fields = ["name", "patient_reference", "storage_key", "original_file",
+              "original_sha256", "original_width", "original_height"]
+    name = getattr(photo, "name", None)
+    row = frappe.db.get_value("Clinic Photo", name, fields, as_dict=True, for_update=True)
+    width, height = validation.image_dimensions(writer._read_exact_target(bound.receipt))
+    expected = [name, operation.visit_binding.patient, operation.key, bound.file_name,
+                operation.expected_sha256, width, height]
+    if not name or not row or [row.get(field) for field in fields] != expected:
+        _raise_permission()
+
+
+@contextmanager
+def visit_file_attachment(operation, bound, file_doc, photo):
+    """Allow only metadata attachment of the issued File to its inserted Photo."""
+    import frappe
+    from clinic_photos.publication import exclusion, writer
+
+    entry = writer._intent_for_document(file_doc)
+    owner = exclusion.require_locked_owner(operation.id)
+    writer._require_visit_lifetime(operation, owner, entry)
+    witness = entry.get("visit_photo_witness")
+    if (not witness or witness["operation"] != operation or witness["bound"] is not bound or
+        witness["file"] is not file_doc or witness["photo"] is not photo or entry.get("used") or
+        witness.get("attachment_spent") or
+        writer._issued().get(id(bound)) is not bound or
+        getattr(frappe.local, "_clinic_visit_attachment", None) is not None):
+        _raise_permission()
+    with bound_publication(actor=operation.actor, operation="pending_insert",
+                           storage_key=operation.key, operation_id=operation.id,
+                           visit_operation=True):
+        if _visit_operation(current_publication()) != operation:
+            _raise_permission()
+        _require_visit_photo_row(operation, bound, photo)
+        writer._require_persisted_file(operation, bound.receipt, bound.file_name)
+        data = writer._read_exact_target(bound.receipt)
+        if any(getattr(file_doc, field, None) not in (None, b"", data) for field in (
+            "content", "_content"
+        )):
+            _raise_permission()
+        attachment = frappe.db.get_value(
+            "File", bound.file_name, ["attached_to_doctype", "attached_to_name", "attached_to_field"],
+            as_dict=True, for_update=True,
+        )
+        if not attachment or any(attachment.get(field) not in (None, "") for field in attachment):
+            _raise_permission()
+        persisted_before = frappe.db.get_value(
+            "File", bound.file_name, "*", as_dict=True, for_update=True,
+        )
+        if not persisted_before:
+            _raise_permission()
+        scope = {"witness": witness, "content": getattr(file_doc, "content", None),
+                 "_content": getattr(file_doc, "_content", None)}
+        frappe.local._clinic_visit_attachment = scope
+        try:
+            yield
+            attached = frappe.db.get_value(
+                "File", bound.file_name, ["attached_to_doctype", "attached_to_name", "attached_to_field"],
+                as_dict=True, for_update=True,
+            )
+            if (not scope.get("used") or not attached or
+                attached.get("attached_to_doctype") != "Clinic Photo" or
+                attached.get("attached_to_name") != photo.name or
+                attached.get("attached_to_field") not in (None, "")):
+                _raise_permission()
+            persisted_after = frappe.db.get_value(
+                "File", bound.file_name, "*", as_dict=True, for_update=True,
+            )
+            if not persisted_after:
+                _raise_permission()
+            before = dict(persisted_before)
+            after = dict(persisted_after)
+            for field in ("attached_to_doctype", "attached_to_name", "modified", "modified_by"):
+                before.pop(field, None)
+                after.pop(field, None)
+            if before != after:
+                _raise_permission()
+            _require_visit_photo_row(operation, bound, photo)
+            writer._require_persisted_file(operation, bound.receipt, bound.file_name)
+            writer._read_exact_target(bound.receipt)
+        except BaseException:
+            owner.poison("visit_attachment_uncertain")
+            raise
+        finally:
+            witness["attachment_spent"] = True
+            frappe.local._clinic_visit_attachment = None
+
+
+def require_visit_file_attachment(file_doc, previous):
+    import frappe
+    from clinic_photos.publication import exclusion, writer
+
+    scope = getattr(frappe.local, "_clinic_visit_attachment", None)
+    if (not scope or scope.get("used") or scope["witness"]["file"] is not file_doc or
+        previous is None):
+        _raise_permission()
+    witness = scope["witness"]
+    operation, bound, photo = witness["operation"], witness["bound"], witness["photo"]
+    entry = writer._intent_for_document(file_doc)
+    owner = exclusion.require_locked_owner(operation.id)
+    writer._require_visit_lifetime(operation, owner, entry)
+    if (entry.get("visit_photo_witness") is not witness or entry.get("bound") is not bound or
+        entry.get("used") or writer._issued().get(id(bound)) is not bound or
+        _visit_operation(current_publication()) != operation):
+        _raise_permission()
+    _require_visit_photo_row(operation, bound, photo)
+    writer._require_persisted_file(operation, bound.receipt, bound.file_name)
+    writer._read_exact_target(bound.receipt)
+    persisted_attachment = frappe.db.get_value(
+        "File", bound.file_name, ["attached_to_doctype", "attached_to_name", "attached_to_field"],
+        as_dict=True, for_update=True,
+    )
+    if not persisted_attachment or any(
+        persisted_attachment.get(field) not in (None, "") for field in persisted_attachment
+    ):
+        _raise_permission()
+    before = dict(previous if isinstance(previous, dict) else previous.as_dict())
+    if any(before.get(field) not in (None, "") for field in (
+        "attached_to_doctype", "attached_to_name", "attached_to_field"
+    )):
+        _raise_permission()
+    current = dict(file_doc.as_dict())
+    for field in ("attached_to_doctype", "attached_to_name", "modified", "modified_by"):
+        before.pop(field, None)
+        current.pop(field, None)
+    old_creation, new_creation = before.get("creation"), current.get("creation")
+    if (isinstance(old_creation, datetime) and old_creation.tzinfo is None and
+        isinstance(new_creation, str) and
+        re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?", new_creation)):
+        try:
+            current["creation"] = datetime.fromisoformat(new_creation)
+        except ValueError:
+            pass
+    if (before != current or getattr(file_doc, "attached_to_doctype", None) != "Clinic Photo" or
+        getattr(file_doc, "attached_to_name", None) != photo.name or
+        getattr(file_doc, "attached_to_field", None) not in (None, "") or
+        getattr(file_doc, "content", None) != scope["content"] or
+        getattr(file_doc, "_content", None) != scope["_content"]):
+        _raise_permission()
 
 
 
@@ -670,13 +913,50 @@ def lookup_protection(
     return tuple(unique)
 
 
-def classify_file(file_doc):
+def classify_file(file_doc, *, persisted=storage._UNSET):
     """Classify against persisted identity and authoritative references."""
+    if persisted is storage._UNSET:
+        persisted = _file_row(file_doc)
     return storage.classify_file(
         file_doc,
         lookup=lookup_protection,
-        persisted=_file_row(file_doc),
+        persisted=persisted,
     )
+
+
+def is_managed_annotation_file(file_doc, *, persisted=storage._UNSET, record=storage._UNSET):
+    """Common managed File predicate for byte guards and future metadata checks."""
+    import frappe
+    from clinic_photos.access.draft_identity import is_reserved_visit_identity
+
+    if persisted is storage._UNSET:
+        persisted = _file_row(file_doc)
+    if storage.is_managed_annotation_file(
+        file_doc, lookup=lookup_protection, persisted=persisted, record=record
+    ):
+        return True
+    seen = set()
+    for doc in (file_doc, persisted):
+        if not doc:
+            continue
+        get = doc.get if isinstance(doc, dict) else lambda key: getattr(doc, key, None)
+        doctype, name = get("attached_to_doctype"), get("attached_to_name")
+        if (doctype, name) in seen:
+            continue
+        seen.add((doctype, name))
+        if doctype == "Clinic Photo Draft" and name:
+            if (is_reserved_visit_identity(name) or is_reserved_visit_identity(
+                frappe.db.get_value(doctype, name, "name")
+            )):
+                return True
+        if doctype == "Clinic Photo Annotation Version" and name:
+            if is_reserved_visit_identity(name):
+                return True
+            version = frappe.db.get_value(doctype, name, ["name", "draft"], as_dict=True)
+            if version and (is_reserved_visit_identity(version.get("name")) or
+                            is_reserved_visit_identity(version.get("draft"))):
+                return True
+    return False
 
 
 def _key_registered(storage_key: str) -> bool:
@@ -881,6 +1161,7 @@ def bound_publication(
     storage_key: str,
     synthetic_patient: str | None = None,
     operation_id: str | None = None,
+    visit_operation: bool = False,
 ):
     """Bind actor/target/operation/expected key for this request only.
 
@@ -919,7 +1200,10 @@ def bound_publication(
         storage_key=canonical_private_key(storage_key),
         synthetic_patient=synthetic_patient,
         operation_id=operation_id,
+        visit_operation=visit_operation,
     )
+    if context.visit_operation:
+        _visit_operation(context)
     if context.synthetic_patient:
         # The synthetic branch has no draft to confirm; the persisted prepared
         # operation is the authority, so it is resolved (and re-verified) at entry
@@ -1038,7 +1322,9 @@ def _register_lock_release(key: str, *, defer_rollback: bool) -> None:
         frappe.db.after_commit.add(lambda n=name: _release_key_lock(n))
         entry["after_commit_registered"] = True
     if not entry.get("before_commit_registered"):
-        frappe.db.before_commit.add(lambda n=name: _arm_rollback_release(n))
+        callback = lambda n=name: _arm_rollback_release(n)
+        entry["before_commit_callback"] = callback
+        frappe.db.before_commit.add(callback)
         entry["before_commit_registered"] = True
     if not defer_rollback and not entry.get("after_rollback_registered"):
         frappe.db.after_rollback.add(lambda n=name: _release_key_lock(n))
@@ -1230,6 +1516,7 @@ def _context_token():
         context.storage_key,
         getattr(context, "synthetic_patient", None),
         getattr(context, "operation_id", None),
+        getattr(context, "visit_operation", False),
     )
 
 
@@ -1301,7 +1588,16 @@ def _consume_completed_write(record, file_doc, persisted) -> bool:
         return False
 
     context = current_publication()
-    if context is None or _bound_publication_author(context) != receipt["actor"]:
+    if context is None:
+        return False
+    if getattr(context, "visit_operation", False):
+        try:
+            author = _visit_operation(context).actor
+        except PublicationContextError:
+            return False
+    else:
+        author = _bound_publication_author(context)
+    if author != receipt["actor"]:
         return False
 
     current = _identity(file_doc)
@@ -1461,10 +1757,15 @@ def _confined_target_exists(key: str) -> bool:
         return True
     root = os.path.realpath(frappe.get_site_path("private", "files"))
     parts = key[len(storage.PRIVATE_URL_PREFIX) :].split("/")
-    target = os.path.realpath(os.path.join(root, *parts))
+    entry = os.path.join(root, *parts)
+    target = os.path.realpath(entry)
     if target != root and not target.startswith(root + os.sep):
         return True  # symlink/escape: fail closed
-    return os.path.exists(target)
+    try:
+        os.lstat(entry)
+    except OSError as error:
+        return error.errno != errno.ENOENT
+    return True
 
 
 def _key_has_bytes(key: str, rows: list[dict] | None = None) -> bool:
@@ -1808,8 +2109,55 @@ def _pending_content_matches(record, file_doc) -> bool:
     return _content_context_binding(record, file_doc=file_doc) is not None
 
 
+def _visit_protected_read(record, file_doc):
+    """Return True for an exact published visit pair, None for unrelated records."""
+    import frappe
+    from clinic_photos.publication import journal
+    from clinic_photos.publication.contracts import VISIT_ORIGINAL_CREATE, VisitBinding
+
+    rows = frappe.db.get_all(
+        SAVE_OPERATION_DOCTYPE, filters={"reservation_key": record.storage_key},
+        fields=["name", "kind"], limit=0,
+    )
+    slots = []
+    for reference in record.references:
+        if reference.doctype == "Clinic Photo":
+            slots.extend(frappe.db.get_all(
+                "Clinic Visit Photo Slot", filters={"photo": reference.name},
+                fields=["name"], limit=0,
+            ))
+    visit_rows = [row for row in rows if row.get("kind") == VISIT_ORIGINAL_CREATE]
+    if not visit_rows and not slots and not storage.is_canonical_visit_key(record.storage_key):
+        return None
+    if len(rows) != 1 or len(visit_rows) != 1 or len(slots) != 1:
+        _raise_permission()
+    try:
+        operation = journal.load_verified_operation(visit_rows[0]["name"])
+        binding = operation.request.visit_binding
+        if (operation.state != "PUBLISHED" or operation.kind != VISIT_ORIGINAL_CREATE or
+            operation.site != frappe.local.site or type(binding) is not VisitBinding or
+            not operation.published or operation.published.file_name != storage.file_name_of(file_doc) or
+            operation.published.reservation.key != record.storage_key):
+            _raise_permission()
+        from clinic_photos.visit import pair
+        projection = pair.read_pair(binding.appointment)
+        item = projection[binding.slot.lower()]
+        if (not item or item["photo"] != operation.published.domain_name or
+            item["file"] != operation.published.file_name):
+            _raise_permission()
+        return True
+    except Exception:
+        _raise_permission()
+
+
 def require_protected_read(file_doc) -> None:
-    record = classify_file(file_doc)
+    persisted = _file_row(file_doc)
+    record = storage.classify_file(file_doc, lookup=lookup_protection, persisted=persisted)
+    managed = is_managed_annotation_file(file_doc, persisted=persisted, record=record)
+    if managed:
+        from clinic_photos.access.entrypoints import mark_protected_request
+        mark_protected_request()
+        _raise_permission()
     if record is None:
         return
 
@@ -1822,17 +2170,28 @@ def require_protected_read(file_doc) -> None:
     if not record.registered or record.inconsistent:
         _raise_permission()
 
+    if (storage.is_canonical_visit_key(record.storage_key) and
+        storage.file_url_of(file_doc) != record.storage_key):
+        _raise_permission()
+
+    # Internal first-insert content access is bound to the exact native File object,
+    # not an external byte-read capability.
+    if _pending_content_matches(record, file_doc):
+        return
+
     actor = current_actor()
+    visit_read = _visit_protected_read(record, file_doc)
     try:
         _require_protected_read_policy(
             file_doc,
             actor=actor,
-            native_read=authorize_protected_read(record, file_doc),
+            native_read=(True if visit_read is True else authorize_protected_read(record, file_doc)),
             lookup=lookup_protection,
-            persisted=_file_row(file_doc),
+            persisted=persisted,
+            record=record,
         )
     except ProtectedAccessDenied:
-        if not _pending_content_matches(record, file_doc):
+        if visit_read is True or not _pending_content_matches(record, file_doc):
             _raise_permission()
 
 
@@ -2107,7 +2466,17 @@ def require_file_insert(file_doc) -> None:
             _raise_permission()
 
         context = _require_bound_context("pending_insert", key)
-        author = _bound_publication_author(context)
+        if getattr(context, "visit_operation", False):
+            from clinic_photos.publication import writer
+            operation = _visit_operation(context)
+            intent = writer._intent_for_document(file_doc)
+            if (intent is None or intent.get("used") or
+                intent.get("operation") != operation or intent.get("key") != key or
+                intent.get("context") != writer._context_pair(context)):
+                _raise_permission()
+            author = operation.actor
+        else:
+            author = _bound_publication_author(context)
         if not author or context.actor != author:
             _raise_permission()
 
@@ -2242,6 +2611,14 @@ def require_file_update(file_doc, previous, *, inserting: bool = False) -> None:
             or persisted_record.inconsistent
         ):
             _raise_permission()
+
+        from clinic_photos.publication import writer
+        intent = writer._intent_for_key(current_record.storage_key)
+        if intent and intent["operation"].visit_binding is not None:
+            require_visit_file_attachment(file_doc, previous)
+            import frappe
+            frappe.local._clinic_visit_attachment["used"] = True
+            return
 
         # One metadata finalization is allowed for a completed first write, bound to the
         # exact object/context/result; it does not re-arm byte writes.

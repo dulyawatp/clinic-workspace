@@ -218,6 +218,9 @@ class FakeFrappe(types.ModuleType):
         name = getattr(doc, "name", doc)
         return bool(self.permissions.get((doctype, permission_type, name), False))
 
+    def whitelist(self, **_kwargs):
+        return lambda function: function
+
 
 @contextlib.contextmanager
 def fake_frappe(docs=None, user="author@example.test", site_path=None):

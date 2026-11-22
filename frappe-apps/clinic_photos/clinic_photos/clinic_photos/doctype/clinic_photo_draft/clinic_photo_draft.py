@@ -6,6 +6,7 @@ from clinic_photos.access.draft_identity import (
     DraftIdentityError,
     assert_draft_update_allowed,
     initialize_new_draft,
+    is_reserved_visit_identity,
 )
 from clinic_photos.access.frappe_context import (
     current_publication,
@@ -44,6 +45,8 @@ class ClinicPhotoDraft(Document):
     """Manual annotation draft owned by its immutable author."""
 
     def before_insert(self):
+        if is_reserved_visit_identity(getattr(self, "name", None)):
+            frappe.throw(SAFE_SERVER_OWNED, frappe.PermissionError)
         try:
             prepared = initialize_new_draft(
                 _server_owned_state(self), frappe.session.user
@@ -57,6 +60,8 @@ class ClinicPhotoDraft(Document):
             setattr(self, fieldname, prepared[fieldname])
 
     def validate(self):
+        if is_reserved_visit_identity(getattr(self, "name", None)):
+            frappe.throw(SAFE_SERVER_OWNED, frappe.PermissionError)
         if self.is_new():
             return
 
@@ -91,4 +96,12 @@ class ClinicPhotoDraft(Document):
                 target_version_name=current_state.get("current_version") or "",
             )
         except (DraftIdentityError, LifecycleError):
+            frappe.throw(SAFE_SERVER_OWNED, frappe.PermissionError)
+
+    def before_rename(self, old, new, merge=False):
+        if is_reserved_visit_identity(old) or is_reserved_visit_identity(new):
+            frappe.throw(SAFE_SERVER_OWNED, frappe.PermissionError)
+
+    def on_trash(self):
+        if is_reserved_visit_identity(getattr(self, "name", None)):
             frappe.throw(SAFE_SERVER_OWNED, frappe.PermissionError)

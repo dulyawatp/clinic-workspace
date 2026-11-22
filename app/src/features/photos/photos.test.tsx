@@ -9,6 +9,8 @@ import { renderWithFixtures } from "../../test/render";
 import { compatible, readPatientPhotos } from "./model";
 import { PhotoComparePage, PhotoGalleryPage } from "./PhotoPages";
 
+vi.mock("react-konva", () => import("./annotate/konva-test-support"));
+
 function renderPhoto(
   compare = false,
   options: Parameters<typeof renderWithFixtures>[1] = {},

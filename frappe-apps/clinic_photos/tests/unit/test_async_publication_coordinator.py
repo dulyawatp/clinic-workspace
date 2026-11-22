@@ -716,6 +716,7 @@ class _FakeFrappe(types.ModuleType):
         self.db = _FakeDB()
         self.session = types.SimpleNamespace(user=user)
         self.local = types.SimpleNamespace(site=site, sites_path=sites_path)
+        self.local.db = self.db
         self.sites_path = sites_path
         self.site = site
         self.conf = dict(conf if conf is not None else {GATE: True, SYNTHETIC_GATE: True})
@@ -965,6 +966,381 @@ def operation_rows(fake, *, committed=False):
 def file_rows(fake, *, committed=False):
     source = fake.db.committed if committed else fake.db.docs
     return source.get("File", {})
+
+
+class PrivateVisitCoordinatorTests(unittest.TestCase):
+    def test_visit_abort_rechecks_full_submitted_identity_and_advanced_state(self):
+        from dataclasses import replace
+        from unittest.mock import patch
+        from clinic_photos.access import frappe_context
+
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-rejected-002", visit_binding=binding, image_bytes=JPEG_BYTES)
+        fresh = contracts.SubmittedOperation(
+            id="a" * 32, site=SITE, actor=ACTOR, kind=request.kind,
+            request_key=request.request_key, payload_digest="a" * 64, request=request,
+        )
+        verified = types.SimpleNamespace(
+            state="SUBMITTED", kind=request.kind, payload_digest=fresh.payload_digest,
+            reservation_key=None, id=fresh.id,
+        )
+        with tempfile.TemporaryDirectory() as root, fake_runtime(sites_path=sites_volume(root)) as fake:
+            with patch.object(frappe_context, "get_save_operation", return_value={}) as read, \
+                 patch.object(journal, "_verified_operation", return_value=verified), \
+                 patch.object(journal, "_submitted_operation",
+                              return_value=replace(fresh, actor="other")):
+                with self.assertRaises(journal.JournalIntegrityError):
+                    journal.abort(fresh)
+                read.assert_called_once_with(fresh.id, for_update=True)
+                verified.state = "PREPARED"
+                with self.assertRaises(journal.JournalStateError):
+                    journal.abort(fresh)
+                self.assertNotIn("ABORTED", repr(fake.db.docs))
+
+    def test_definite_visit_revocation_aborts_only_locked_submission(self):
+        from unittest.mock import Mock, patch
+        from clinic_photos.publication import coordinator
+
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-rejected-001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        fresh = contracts.SubmittedOperation(
+            id="a" * 32, site=SITE, actor=ACTOR, kind=request.kind,
+            request_key=request.request_key, payload_digest="a" * 64, request=request,
+        )
+        owner = Mock()
+        @contextlib.contextmanager
+        def hold(*args):
+            yield owner
+        with tempfile.TemporaryDirectory() as root, fake_runtime(sites_path=sites_volume(root)) as fake:
+            fake.db.transaction_writes = 0
+            from clinic_photos.visit import capture
+            with patch.object(exclusion, "target_identity_for_operation", return_value=contracts.visit_target_identity(binding)), \
+                 patch.object(exclusion, "hold_exclusion", side_effect=hold), \
+                 patch.object(journal, "load_submission", return_value=fresh) as load, \
+                 patch.object(capture, "check_slot_availability", side_effect=capture.VisitEligibilityRejected("revoked")) as check, \
+                 patch.object(journal, "abort") as abort, \
+                 patch.object(coordinator, "_commit") as commit, \
+                 patch.object(coordinator, "_rollback") as rollback, \
+                 patch.object(journal, "prepare") as prepare:
+                result = coordinator._execute_private_visit(fresh)
+                self.assertEqual(result.status, "rejected")
+                load.assert_called_once_with(fresh.id, for_update=True)
+                abort.assert_called_once_with(fresh)
+                commit.assert_called_once_with()
+                prepare.assert_not_called()
+                abort.reset_mock()
+                commit.reset_mock()
+                check.side_effect = RuntimeError("database uncertain")
+                with self.assertRaises(coordinator.CoordinatorUnknown):
+                    coordinator._execute_private_visit(fresh)
+                abort.assert_not_called()
+                commit.assert_not_called()
+                check.side_effect = capture.VisitEligibilityRejected("revoked")
+                commit.side_effect = RuntimeError("commit uncertain")
+                rollback.reset_mock()
+                with self.assertRaises(coordinator.CoordinatorUnknown):
+                    coordinator._execute_private_visit(fresh)
+                commit.assert_called_once()
+                rollback.assert_not_called()
+                owner.poison.assert_any_call("visit_abort_commit_uncertain")
+
+    def test_visit_entry_requires_visit_child_scope_and_gate(self):
+        from unittest.mock import patch
+        from clinic_photos.publication import coordinator
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-entry-key-001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        submitted = contracts.SubmittedOperation(
+            id="a" * 32, site=SITE, actor=ACTOR, kind=request.kind,
+            request_key=request.request_key, payload_digest="a" * 64, request=request,
+        )
+        outcome = contracts.SaveOutcome("saved", submitted.id)
+        with tempfile.TemporaryDirectory() as root, fake_runtime(sites_path=sites_volume(root)) as fake:
+            with patch.object(process, "_visit_gate_enabled", return_value=True), \
+                 patch.object(journal, "load_submission", return_value=submitted), \
+                 patch.object(coordinator, "_execute_private_visit", return_value=outcome) as execute:
+                with self.assertRaises(coordinator.CoordinatorUnavailable):
+                    coordinator.publish_visit_submission(submitted)
+                with coordinator.child_process_publication():
+                    with self.assertRaises(coordinator.CoordinatorUnavailable):
+                        coordinator.publish_visit_submission(submitted)
+                with coordinator.child_process_publication(mode="visit"):
+                    self.assertEqual(coordinator.publish_visit_submission(submitted), outcome)
+                    execute.assert_called_once_with(submitted)
+                    with self.assertRaises(coordinator.CoordinatorDenied):
+                        coordinator.publish_submission(submitted)
+                    fake.session.user = "other"
+                    with self.assertRaises(coordinator.CoordinatorUnavailable):
+                        coordinator.publish_visit_submission(submitted)
+                    fake.session.user = ACTOR
+                    with patch.object(process, "_visit_gate_enabled", return_value=False):
+                        with self.assertRaises(coordinator.CoordinatorUnavailable):
+                            coordinator.publish_visit_submission(submitted)
+
+    def test_private_visit_readback_requires_clean_exact_committed_evidence(self):
+        from dataclasses import replace
+        from unittest.mock import patch
+        from clinic_photos.publication import coordinator
+
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-readback-0001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        fresh = contracts.SubmittedOperation(
+            id="a" * 32, site=SITE, actor=ACTOR, kind=request.kind,
+            request_key=request.request_key, payload_digest="a" * 64, request=request,
+        )
+        prepared = contracts.PreparedOperation(
+            id=fresh.id, site=SITE, actor=ACTOR, kind=fresh.kind, payload_digest=fresh.payload_digest,
+            key="/private/files/clinic-photo-test.jpg", generation=1, draft=None,
+            expected_version=None, synthetic_patient=None,
+            target_identity=contracts.visit_target_identity(binding), expected_sha256=JPEG_SHA256,
+            expected_size=len(JPEG_BYTES), state="PREPARED", visit_binding=binding,
+        )
+        outcome = contracts.PublishedOutcome(reservation=replace(prepared, state="PUBLISHED"),
+            file_name="FILE", domain_doctype="Clinic Photo", domain_name="PHOTO",
+            version=None, creation_identity="1:2")
+        verified = types.SimpleNamespace(
+            id=fresh.id, request_key=fresh.request_key, state="PUBLISHED", kind=fresh.kind, actor=ACTOR, site=SITE,
+            request=request, payload_digest=fresh.payload_digest, published=outcome,
+        )
+        with tempfile.TemporaryDirectory() as root, fake_runtime(sites_path=sites_volume(root)) as fake:
+            fake.db.transaction_writes = 0
+            fake.db.add("Clinic Photo", "PHOTO", storage_key=prepared.key, patient_reference="PAT",
+                        original_file="FILE", original_sha256=JPEG_SHA256)
+            file = fake.db.add("File", "FILE", file_url=prepared.key,
+                               file_name=prepared.key.rsplit("/", 1)[-1], is_private=1, owner=ACTOR,
+                               file_size=len(JPEG_BYTES), attached_to_doctype="Clinic Photo",
+                               attached_to_name="PHOTO", attached_to_field=None)
+            with patch.object(journal, "load_verified_operation", return_value=verified) as load, \
+                 patch.object(writer, "verify_published_object") as verify:
+                result = coordinator._readback_visit(fresh, prepared, outcome)
+                self.assertEqual(result.status, "saved")
+                load.assert_called_with(fresh.id)
+                verify.assert_called_once()
+                file["attached_to_name"] = "OTHER"
+                with self.assertRaises(coordinator.CoordinatorUnknown):
+                    coordinator._readback_visit(fresh, prepared, outcome)
+                file["attached_to_name"] = "PHOTO"
+                fake.db.transaction_writes = 1
+                with self.assertRaises(coordinator.CoordinatorUnknown):
+                    coordinator._readback_visit(fresh, prepared, outcome)
+
+    def test_private_visit_attempt_prepares_continues_publishes_and_reads_back(self):
+        from unittest.mock import Mock, patch
+        from clinic_photos.publication import coordinator
+
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-composition-001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        fresh = contracts.SubmittedOperation(
+            id="a" * 32, site=SITE, actor=ACTOR, kind=request.kind,
+            request_key=request.request_key, payload_digest="a" * 64, request=request,
+        )
+        prepared = contracts.PreparedOperation(
+            id=fresh.id, site=SITE, actor=ACTOR, kind=fresh.kind, payload_digest=fresh.payload_digest,
+            key="/private/files/clinic-photo-test.jpg", generation=1, draft=None,
+            expected_version=None, synthetic_patient=None,
+            target_identity=contracts.visit_target_identity(binding), expected_sha256=JPEG_SHA256,
+            expected_size=len(JPEG_BYTES), state="PREPARED", visit_binding=binding,
+        )
+        events = []
+        owner, published = Mock(), object()
+        owner.continue_after_own_preparation.side_effect = lambda p: events.append("continue")
+        @contextlib.contextmanager
+        def hold(*args):
+            events.append("hold")
+            yield owner
+        with tempfile.TemporaryDirectory() as root, fake_runtime(sites_path=sites_volume(root)) as fake:
+            fake.db.transaction_writes = 0
+            from clinic_photos.visit import capture
+            with patch.object(exclusion, "target_identity_for_operation", return_value=prepared.target_identity), \
+                 patch.object(exclusion, "hold_exclusion", side_effect=hold), \
+                 patch.object(journal, "load_submission", return_value=fresh), \
+                 patch.object(capture, "check_slot_availability", side_effect=lambda b: events.append("auth")), \
+                 patch.object(journal, "prepare", side_effect=lambda f: events.append("prepare") or prepared), \
+                 patch.object(coordinator, "_commit", side_effect=lambda: events.append("prepare-commit")) as commit, \
+                 patch.object(coordinator, "_publish_prepared_visit",
+                              side_effect=lambda *args: events.append("publish") or published) as publish_visit, \
+                 patch.object(coordinator, "_readback_visit",
+                              side_effect=lambda *args: events.append("readback") or "verified") as readback:
+                self.assertEqual(coordinator._execute_private_visit(fresh), "verified")
+                self.assertEqual(events, ["hold", "auth", "prepare", "prepare-commit", "continue",
+                                          "publish", "readback"])
+                readback.side_effect = coordinator.CoordinatorUnknown("unverified")
+                with self.assertRaises(coordinator.CoordinatorUnknown):
+                    coordinator._execute_private_visit(fresh)
+                publish_visit.reset_mock()
+                commit.side_effect = RuntimeError("uncertain preparation commit")
+                with self.assertRaises(coordinator.CoordinatorUnknown):
+                    coordinator._execute_private_visit(fresh)
+                publish_visit.assert_not_called()
+
+    def test_visit_failure_rolls_back_before_commit_and_never_retries_commit(self):
+        from unittest.mock import Mock, patch
+        from clinic_photos.publication import coordinator
+
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        prepared = contracts.PreparedOperation(
+            id="operation", site=SITE, actor=ACTOR, kind=contracts.VISIT_ORIGINAL_CREATE,
+            payload_digest="a" * 64, key="/private/files/clinic-photo-test.jpg", generation=1,
+            draft=None, expected_version=None, synthetic_patient=None,
+            target_identity=contracts.visit_target_identity(binding), expected_sha256=JPEG_SHA256,
+            expected_size=len(JPEG_BYTES), state="PREPARED", visit_binding=binding,
+        )
+        for failure in ("eligibility", "save", "slot", "commit"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root, \
+                 fake_runtime(sites_path=sites_volume(root)) as fake:
+                from clinic_photos.visit import capture
+                owner, file_doc, photo = Mock(), Mock(), Mock()
+                file_doc.flags = types.SimpleNamespace(ignore_permissions=None)
+                if failure == "save":
+                    def fail_save(**kwargs):
+                        file_doc.flags.ignore_permissions = kwargs["ignore_permissions"]
+                        raise RuntimeError("native save veto")
+                    file_doc.save.side_effect = fail_save
+                photo.name = "PHOTO"
+                bound = types.SimpleNamespace(file_name="FILE")
+                @contextlib.contextmanager
+                def scope(*_args, **_kwargs):
+                    yield
+                def finish(_prepared, _owner, action):
+                    if failure == "commit" and action == "commit":
+                        raise RuntimeError("unknown commit")
+                with patch.object(coordinator.frappe_context, "owned_publication_transaction", scope), \
+                     patch.object(coordinator.frappe_context, "visit_photo_insertion", scope), \
+                     patch.object(coordinator.frappe_context, "visit_file_attachment", scope), \
+                     patch.object(writer, "_live_owner", return_value=owner), \
+                     patch.object(writer, "_require_persisted_prepared"), \
+                     patch.object(capture, "check_slot_availability",
+                                  side_effect=RuntimeError() if failure == "eligibility" else None), \
+                     patch.object(writer, "rollback_visit_transaction") as rollback, \
+                     patch.object(coordinator, "_exact_file_document", return_value=file_doc), \
+                     patch.object(fake, "get_doc", return_value=photo), \
+                     patch.object(writer, "write_first_object", return_value=bound) as write, \
+                     patch.object(writer, "domain_linkage"), \
+                     patch.object(writer, "consume_persisted_object", return_value="FILE"), \
+                     patch.object(capture, "insert_prepared_slot_link",
+                                  side_effect=RuntimeError() if failure == "slot" else None), \
+                     patch.object(journal, "publish"), \
+                     patch.object(writer, "arm_visit_final_commit"), \
+                     patch.object(writer, "finish_visit_transaction", side_effect=finish) as ended:
+                    with self.assertRaises(coordinator.CoordinatorUnknown):
+                        coordinator._publish_prepared_visit(owner, prepared, JPEG_BYTES)
+                    owner.poison.assert_called()
+                    if failure == "eligibility":
+                        rollback.assert_called_once_with(prepared, owner, fake.db)
+                        write.assert_not_called()
+                        ended.assert_not_called()
+                    elif failure in ("save", "slot"):
+                        rollback.assert_called_once_with(prepared, owner, fake.db)
+                        ended.assert_not_called()
+                        self.assertIsNone(file_doc.flags.ignore_permissions)
+                    else:
+                        ended.assert_called_once_with(prepared, owner, "commit")
+                        rollback.assert_not_called()
+
+    def test_visit_sequence_keeps_commit_inside_owner_and_uses_exact_objects(self):
+        from unittest.mock import Mock, patch
+        from clinic_photos.publication import coordinator
+
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        prepared = contracts.PreparedOperation(
+            id="operation", site=SITE, actor=ACTOR, kind=contracts.VISIT_ORIGINAL_CREATE,
+            payload_digest="a" * 64, key="/private/files/clinic-photo-test.jpg",
+            generation=1, draft=None, expected_version=None, synthetic_patient=None,
+            target_identity=contracts.visit_target_identity(binding),
+            expected_sha256=JPEG_SHA256, expected_size=len(JPEG_BYTES),
+            state="PREPARED", visit_binding=binding,
+        )
+        events = []
+        owner = Mock()
+        owner.require_continued.side_effect = lambda: events.append("continued")
+        file_doc = Mock()
+        file_doc.flags = types.SimpleNamespace(ignore_permissions=None)
+        bound = types.SimpleNamespace(file_name="FILE")
+        photo = Mock()
+        photo.name = "PHOTO"
+        photo.insert.side_effect = lambda **kw: events.append(("insert", kw))
+        file_doc.save.side_effect = lambda **kw: events.append(("save", kw))
+        linkage = object()
+        outcome = object()
+
+        @contextlib.contextmanager
+        def scope(name):
+            events.append("enter-" + name)
+            yield
+            events.append("exit-" + name)
+
+        with tempfile.TemporaryDirectory() as root, fake_runtime(sites_path=sites_volume(root)) as fake:
+            from clinic_photos.visit import capture
+            with patch.object(coordinator.frappe_context, "owned_publication_transaction",
+                              side_effect=lambda token: scope("owner")), \
+                 patch.object(coordinator.frappe_context, "visit_photo_insertion",
+                              side_effect=lambda *args: scope("photo")), \
+                 patch.object(coordinator.frappe_context, "visit_file_attachment",
+                              side_effect=lambda *args: scope("attachment")), \
+                 patch.object(capture, "check_slot_availability",
+                              side_effect=lambda arg: events.append("availability")), \
+                 patch.object(writer, "_live_owner", return_value=owner), \
+                 patch.object(writer, "_require_persisted_prepared"), \
+                 patch.object(coordinator, "_exact_file_document", return_value=file_doc), \
+                 patch.object(fake, "get_doc", return_value=photo) as get_doc, \
+                 patch.object(writer, "write_first_object",
+                              side_effect=lambda *args: events.append("file") or bound), \
+                 patch.object(writer, "domain_linkage", return_value=linkage), \
+                 patch.object(writer, "consume_persisted_object",
+                              side_effect=lambda *args, **kw: events.append("consume") or "FILE"), \
+                 patch.object(capture, "insert_prepared_slot_link",
+                              side_effect=lambda *args: events.append("slot")), \
+                 patch.object(journal, "publish",
+                              side_effect=lambda *args: events.append("publish") or outcome), \
+                 patch.object(writer, "arm_visit_final_commit",
+                              side_effect=lambda *args: events.append("arm")), \
+                 patch.object(writer, "finish_visit_transaction",
+                              side_effect=lambda *args: events.append(args[2])):
+                result = coordinator._publish_prepared_visit(owner, prepared, JPEG_BYTES)
+        self.assertIs(result, outcome)
+        self.assertEqual(events, [
+            "continued", "enter-owner", "availability", "file", "enter-photo",
+            ("insert", {"ignore_permissions": True}), "exit-photo", "enter-attachment",
+            ("save", {"ignore_permissions": True}), "exit-attachment", "consume", "slot", "publish", "arm",
+            "commit", "exit-owner",
+        ])
+        values = get_doc.call_args.args[0]
+        self.assertEqual((values["patient_reference"], values["original_file"],
+                          values["original_width"], values["original_height"]), ("PAT", "FILE", 2, 2))
+        self.assertEqual((file_doc.attached_to_doctype, file_doc.attached_to_name),
+                         ("Clinic Photo", "PHOTO"))
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ import contextlib
 import sqlite3
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from clinic_photos.access import file_mixin
@@ -1153,6 +1154,232 @@ class VersionControllerRuntimeTests(unittest.TestCase):
 # Metadata policy (pure)
 # ---------------------------------------------------------------------------
 class QueryHookRuntimeTests(unittest.TestCase):
+    def test_administrator_file_list_keeps_baseline_exclusions_only(self):
+        from clinic_photos.access import frappe_context, permissions
+
+        with fake_frappe(base_docs(), user="Administrator") as frappe:
+            frappe.db.add("User", "other-admin@example.test", enabled=1)
+            frappe.db.add("Has Role", "SYSTEM-MANAGER", parent="other-admin@example.test",
+                          parenttype="User", role="System Manager")
+            frappe.db.add("File", "VISIT", file_url="/private/files/clinic-visit-photo-x.png")
+            frappe.db.add("File", "DRAWING", file_url="/private/files/clinic-visit-annotation-x.png")
+            expected = permissions.file_query_condition(
+                frappe_context.current_actor("Administrator"),
+                frappe_context.protected_file_names(),
+            )
+            self.assertEqual(permissions.file_permission_query_conditions("Administrator"), expected)
+            self.assertEqual(permissions.file_permission_query_conditions(), expected)
+            for user in ("administrator", "other-admin@example.test", AUTHOR):
+                self.assertNotEqual(permissions.file_permission_query_conditions(user), expected)
+            self.assertFalse(permissions.file_has_permission(
+                types.SimpleNamespace(name="DRAWING", file_url="/private/files/clinic-visit-annotation-x.png"),
+                "Administrator", "read",
+            ))
+
+    def test_clinician_list_skips_legacy_scan(self):
+        from clinic_photos.access import frappe_context, permissions
+        with fake_frappe(base_docs()):
+            with mock.patch.object(frappe_context, "protected_file_names", side_effect=AssertionError("unused scan")):
+                permissions.file_permission_query_conditions(AUTHOR)
+
+    def test_file_read_fetches_persisted_row_once(self):
+        from clinic_photos.access import frappe_context, permissions
+        with fake_frappe(base_docs()) as frappe:
+            frappe.db.add("File", "ORDINARY", file_url="/private/files/ordinary.png")
+            doc = types.SimpleNamespace(name="ORDINARY", file_url="/private/files/ordinary.png")
+            with mock.patch.object(frappe_context, "_file_row", wraps=frappe_context._file_row) as get_row:
+                self.assertTrue(permissions.file_has_permission(doc, AUTHOR, "read"))
+            self.assertEqual(get_row.call_count, 1)
+
+    def test_managed_drawing_file_list_uses_bulk_version_evidence(self):
+        from clinic_photos.access import permissions
+
+        with fake_frappe(base_docs()) as frappe:
+            frappe.db.add("Clinic Photo Annotation Version", "V-MANAGED",
+                          draft="clinic-visit-annotation-draft-123",
+                          annotation_file="DRAWING", storage_key="/private/files/shared.png")
+            frappe.db.add("File", "DRAWING", file_url="/private/files/shared.png")
+            frappe.db.add("File", "ALIAS", file_url="/private/files/%73hared.png")
+            frappe.db.add("File", "ATTACHED", file_url="/private/files/unrelated.png",
+                          attached_to_doctype="Clinic Photo Annotation Version",
+                          attached_to_name="V-MANAGED")
+            frappe.db.add("File", "CASE", file_url="/private/files/CLINIC-VISIT-ANNOTATION-x.png")
+            frappe.db.add("File", "BAD-ENCODED",
+                          file_url="/private/files/../%2543LINIC-VISIT-ANNOTATION-x.png")
+            frappe.db.add("File", "LEGACY-NOTES",
+                          file_url="/private/files/report-clinic-visit-annotation-notes.txt")
+            frappe.db.add("File", "PUBLIC-NOTES",
+                          file_url="/files/clinic-visit-annotation-x.png")
+            frappe.db.add("File", "EXTERNAL-NOTES",
+                          file_url="https://example.test/clinic-visit-annotation-x.png")
+            frappe.db.add("File", "PUBLIC-PHOTO",
+                          file_url="/files/clinic-visit-photo-x.png")
+            condition = permissions.file_permission_query_conditions(AUTHOR)
+        for name in ("DRAWING", "ALIAS", "ATTACHED", "CASE", "BAD-ENCODED"):
+            self.assertIn(hex_name_literal(name), condition)
+        self.assertNotIn(hex_name_literal("LEGACY-NOTES"), condition)
+        self.assertNotIn(hex_name_literal("PUBLIC-NOTES"), condition)
+        self.assertNotIn(hex_name_literal("EXTERNAL-NOTES"), condition)
+        self.assertNotIn(hex_name_literal("PUBLIC-PHOTO"), condition)
+
+    def test_visit_marker_fallback_only_matches_private_leading_basename(self):
+        from clinic_photos.access import permissions
+
+        paths = {
+            "PUBLIC": "/files/clinic-visit-photo-x.png",
+            "REMOTE": "https://example.test/private/files/clinic-visit-photo-x.png",
+            "MIDDLE": "/private/files/report-clinic-visit-photo-x.png",
+            "ENCODED-MIDDLE": "/private/files/report-%63linic-visit-photo-x.png",
+            "PRIVATE": "/private/files/clinic-visit-photo-x.png",
+            "UPPERCASE": "/PRIVATE/FILES/CLINIC-VISIT-PHOTO-x.png",
+            "ENCODED": "/private/files/%2563linic-visit-photo-x.png",
+            "MALFORMED": "/private/files/../clinic-visit-photo-x.png",
+            "ENCODED-ROOT": "%2Fprivate%2Ffiles%2Fclinic-visit-photo-x.png",
+        }
+        hidden = {"PRIVATE", "UPPERCASE", "ENCODED", "MALFORMED", "ENCODED-ROOT"}
+        with fake_frappe(base_docs()) as frappe:
+            for name, url in paths.items():
+                frappe.db.add("File", name, file_url=url)
+                frappe.db.add("Clinic Photo", "P-" + name, storage_key=url)
+            file_condition = permissions.file_permission_query_conditions(AUTHOR)
+            photo_condition = permissions.photo_permission_query_conditions(AUTHOR)
+        for name, url in paths.items():
+            with self.subTest(name=name):
+                self.assertEqual(permissions._contains_visit_marker(url), name in hidden)
+                self.assertEqual(hex_name_literal(name) in file_condition, name in hidden)
+                self.assertEqual(hex_name_literal("P-" + name) in photo_condition, name in hidden)
+
+        with sqlite3.connect(":memory:") as connection:
+            connection.create_function("CONCAT", -1, lambda *values: "".join(values))
+            connection.execute('CREATE TABLE "tabFile" (name TEXT, file_url TEXT, attached_to_doctype TEXT, attached_to_name TEXT)')
+            connection.execute('CREATE TABLE "tabClinic Photo" (name TEXT, storage_key TEXT)')
+            connection.execute('CREATE TABLE "tabClinic Photo Annotation Version" (name TEXT, draft TEXT, annotation_file TEXT, storage_key TEXT)')
+            connection.execute('CREATE TABLE "tabClinic Photo Draft" (name TEXT)')
+            connection.executemany('INSERT INTO "tabFile" (name, file_url) VALUES (?, ?)', paths.items())
+            connection.executemany('INSERT INTO "tabClinic Photo" VALUES (?, ?)',
+                                   [("P-" + name, url) for name, url in paths.items()])
+            visible_files = {row[0] for row in connection.execute('SELECT name FROM "tabFile" WHERE ' + file_condition)}
+            visible_photos = {row[0][2:] for row in connection.execute('SELECT name FROM "tabClinic Photo" WHERE ' + photo_condition)}
+        self.assertEqual(visible_files, paths.keys() - hidden)
+        self.assertEqual(visible_photos, paths.keys() - hidden)
+
+    def test_managed_draft_attachment_collation_alias_list_direct_parity(self):
+        from clinic_photos.access import permissions
+        draft = "clinic-visit-annotation-draft-x"
+        with fake_frappe(base_docs()) as frappe:
+            frappe.db.add("Clinic Photo Draft", draft, author=AUTHOR)
+            frappe.db.add("File", "DRAFT-ATTACHED", file_url="/private/files/ordinary.png",
+                          attached_to_doctype="Clinic Photo Draft",
+                          attached_to_name="CLINIC-VISIT-ANNOTATION-DRAFT-X ")
+            original = frappe.db.get_value
+            # Collation-equivalent spelling lacks the reserved prefix before lookup.
+            frappe.db.docs["File"]["DRAFT-ATTACHED"]["attached_to_name"] = "alias"
+            def alias_lookup(doctype, name, *args, **kwargs):
+                return original(doctype, draft if doctype == "Clinic Photo Draft" and name == "alias" else name, *args, **kwargs)
+            with mock.patch.object(frappe.db, "get_value", side_effect=alias_lookup):
+                doc = types.SimpleNamespace(name="DRAFT-ATTACHED", file_url="/private/files/ordinary.png")
+                self.assertFalse(permissions.file_has_permission(doc, AUTHOR, "read"))
+            condition = permissions.file_permission_query_conditions(AUTHOR)
+        # SQLite custom collation models a non-prefix MariaDB-equivalent alias.
+        with sqlite3.connect(":memory:") as connection:
+            def collate(a, b):
+                norm = lambda s: draft if s.lower() == "alias" else s.lower()
+                return (norm(a) > norm(b)) - (norm(a) < norm(b))
+            connection.create_collation("DRAFT_ALIAS", collate)
+            connection.create_function("CONCAT", -1, lambda *values: "".join(values))
+            connection.execute('CREATE TABLE "tabFile" (name TEXT, file_url TEXT, attached_to_doctype TEXT, attached_to_name TEXT COLLATE DRAFT_ALIAS)')
+            connection.execute('CREATE TABLE "tabClinic Photo Annotation Version" (name TEXT, draft TEXT, annotation_file TEXT, storage_key TEXT)')
+            connection.execute('CREATE TABLE "tabClinic Photo Draft" (name TEXT COLLATE DRAFT_ALIAS)')
+            connection.execute('INSERT INTO "tabFile" VALUES (?, ?, ?, ?)', ("DRAFT-ATTACHED", "/private/files/ordinary.png", "Clinic Photo Draft", "alias"))
+            connection.execute('INSERT INTO "tabClinic Photo Draft" VALUES (?)', (draft,))
+            self.assertEqual(connection.execute('SELECT name FROM "tabFile" WHERE ' + condition).fetchall(), [])
+
+    def test_unrelated_encoded_paths_do_not_expand_list_sql(self):
+        from clinic_photos.access import permissions
+        with fake_frappe(base_docs()) as frappe:
+            for index in range(300):
+                frappe.db.add("File", str(index), file_url=f"/private/files/%61lias-{index}.txt")
+            condition = permissions.file_permission_query_conditions(AUTHOR)
+        self.assertNotIn("UNION ALL", condition)
+
+    def test_encoded_candidates_are_batched_without_truncation(self):
+        from clinic_photos.access import permissions
+        with fake_frappe(base_docs()) as frappe:
+            frappe.db.add("Clinic Photo Annotation Version", "V",
+                          draft="clinic-visit-annotation-draft-123",
+                          storage_key="/private/files/TARGET.png")
+            for index in range(205):
+                frappe.db.add("File", str(index), file_url=f"/private/files/%61lias-{index}.txt")
+            frappe.db.add("File", "MATCH", file_url="/private/files/%74arget.png")
+            calls = []
+            def bulk_match(query, values):
+                calls.append(values)
+                return [(values[i],) for i in range(0, len(values), 2)
+                        if values[i + 1].lower() == "/private/files/target.png"]
+            with mock.patch.object(frappe.db, "sql", side_effect=bulk_match):
+                condition = permissions.file_permission_query_conditions(AUTHOR)
+        self.assertEqual([len(values) for values in calls], [200, 200, 12])
+        self.assertIn(hex_name_literal("MATCH"), condition)
+        self.assertNotIn("UNION ALL", condition)
+
+    def test_managed_attachment_collation_alias_list_direct_parity(self):
+        from clinic_photos.access import permissions
+
+        with fake_frappe(base_docs()) as frappe:
+            frappe.db.add("Clinic Photo Annotation Version", "V-MANAGED",
+                          draft="clinic-visit-annotation-draft-123")
+            frappe.db.add("File", "ATTACHED", file_url="/private/files/ordinary.png",
+                          attached_to_doctype="Clinic Photo Annotation Version",
+                          attached_to_name="v-managed")
+            original_get_value = frappe.db.get_value
+            def collation_get_value(doctype, name, *args, **kwargs):
+                if doctype == "Clinic Photo Annotation Version" and name == "v-managed":
+                    name = "V-MANAGED"
+                return original_get_value(doctype, name, *args, **kwargs)
+            with mock.patch.object(frappe.db, "get_value", side_effect=collation_get_value):
+                doc = types.SimpleNamespace(name="ATTACHED", file_url="/private/files/ordinary.png")
+                self.assertFalse(permissions.file_has_permission(doc, AUTHOR, "read"))
+            condition = permissions.file_permission_query_conditions(AUTHOR)
+        with sqlite3.connect(":memory:") as connection:
+            connection.create_function("CONCAT", -1, lambda *values: "".join(values))
+            connection.execute('CREATE TABLE "tabFile" (name TEXT, file_url TEXT, attached_to_doctype TEXT, attached_to_name TEXT COLLATE NOCASE)')
+            connection.execute('CREATE TABLE "tabClinic Photo Annotation Version" (name TEXT COLLATE NOCASE, draft TEXT, annotation_file TEXT, storage_key TEXT)')
+            connection.execute('CREATE TABLE "tabClinic Photo Draft" (name TEXT)')
+            connection.execute('INSERT INTO "tabFile" VALUES (?, ?, ?, ?)',
+                               ("ATTACHED", "/private/files/ordinary.png", "Clinic Photo Annotation Version", "v-managed"))
+            connection.execute('INSERT INTO "tabClinic Photo Annotation Version" VALUES (?, ?, ?, ?)',
+                               ("V-MANAGED", "clinic-visit-annotation-draft-123", "", ""))
+            self.assertEqual(connection.execute('SELECT name FROM "tabFile" WHERE ' + condition).fetchall(), [])
+
+    def test_encoded_canonical_key_uses_database_collation(self):
+        from clinic_photos.access import permissions
+        with sqlite3.connect(":memory:") as connection:
+            connection.create_function("CONCAT", -1, lambda *values: "".join(values))
+            connection.execute('CREATE TABLE "tabFile" (name TEXT, file_url TEXT, attached_to_doctype TEXT, attached_to_name TEXT)')
+            connection.execute('CREATE TABLE "tabClinic Photo Annotation Version" (name TEXT, draft TEXT, annotation_file TEXT, storage_key TEXT COLLATE NOCASE)')
+            connection.execute('CREATE TABLE "tabClinic Photo Draft" (name TEXT)')
+            connection.execute('INSERT INTO "tabFile" VALUES (?, ?, ?, ?)', ("ENCODED", "/private/files/%73hared.png", "", ""))
+            connection.execute('INSERT INTO "tabClinic Photo Annotation Version" VALUES (?, ?, ?, ?)', ("V", "clinic-visit-annotation-draft-123", "", "/private/files/SHARED.png"))
+            with fake_frappe(base_docs()) as frappe:
+                frappe.db.add("Clinic Photo Annotation Version", "V",
+                              draft="clinic-visit-annotation-draft-123", storage_key="/private/files/SHARED.png")
+                frappe.db.add("File", "ENCODED", file_url="/private/files/%73hared.png")
+                with mock.patch.object(frappe.db, "sql", side_effect=lambda query, values: connection.execute(query.replace("%s", "?"), values).fetchall()):
+                    condition = permissions.file_permission_query_conditions(AUTHOR)
+            self.assertEqual(connection.execute('SELECT name FROM "tabFile" WHERE ' + condition).fetchall(), [])
+
+    def test_managed_drawing_direct_read_is_denied(self):
+        from clinic_photos.access import permissions
+
+        with fake_frappe(base_docs()) as frappe:
+            frappe.db.add("Clinic Photo Annotation Version", "V-MANAGED",
+                          draft="clinic-visit-annotation-draft-123",
+                          annotation_file="DRAWING", storage_key="/private/files/shared.png",
+                          state="pending")
+            frappe.db.add("File", "DRAWING", file_url="/private/files/shared.png")
+            doc = types.SimpleNamespace(name="DRAWING", file_url="/private/files/shared.png")
+            self.assertFalse(permissions.file_has_permission(doc, AUTHOR, "read"))
+
     def _outsider_docs(self):
         docs = base_docs()
         docs["User"][OTHER_AUTHOR] = {"name": OTHER_AUTHOR, "enabled": 1}
@@ -1163,6 +1390,24 @@ class QueryHookRuntimeTests(unittest.TestCase):
             "role": "Healthcare Administrator",
         }
         return docs
+
+    def test_visit_query_hooks_support_named_parameter_interpolation(self):
+        from clinic_photos.access import permissions
+
+        with fake_frappe(base_docs()):
+            conditions = (
+                ("`tabFile`.`file_url`", permissions.file_permission_query_conditions(AUTHOR)),
+                ("`tabClinic Photo`.`storage_key`", permissions.photo_permission_query_conditions(AUTHOR)),
+            )
+        for field, condition in conditions:
+            with self.subTest(field=field):
+                query = ("SELECT name WHERE " + condition + " AND name = %(name)s") % {
+                    "name": "'ordinary'"
+                }
+                self.assertIn(
+                    f"LOWER(IFNULL({field}, '')) NOT LIKE CONCAT('/private/files/clinic-visit-photo-', CHAR(37))",
+                    query,
+                )
 
     def test_non_clinician_hook_excludes_scanned_orphans_only(self):
         from clinic_photos.access import permissions
@@ -1186,7 +1431,7 @@ class QueryHookRuntimeTests(unittest.TestCase):
         self.assertNotIn(hex_name_literal("UNRELATED"), condition)
         self.assertTrue(condition.startswith("not ("))
 
-    def test_clinician_hook_adds_no_condition(self):
+    def test_clinician_hook_preserves_legacy_and_hides_visit_namespace(self):
         from clinic_photos.access import permissions
 
         with fake_frappe(base_docs()) as frappe:
@@ -1196,7 +1441,90 @@ class QueryHookRuntimeTests(unittest.TestCase):
                 file_url="/private/files/clinic-photo-99999999.png",
                 file_name="o.png",
             )
-            self.assertEqual(permissions.file_permission_query_conditions(AUTHOR), "")
+            condition = permissions.file_permission_query_conditions(AUTHOR)
+            self.assertIn("`tabFile`.`file_url`", condition)
+            self.assertIn("/private/files/clinic-visit-photo-", condition)
+            self.assertNotIn(hex_name_literal("ORPHAN"), condition)
+
+    def test_visit_list_excludes_encoded_and_malformed_aliases_for_each_actor(self):
+        from clinic_photos.access import permissions
+
+        with fake_frappe(self._outsider_docs()) as frappe:
+            for name, url in (
+                ("VISIT-ENCODED", "/private/files/%63linic-visit-photo-1.png"),
+                ("VISIT-BAD", "/private/files/../clinic-visit-photo-2.png"),
+                ("VISIT-DOUBLE", "/private/files/%2563linic-visit-photo-3.png"),
+                ("LEGACY", "/private/files/clinic-photo-1.png"),
+                ("ORDINARY", "/private/files/scan.png"),
+            ):
+                frappe.db.add("File", name, file_url=url)
+            for user in (AUTHOR, OTHER_AUTHOR):
+                condition = permissions.file_permission_query_conditions(user)
+                for name in ("VISIT-ENCODED", "VISIT-BAD", "VISIT-DOUBLE"):
+                    self.assertIn(hex_name_literal(name), condition)
+                self.assertNotIn(hex_name_literal("ORDINARY"), condition)
+
+    def test_visit_query_executes_against_file_table_and_preserves_legacy(self):
+        from clinic_photos.access import permissions
+
+        with fake_frappe(base_docs()) as frappe:
+            frappe.db.add("File", "O'BRIEN", file_url="/private/files/%63linic-visit-photo-x")
+            condition = permissions.file_permission_query_conditions(AUTHOR)
+        with sqlite3.connect(":memory:") as connection:
+            connection.create_function("CONCAT", -1, lambda *values: "".join(values))
+            connection.execute('CREATE TABLE "tabFile" (name TEXT, file_url TEXT, attached_to_doctype TEXT, attached_to_name TEXT)')
+            connection.execute('CREATE TABLE "tabClinic Photo Annotation Version" (name TEXT, draft TEXT, annotation_file TEXT, storage_key TEXT)')
+            connection.execute('CREATE TABLE "tabClinic Photo Draft" (name TEXT)')
+            connection.executemany('INSERT INTO "tabFile" (name, file_url) VALUES (?, ?)', [
+                ("O'BRIEN", "/private/files/%63linic-visit-photo-x"),
+                ("NEW", "/private/files/clinic-visit-photo-new.png"),
+                ("LEGACY", "/private/files/clinic-photo-old.png"),
+                ("ORDINARY", "/private/files/ordinary.png"),
+            ])
+            rows = connection.execute(
+                'SELECT name FROM "tabFile" WHERE ' + condition + " ORDER BY name"
+            ).fetchall()
+        self.assertEqual(rows, [("LEGACY",), ("ORDINARY",)])
+
+    def test_photo_list_excludes_visit_alias_and_slot_without_key(self):
+        from clinic_photos.access import permissions
+
+        with fake_frappe(base_docs()) as frappe:
+            frappe.db.add("Clinic Photo", "P-ALIAS",
+                          storage_key="/private/files/%63linic-visit-photo-x")
+            frappe.db.add("Clinic Photo", "P-SLOT", storage_key="")
+            frappe.db.add("Clinic Visit Photo Slot", "S", photo="P-SLOT")
+            condition = permissions.photo_permission_query_conditions(AUTHOR)
+        self.assertIn("`tabClinic Photo`.`storage_key`", condition)
+        self.assertIn(hex_name_literal("P-ALIAS"), condition)
+        self.assertIn(hex_name_literal("P-SLOT"), condition)
+        with sqlite3.connect(":memory:") as connection:
+            connection.create_function("CONCAT", -1, lambda *values: "".join(values))
+            connection.execute('CREATE TABLE "tabClinic Photo" (name TEXT, storage_key TEXT)')
+            connection.executemany('INSERT INTO "tabClinic Photo" VALUES (?, ?)', [
+                ("P-ALIAS", "/private/files/%63linic-visit-photo-x"),
+                ("P-SLOT", ""),
+                ("P-NEW", "/private/files/clinic-visit-photo-x"),
+                ("P-OLD", "/private/files/clinic-photo-x"),
+            ])
+            rows = connection.execute(
+                'SELECT name FROM "tabClinic Photo" WHERE ' + condition
+            ).fetchall()
+        self.assertEqual(rows, [("P-OLD",)])
+
+    def test_photo_direct_read_denies_stored_marker_and_slot_when_caller_mutates_key(self):
+        from clinic_photos.access import permissions
+
+        with fake_frappe(base_docs()) as frappe:
+            frappe.db.add("Clinic Photo", "P-STORED",
+                          storage_key="/private/files/clinic-visit-photo-x")
+            frappe.db.add("Clinic Photo", "P-SLOT", storage_key="")
+            frappe.db.add("Clinic Visit Photo Slot", "S", photo="P-SLOT")
+            for name in ("P-STORED", "P-SLOT"):
+                doc = types.SimpleNamespace(name=name, storage_key="/private/files/ordinary.png")
+                self.assertFalse(permissions.photo_has_permission(doc, ptype="read"))
+            legacy = types.SimpleNamespace(name=PHOTO, storage_key=ORIGINAL_KEY)
+            self.assertTrue(permissions.photo_has_permission(legacy, ptype="read"))
 
 
 class MetadataPolicyTests(unittest.TestCase):
@@ -1475,12 +1803,21 @@ class HookRegistrationTests(unittest.TestCase):
                 "File": (
                     "clinic_photos.access.permissions."
                     "file_permission_query_conditions"
-                )
+                ),
+                "Clinic Photo": (
+                    "clinic_photos.access.permissions."
+                    "photo_permission_query_conditions"
+                ),
+                "Clinic Photo Draft": "clinic_photos.access.permissions.draft_permission_query_conditions",
+                "Clinic Photo Annotation Version": "clinic_photos.access.permissions.version_permission_query_conditions",
             },
         )
         self.assertEqual(
             self.hooks.has_permission,
-            {"File": "clinic_photos.access.permissions.file_has_permission"},
+            {"File": "clinic_photos.access.permissions.file_has_permission",
+             "Clinic Photo": "clinic_photos.access.permissions.photo_has_permission",
+             "Clinic Photo Draft": "clinic_photos.access.permissions.draft_has_permission",
+             "Clinic Photo Annotation Version": "clinic_photos.access.permissions.version_has_permission"},
         )
 
     def test_whitelisted_entry_point_and_response_hooks_are_registered(self):
@@ -1499,6 +1836,8 @@ class HookRegistrationTests(unittest.TestCase):
                     "clinic_photos.access.entrypoints.convert_mt940_to_csv"
                 ),
                 NATIVE_ZIP_PATH: "clinic_photos.access.entrypoints.zip_files",
+                "healthcare.healthcare.doctype.patient_appointment.patient_appointment."
+                "check_in_appointment": "clinic_photos.visit.checkin.check_in_appointment",
             },
         )
         self.assertEqual(
@@ -1509,7 +1848,9 @@ class HookRegistrationTests(unittest.TestCase):
             self.hooks.before_request,
             ["clinic_photos.access.entrypoints.mark_direct_private_request"],
         )
-        self.assertFalse(getattr(self.hooks, "doc_events", None))
+        self.assertEqual(self.hooks.doc_events, {
+            "DocShare": {"validate": "clinic_photos.access.share.validate_docshare"},
+        })
 
 
 class ControllerWiringTests(unittest.TestCase):

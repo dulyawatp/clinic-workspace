@@ -27,7 +27,13 @@ from clinic_photos.access.policy import Actor, ProtectedRecord, may_read
 
 PRIVATE_URL_PREFIX = "/private/files/"
 PRIVATE_RAW_PREFIX = "/private/"
-RESERVED_BASENAME_PREFIXES = ("clinic-photo-", "clinic-annotation-")
+VISIT_BASENAME_PREFIX = "clinic-visit-photo-"
+VISIT_ANNOTATION_BASENAME_PREFIX = "clinic-visit-annotation-"
+RESERVED_BASENAME_PREFIXES = (
+    "clinic-photo-",
+    "clinic-annotation-",
+    VISIT_BASENAME_PREFIX,
+)
 FORBIDDEN_URL_TOKENS = ("\\", "\x00")
 ENCODED_SEPARATORS = ("%2f", "%5c", "%00")
 
@@ -36,6 +42,7 @@ ENCODED_SEPARATORS = ("%2f", "%5c", "%00")
 # no author, lifecycle or read right of its own.
 RESERVATION_REFERENCE_KIND = "reservation"
 PENDING_RECORD_KIND = "pending"
+_UNSET = object()
 
 
 class InvalidStoragePath(ValueError):
@@ -151,12 +158,24 @@ def canonical_private_key(file_url: str) -> str:
     return PRIVATE_URL_PREFIX + "/".join(segments)
 
 
+def is_canonical_visit_key(storage_key: str) -> bool:
+    """Identify canonical keys in the visit namespace, including orphan names."""
+    try:
+        return (
+            canonical_private_key(storage_key) == storage_key
+            and storage_key.rsplit("/", 1)[-1].startswith(VISIT_BASENAME_PREFIX)
+        )
+    except InvalidStoragePath:
+        return False
+
+
 def reserved_namespace_name(value: str) -> bool:
     """Whether a path or bare filename is in the reserved orphan namespace."""
     if not isinstance(value, str) or not value:
         return False
     basename = value.rstrip("/").rsplit("/", 1)[-1]
-    return basename.startswith(RESERVED_BASENAME_PREFIXES)
+    return (basename.startswith(RESERVED_BASENAME_PREFIXES) or
+            basename.lower().startswith(VISIT_ANNOTATION_BASENAME_PREFIX))
 
 
 def is_reserved_key(storage_key: str) -> bool:
@@ -226,6 +245,26 @@ def _dedupe_refs(references: Sequence[Any]) -> tuple:
     return tuple(unique)
 
 
+def is_managed_annotation_file(
+    file_doc: Any, *, lookup: Any = None, persisted: Any = None, record: Any = _UNSET
+) -> bool:
+    """Classify reserved drawing keys and authoritative managed version references."""
+    from clinic_photos.access.draft_identity import is_reserved_visit_identity
+
+    keys = [identity_of(doc)[0] for doc in (file_doc, persisted)]
+    if any(key.rsplit("/", 1)[-1].lower().startswith(VISIT_ANNOTATION_BASENAME_PREFIX)
+           for key in keys if key):
+        return True
+    if record is _UNSET:
+        record = classify_file(file_doc, lookup=lookup, persisted=persisted)
+    return bool(record and any(
+        _ref_value(ref, "doctype") == "Clinic Photo Annotation Version"
+        and (is_reserved_visit_identity(_ref_value(ref, "name"))
+             or is_reserved_visit_identity(_ref_value(ref, "draft")))
+        for ref in record.references
+    ))
+
+
 def _build_record(
     references: Sequence[Any], storage_key: str, inconsistent: bool
 ) -> ProtectedRecord:
@@ -281,7 +320,7 @@ def classify_file(
     protected file, and a File referenced by a feature record stays protected even
     if its URL is changed.
     """
-    file_name = file_name_of(file_doc)
+    file_name = file_name_of(persisted) or file_name_of(file_doc)
     current_key, current_invalid = identity_of(file_doc)
     persisted_key, persisted_invalid = identity_of(persisted)
 
@@ -380,6 +419,7 @@ def require_protected_read(
     native_read: bool | None = None,
     lookup: Any = None,
     persisted: Any = None,
+    record: Any = _UNSET,
 ) -> None:
     """Raise unless protected bytes have a current enabled clinician and native read.
 
@@ -387,7 +427,10 @@ def require_protected_read(
     runtime defaults resolve a fresh actor and native File/feature read decisions
     through :mod:`clinic_photos.access.frappe_context`; pure callers inject them.
     """
-    record = classify_file(file_doc, lookup=lookup, persisted=persisted)
+    if record is _UNSET:
+        record = classify_file(file_doc, lookup=lookup, persisted=persisted)
+    if is_managed_annotation_file(file_doc, lookup=lookup, persisted=persisted, record=record):
+        raise ProtectedAccessDenied("managed annotation bytes are unavailable")
     if record is None:
         return
     if not record.registered or record.inconsistent:

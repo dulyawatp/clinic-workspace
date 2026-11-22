@@ -1,0 +1,18 @@
+{
+ "doctype": "DocType",
+ "name": "Clinic Visit Photo Consent Audit",
+ "module": "Clinic Photos",
+ "engine": "InnoDB",
+ "autoname": "hash",
+ "allow_rename": 0,
+ "field_order": ["appointment", "patient", "action", "evidence", "attested", "actor"],
+ "fields": [
+  {"fieldname": "appointment", "fieldtype": "Data", "label": "Appointment", "reqd": 1, "read_only": 1},
+  {"fieldname": "patient", "fieldtype": "Data", "label": "Patient", "reqd": 1, "read_only": 1},
+  {"fieldname": "action", "fieldtype": "Select", "options": "Granted\nRevoked", "label": "Action", "reqd": 1, "read_only": 1},
+  {"fieldname": "evidence", "fieldtype": "Data", "label": "Evidence", "read_only": 1},
+  {"fieldname": "attested", "fieldtype": "Check", "label": "Staff Attested", "read_only": 1},
+  {"fieldname": "actor", "fieldtype": "Data", "label": "Actor", "reqd": 1, "read_only": 1}
+ ],
+ "permissions": []
+}

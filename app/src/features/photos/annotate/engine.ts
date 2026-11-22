@@ -32,6 +32,7 @@ export type LayerShape =
       readonly width: number;
       readonly height: number;
       readonly stroke: string;
+      readonly strokeWidth?: number;
     }
   | {
       readonly id: string;
@@ -41,6 +42,7 @@ export type LayerShape =
       readonly radiusX: number;
       readonly radiusY: number;
       readonly stroke: string;
+      readonly strokeWidth?: number;
     }
   | {
       readonly id: string;
@@ -48,6 +50,7 @@ export type LayerShape =
       readonly from: Point;
       readonly to: Point;
       readonly stroke: string;
+      readonly strokeWidth?: number;
     }
   | {
       readonly id: string;
@@ -63,6 +66,7 @@ export type LayerShape =
       readonly y: number;
       readonly text: string;
       readonly stroke: string;
+      readonly fontSize?: number;
     };
 
 export interface AnnotationState {

@@ -29,6 +29,7 @@ no existing protected original is seeded, mutated or deleted.
 import base64
 import contextlib
 import copy
+import datetime
 import hashlib
 import os
 import stat
@@ -84,10 +85,13 @@ class _FakeCallbacks:
     def add(self, callback):
         self.callbacks.append(callback)
 
+    @property
+    def _functions(self):
+        return self.callbacks
+
     def run(self):
-        callbacks, self.callbacks = self.callbacks, []
-        for callback in callbacks:
-            callback()
+        while self.callbacks:
+            self.callbacks.pop(0)()
 
     def reset(self):
         self.callbacks = []
@@ -182,6 +186,8 @@ class _FakeDB:
         if not rows:
             return None
         row = rows[0]
+        if fieldname == "*" and as_dict:
+            return dict(row)
         fields = fieldname if isinstance(fieldname, (list, tuple)) else [fieldname]
         if as_dict:
             return {field: row.get(field) for field in fields}
@@ -271,6 +277,7 @@ class _FakeFrappe(types.ModuleType):
         self.db = _FakeDB(docs)
         self.session = types.SimpleNamespace(user=user)
         self.local = types.SimpleNamespace(site=site, sites_path=sites_path)
+        self.local.db = self.db
         self.sites_path = sites_path
         self.site = site
         self.form_dict = {}
@@ -546,6 +553,9 @@ class _NativeFile:
             owner=self.owner,
             content_hash=self.content_hash,
             file_size=self.file_size,
+            attached_to_doctype=None,
+            attached_to_name=None,
+            attached_to_field=None,
         )
         self.db_inserts.append(self.name)
 
@@ -705,17 +715,37 @@ def operation_rows(fake):
     return fake.db.docs.get(journal.OPERATION_DOCTYPE, {})
 
 
+def stage_visit_fixture(request):
+    """Stage visit in writer-only fixture; domain authority has separate tests."""
+    from unittest.mock import patch
+    from clinic_photos.visit import capture
+
+    with patch.object(capture, "check_visit_authority"):
+        return journal.stage_submission(request, actor=ACTOR, site=SITE)
+
+
 @contextlib.contextmanager
 def prepared_in_owner_scope(sites_path, *, request=None):
     """Yield ``(fake, owner, prepared)`` with a real PREPARED row in the same scope."""
+    from unittest.mock import patch
+
     request = request or synthetic_request()
     with fake_runtime(sites_path=sites_path) as fake:
         seed_actor(fake)
         seed_patient(fake)
-        submission = journal.stage_submission(request, actor=ACTOR, site=SITE)
+        # Writer fixture models journal/File ownership, not visit domain rows.
+        # Visit authority is exercised separately by visit capture/journal tests.
+        if request.kind == contracts.VISIT_ORIGINAL_CREATE:
+            from clinic_photos.visit import capture
+            authority = lambda: patch.object(capture, "check_visit_authority")
+        else:
+            authority = contextlib.nullcontext
+        with authority():
+            submission = journal.stage_submission(request, actor=ACTOR, site=SITE)
         target = exclusion.target_identity_for_operation(submission.id)
         with exclusion.hold_exclusion(submission.id, target) as owner:
-            prepared = journal.prepare(submission)
+            with authority():
+                prepared = journal.prepare(submission)
             yield fake, owner, prepared
 
 
@@ -752,6 +782,860 @@ def live_intent_scope(prepared, document, owner):
 # ---------------------------------------------------------------------------
 # Exact-object first write (bytes only inside the native save_file window)
 # ---------------------------------------------------------------------------
+class VisitPreparationOwnerTests(unittest.TestCase):
+    def test_visit_finish_requires_native_commit_acknowledgement(self):
+        from unittest.mock import patch
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-ack-check-001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        for failure in ("disabled", "missing_after", "after_raises"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
+                with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                    fake.db.allow_transaction_control = True
+                    fake.db.commit()
+                    owner.continue_after_own_preparation(prepared)
+                    with frappe_context.owned_publication_transaction(owner):
+                        bound = writer.write_first_object(prepared, exact_file(prepared))
+                        writer._intent_for_key(prepared.key)["visit_lifetime"]["finalized"] = bound
+                        def commit():
+                            if failure != "disabled":
+                                fake.db.before_commit.run()
+                            if failure == "after_raises":
+                                fake.db.after_commit.run()
+                                raise RuntimeError("after commit failure")
+                        with patch.object(writer, "_verify_staged_visit_final"), \
+                             patch.object(fake.db, "commit", side_effect=commit):
+                            with self.assertRaises(writer.FirstObjectUncertain):
+                                writer.finish_visit_transaction(prepared, owner, "commit")
+                        self.assertTrue(owner.poisoned)
+
+    def test_visit_full_rollback_still_runs_for_poisoned_owner(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-rollback-poison", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                with frappe_context.owned_publication_transaction(owner):
+                    writer.write_first_object(prepared, exact_file(prepared))
+                    db = fake.local.db
+                    owner.poison("linker_failure")
+                    writer.rollback_visit_transaction(prepared, owner, db)
+                    self.assertEqual(db.rollback_calls, 1)
+                    with self.assertRaises(writer.FirstObjectUncertain):
+                        writer.rollback_visit_transaction(prepared, owner, db)
+                    self.assertEqual(db.rollback_calls, 1)
+
+    def test_visit_cleanup_refuses_foreign_actor_owner_or_connection(self):
+        from unittest.mock import patch
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-rollback-ident", visit_binding=binding, image_bytes=JPEG_BYTES)
+        for mismatch in ("actor", "owner", "db"):
+            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as root:
+                with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                    fake.db.allow_transaction_control = True
+                    fake.db.commit()
+                    owner.continue_after_own_preparation(prepared)
+                    with frappe_context.owned_publication_transaction(owner):
+                        writer.write_first_object(prepared, exact_file(prepared))
+                        db = fake.local.db
+                        if mismatch == "actor":
+                            fake.session.user = "other"
+                        if mismatch == "db":
+                            fake.local.db = object()
+                        patcher = (patch.object(frappe_context, "current_publication_owner", return_value=object())
+                                   if mismatch == "owner" else contextlib.nullcontext())
+                        with patcher, self.assertRaises(writer.FirstObjectUncertain):
+                            writer.rollback_visit_transaction(prepared, owner, db)
+                        self.assertEqual(db.rollback_calls, 0)
+
+    def test_visit_attachment_rejects_post_hook_metadata_mutation(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-attachment-002", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                with frappe_context.owned_publication_transaction(owner):
+                    file_doc = exact_file(prepared)
+                    bound = writer.write_first_object(prepared, file_doc)
+                    photo = types.SimpleNamespace(
+                        name="PHOTO", patient_reference="PAT", storage_key=prepared.key,
+                        original_file=bound.file_name, original_sha256=prepared.expected_sha256,
+                        original_width=2, original_height=2,
+                    )
+                    with frappe_context.visit_photo_insertion(prepared, bound, file_doc, photo):
+                        frappe_context.require_visit_photo_insertion(photo)
+                        fake.db.add("Clinic Photo", photo.name, patient_reference="PAT",
+                                    storage_key=prepared.key, original_file=bound.file_name,
+                                    original_sha256=prepared.expected_sha256,
+                                    original_width=2, original_height=2)
+                    row = fake.db.docs["File"][file_doc.name]
+                    row["category"] = "original"
+                    with self.assertRaises(fake.PermissionError):
+                        with frappe_context.visit_file_attachment(prepared, bound, file_doc, photo):
+                            fake.local._clinic_visit_attachment["used"] = True
+                            row.update(attached_to_doctype="Clinic Photo", attached_to_name=photo.name,
+                                       category="tampered")
+
+    def test_visit_attachment_allows_only_exact_file_photo_and_metadata(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-attachment-001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                with frappe_context.owned_publication_transaction(owner):
+                    file_doc = exact_file(prepared)
+                    bound = writer.write_first_object(prepared, file_doc)
+                    photo = types.SimpleNamespace(
+                        name="PHOTO", patient_reference="PAT", storage_key=prepared.key,
+                        original_file=bound.file_name, original_sha256=prepared.expected_sha256,
+                        original_width=2, original_height=2,
+                    )
+                    with frappe_context.visit_photo_insertion(prepared, bound, file_doc, photo):
+                        frappe_context.require_visit_photo_insertion(photo)
+                        fake.db.add("Clinic Photo", photo.name, patient_reference="PAT",
+                                    storage_key=prepared.key, original_file=bound.file_name,
+                                    original_sha256=prepared.expected_sha256,
+                                    original_width=2, original_height=2)
+                    file_doc.attached_to_field = None
+                    file_doc.category = "unchanged"
+                    file_doc.creation = "2026-11-20 12:34:56.123456"
+                    fake.db.docs["File"][file_doc.name]["category"] = "unchanged"
+                    def fields():
+                        return {key: getattr(file_doc, key, None) for key in (
+                            "name", "file_url", "file_name", "owner", "is_private",
+                            "file_size", "content_hash", "category", "creation", "attached_to_doctype",
+                            "attached_to_name", "attached_to_field",
+                        )}
+                    file_doc.as_dict = fields
+                    before = fields()
+                    before["creation"] = datetime.datetime(2026, 11, 20, 12, 34, 56, 123456)
+                    with self.assertRaises(fake.PermissionError):
+                        with frappe_context.visit_file_attachment(prepared, bound, file_doc, copy.copy(photo)):
+                            pass
+                    with frappe_context.visit_file_attachment(prepared, bound, file_doc, photo):
+                        file_doc.attached_to_doctype = "Clinic Photo"
+                        file_doc.attached_to_name = photo.name
+                        for field, value in (("category", "changed"), ("attached_to_name", "OTHER"),
+                                             ("file_url", "/private/files/other"),
+                                             ("is_private", 0), ("file_size", 999),
+                                             ("creation", "2026-11-20 12:34:56.123457"),
+                                             ("content", b"changed"),
+                                             ("attached_to_field", "other")):
+                            old = getattr(file_doc, field)
+                            setattr(file_doc, field, value)
+                            with self.assertRaises(fake.PermissionError):
+                                frappe_context.require_visit_file_attachment(file_doc, before)
+                            setattr(file_doc, field, old)
+                        with self.assertRaises(fake.PermissionError):
+                            frappe_context.require_visit_file_attachment(copy.copy(file_doc), before)
+                        frappe_context.require_file_update(file_doc, before)
+                        fake.db.docs["File"][file_doc.name].update(
+                            attached_to_doctype="Clinic Photo", attached_to_name=photo.name,
+                            attached_to_field=None,
+                        )
+
+    def test_visit_receipt_rejects_concrete_database_rebinding(self):
+        from unittest.mock import patch
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-db-rebind-0001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                bound = writer.write_first_object(prepared, exact_file(prepared))
+                fake.local.db = object()
+                with patch.object(writer, "_consume_locked") as consume:
+                    with self.assertRaises(writer.FirstObjectError):
+                        writer.consume_persisted_object(prepared, bound)
+                    consume.assert_not_called()
+
+    def test_visit_rejects_unaudited_precommit_callback(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-callback-00001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                writer.write_first_object(prepared, exact_file(prepared))
+                called = []
+                fake.db.before_commit.add(lambda: called.append(True))
+                with self.assertRaises(writer.FirstObjectError):
+                    fake.db.commit()
+                self.assertEqual(called, [])
+
+    def test_visit_finish_error_invalidates_and_poisons_exact_owner(self):
+        from unittest.mock import patch
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-finish-000001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        for action in ("commit", "rollback"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as root:
+                with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                    fake.db.allow_transaction_control = True
+                    fake.db.commit()
+                    owner.continue_after_own_preparation(prepared)
+                    with frappe_context.owned_publication_transaction(owner):
+                        writer.write_first_object(prepared, exact_file(prepared))
+                        entry = writer._intent_for_key(prepared.key)
+                        with patch.object(fake.db, action, side_effect=RuntimeError("unknown")):
+                            with self.assertRaises(writer.FirstObjectUncertain):
+                                writer.finish_visit_transaction(prepared, owner, action)
+                        self.assertFalse(entry["visit_lifetime"]["active"])
+                        self.assertTrue(owner.poisoned)
+
+    def test_visit_photo_scope_binds_exact_pending_file_and_photo(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-photo-scope-001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                with frappe_context.owned_publication_transaction(owner):
+                    file_doc = exact_file(prepared)
+                    bound = writer.write_first_object(prepared, file_doc)
+                    photo = types.SimpleNamespace(
+                        name="PHOTO", patient_reference="PAT", storage_key=prepared.key,
+                        original_file=bound.file_name, original_sha256=prepared.expected_sha256,
+                        original_width=2, original_height=2,
+                    )
+                    with frappe_context.visit_photo_insertion(prepared, bound, file_doc, photo):
+                        frappe_context.require_visit_photo_insertion(photo)
+                        for field, wrong in (
+                            ("patient_reference", "OTHER"), ("storage_key", "OTHER"),
+                            ("original_file", "OTHER"), ("original_sha256", "OTHER"),
+                            ("original_width", 3), ("original_height", 3),
+                        ):
+                            original = getattr(photo, field)
+                            setattr(photo, field, wrong)
+                            with self.assertRaises(fake.PermissionError):
+                                frappe_context.require_visit_photo_insertion(photo)
+                            setattr(photo, field, original)
+                        with self.assertRaises(fake.PermissionError):
+                            frappe_context.require_visit_photo_insertion(copy.copy(photo))
+                        fake.db.add("Clinic Photo", photo.name, patient_reference="PAT",
+                                    storage_key=prepared.key, original_file=bound.file_name,
+                                    original_sha256=prepared.expected_sha256,
+                                    original_width=2, original_height=2)
+                    with self.assertRaises(fake.PermissionError):
+                        frappe_context.require_visit_photo_insertion(photo)
+
+    def test_verified_visit_slot_and_published_can_commit_together(self):
+        from unittest.mock import patch
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-final-key-0001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                from clinic_photos.visit import capture
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                with frappe_context.owned_publication_transaction(owner):
+                    document = exact_file(prepared)
+                    bound = writer.write_first_object(prepared, document)
+                    fake.db.add("Clinic Photo", "PHOTO", storage_key=prepared.key,
+                                original_file=document.name, original_sha256=prepared.expected_sha256,
+                                patient_reference="PAT")
+                    fake.db.docs["File"][document.name].update(
+                        attached_to_doctype="Clinic Photo", attached_to_name="PHOTO")
+                    linkage = writer.domain_linkage(prepared, "Clinic Photo", "PHOTO", document.name)
+                    writer.consume_persisted_object(prepared, bound, domain_linkage=linkage)
+                    class FakeSlot:
+                        def __init__(self, values):
+                            self.values = values
+                            self.doctype = values["doctype"]
+                            self.name = values["slot_key"]
+                            self.flags = types.SimpleNamespace(ignore_permissions=None)
+
+                        def insert(self, **kwargs):
+                            self_test.assertEqual(kwargs, {"ignore_permissions": True})
+                            values = {k: v for k, v in self.values.items() if k != "doctype"}
+                            fake.db.add(self.doctype, self.name, **values)
+                            return self
+
+                    self_test = self
+                    original_get_doc = fake.get_doc
+                    def get_doc(values):
+                        if values.get("doctype") == "Clinic Visit Photo Slot":
+                            return FakeSlot(values)
+                        return original_get_doc(values)
+                    with patch.object(capture, "frappe", fake), \
+                         patch.object(capture, "check_slot_availability"), \
+                         patch.object(fake, "get_doc", side_effect=get_doc):
+                        capture.insert_prepared_slot_link(prepared, bound)
+                    journal.publish(prepared, bound, document.name, None)
+                    writer.arm_visit_final_commit(prepared, bound)
+                    writer.finish_visit_transaction(prepared, owner, "commit")
+                    self.assertTrue(writer._intent_for_key(prepared.key)["visit_lifetime"]["commit_acknowledged"])
+                    self.assertEqual(fake.db.committed[journal.OPERATION_DOCTYPE][prepared.id]["state"],
+                                     "PUBLISHED")
+
+    def test_commit_rechecks_slot_after_handshake(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-final-key-0002", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                from clinic_photos.visit.capture import slot_key
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                with frappe_context.owned_publication_transaction(owner):
+                    document = exact_file(prepared)
+                    bound = writer.write_first_object(prepared, document)
+                    fake.db.add("Clinic Photo", "PHOTO", storage_key=prepared.key,
+                                original_file=document.name, original_sha256=prepared.expected_sha256,
+                                patient_reference="PAT")
+                    fake.db.docs["File"][document.name].update(
+                        attached_to_doctype="Clinic Photo", attached_to_name="PHOTO")
+                    linkage = writer.domain_linkage(prepared, "Clinic Photo", "PHOTO", document.name)
+                    writer.consume_persisted_object(prepared, bound, domain_linkage=linkage)
+                    key = slot_key("APT", "Before")
+                    slot = fake.db.add("Clinic Visit Photo Slot", key, slot_key=key, appointment="APT",
+                                       patient="PAT", slot="Before", appointment_creation="ac",
+                                       patient_creation="pc", body_area="Arm", viewpoint="Front",
+                                       operation=prepared.id, photo="PHOTO")
+                    journal.publish(prepared, bound, document.name, None)
+                    writer.arm_visit_final_commit(prepared, bound)
+                    fake.db.before_commit.add(lambda: slot.update(photo="OTHER"))
+                    for _ in range(2):
+                        with self.assertRaises(Exception):
+                            fake.db.commit()
+                    fake.db.rollback()
+                    self.assertEqual(fake.db.docs[journal.OPERATION_DOCTYPE][prepared.id]["state"],
+                                     "PREPARED")
+    def test_visit_context_rejects_foreign_registered_owner(self):
+        from unittest.mock import patch
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-owner-key-9999", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                with patch.object(frappe_context, "current_publication_owner", return_value=object()):
+                    with self.assertRaises(lifecycle.PublicationContextError):
+                        writer.write_first_object(prepared, exact_file(prepared))
+                self.assertNotIn("File", fake.db.docs)
+
+    def test_visit_first_write_rejects_preattached_file(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-attach-key-0001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        for field in ("attached_to_doctype", "attached_to_name", "attached_to_field"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as root:
+                with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                    fake.db.allow_transaction_control = True
+                    fake.db.commit()
+                    owner.continue_after_own_preparation(prepared)
+                    document = exact_file(prepared)
+                    setattr(document, field, "OTHER")
+                    with self.assertRaises(writer.FirstObjectDenied):
+                        writer.write_first_object(prepared, document)
+                    self.assertNotIn("File", fake.db.docs)
+
+    def test_visit_receipt_blocks_repeated_early_commit_and_rollback_invalidates(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-txn-key-00001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                bound = writer.write_first_object(prepared, exact_file(prepared))
+                for _ in range(2):
+                    with self.assertRaises(Exception):
+                        fake.db.commit()
+                fake.db.rollback()
+                with self.assertRaises(Exception):
+                    writer.consume_persisted_object(prepared, bound)
+
+    def test_visit_consumption_rechecks_original_session_actor(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-actor-key-001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                bound = writer.write_first_object(prepared, exact_file(prepared))
+                fake.session.user = "other"
+                from unittest.mock import patch
+                with patch.object(writer, "_consume_locked", return_value="unexpected") as consume:
+                    with self.assertRaises(writer.FirstObjectError):
+                        writer.consume_persisted_object(prepared, bound)
+                    consume.assert_not_called()
+
+    def test_visit_consumption_rechecks_site_and_current_owner(self):
+        from unittest.mock import patch
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-site-key-0001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        for mismatch in ("site", "owner"):
+            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as root:
+                with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                    fake.db.allow_transaction_control = True
+                    fake.db.commit()
+                    owner.continue_after_own_preparation(prepared)
+                    bound = writer.write_first_object(prepared, exact_file(prepared))
+                    if mismatch == "site":
+                        fake.local.site = "other"
+                    with patch.object(writer, "_consume_locked", return_value="unexpected") as consume:
+                        context = (patch.object(frappe_context, "current_publication_owner", return_value=object())
+                                   if mismatch == "owner" else contextlib.nullcontext())
+                        with context, self.assertRaises((writer.FirstObjectError, exclusion.ExclusionError)):
+                            writer.consume_persisted_object(prepared, bound)
+                        consume.assert_not_called()
+
+    def test_visit_after_commit_callback_invalidates_receipt(self):
+        from unittest.mock import patch
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-end-key-00001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                bound = writer.write_first_object(prepared, exact_file(prepared))
+                fake.db.after_commit.run()
+                with patch.object(writer, "_consume_locked", return_value="unexpected") as consume:
+                    with self.assertRaises(writer.FirstObjectError):
+                        writer.consume_persisted_object(prepared, bound)
+                    consume.assert_not_called()
+
+    def test_visit_full_rollback_invalidates_receipt(self):
+        from unittest.mock import patch
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-roll-key-00001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                bound = writer.write_first_object(prepared, exact_file(prepared))
+                fake.db.rollback()
+                with patch.object(writer, "_consume_locked", return_value="unexpected") as consume:
+                    with self.assertRaises(writer.FirstObjectError):
+                        writer.consume_persisted_object(prepared, bound)
+                    consume.assert_not_called()
+    def test_visit_context_cannot_authorize_other_operations(self):
+        from clinic_photos.access.lifecycle import PublicationContext, PublicationContextError
+        with self.assertRaises(PublicationContextError):
+            PublicationContext(actor=ACTOR, draft="", operation="commit",
+                storage_key="/private/files/clinic-photo-test.png",
+                operation_id="op", visit_operation=True)
+
+    def test_visit_writer_denies_uncommitted_preparation(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-write-key-0005", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                with self.assertRaises(exclusion.ExclusionDenied):
+                    writer.write_first_object(prepared, exact_file(prepared))
+                self.assertNotIn("File", fake.db.docs)
+
+    def test_visit_writer_preserves_native_file_create_permission(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-write-key-0006", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                with self.assertRaises(fake.PermissionError):
+                    writer.write_first_object(prepared, exact_file(prepared, create_permitted=False))
+                self.assertNotIn("File", fake.db.docs)
+
+    def test_visit_writer_rejects_mixed_reservation(self):
+        from dataclasses import replace
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-write-key-0007", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                changed = replace(prepared, visit_binding=replace(binding, patient="OTHER"))
+                with self.assertRaises(writer.FirstObjectDenied):
+                    writer.write_first_object(changed, exact_file(changed))
+                self.assertNotIn("File", fake.db.docs)
+
+    def test_visit_receipt_refuses_consumption_without_exact_photo_linkage(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-write-key-0002", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                bound = writer.write_first_object(prepared, exact_file(prepared))
+                with self.assertRaises(writer.ReceiptInvalid):
+                    writer.consume_persisted_object(prepared, bound)
+
+    def test_visit_linkage_requires_matching_patient_and_file(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-write-key-0003", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                fake.db.add("Clinic Photo", "PHOTO", storage_key=prepared.key,
+                            original_file="FILE", original_sha256=prepared.expected_sha256,
+                            patient_reference="PAT")
+                result = writer.domain_linkage(prepared, "Clinic Photo", "PHOTO", "FILE")
+                self.assertEqual(result.name, "PHOTO")
+
+    def test_visit_linkage_rejects_wrong_photo_patient(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-write-key-0009", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                fake.db.add("Clinic Photo", "PHOTO", storage_key=prepared.key,
+                            original_file="FILE", original_sha256=prepared.expected_sha256,
+                            patient_reference="OTHER")
+                with self.assertRaises(writer.FirstObjectDenied):
+                    writer.domain_linkage(prepared, "Clinic Photo", "PHOTO", "FILE")
+
+    def test_visit_consumption_returns_exact_server_evidence_with_attached_file(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-write-key-0004", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                document = exact_file(prepared)
+                bound = writer.write_first_object(prepared, document)
+                fake.db.add("Clinic Photo", "PHOTO", storage_key=prepared.key,
+                            original_file=document.name, original_sha256=prepared.expected_sha256,
+                            patient_reference="PAT")
+                fake.db.docs["File"][document.name].update(
+                    attached_to_doctype="Clinic Photo", attached_to_name="PHOTO")
+                linkage = writer.domain_linkage(prepared, "Clinic Photo", "PHOTO", document.name)
+                self.assertEqual(writer.consume_persisted_object(prepared, bound, domain_linkage=linkage),
+                                 document.name)
+                evidence, evidence_link = writer.require_visit_consumed_object(prepared, bound)
+                self.assertIs(evidence, bound)
+                self.assertEqual(evidence_link, linkage)
+                with self.assertRaises(writer.ReceiptInvalid):
+                    writer.require_visit_consumed_object(prepared, object())
+
+    def test_visit_receipt_rejects_file_attached_to_another_photo(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-write-key-0008", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                document = exact_file(prepared)
+                bound = writer.write_first_object(prepared, document)
+                fake.db.add("Clinic Photo", "PHOTO", storage_key=prepared.key,
+                            original_file=document.name, original_sha256=prepared.expected_sha256,
+                            patient_reference="PAT")
+                fake.db.docs["File"][document.name].update(
+                    attached_to_doctype="Clinic Photo", attached_to_name="OTHER")
+                linkage = writer.domain_linkage(prepared, "Clinic Photo", "PHOTO", document.name)
+                with self.assertRaises(writer.ReceiptInvalid):
+                    writer.consume_persisted_object(prepared, bound, domain_linkage=linkage)
+
+    def test_visit_writer_creates_exact_native_file_after_durable_continuation(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-write-key-0001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                owner.continue_after_own_preparation(prepared)
+                document = exact_file(prepared)
+                bound = writer.write_first_object(prepared, document)
+                self.assertEqual(bound.file_name, document.name)
+                self.assertIsNone(document.insert_kwargs[0]["ignore_permissions"])
+                self.assertEqual(bound.receipt.sha256, prepared.expected_sha256)
+
+    def test_prepare_rejects_stray_submitted_evidence_without_update(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        for field, value in (("expected_sha256", "a" * 64), ("expected_size", 1),
+                             ("generation", 1), ("reservation_key", "/private/files/unexpected"),
+                             ("published_file", "file"), ("published_version", 1),
+                             ("published_domain_doctype", "Clinic Photo"),
+                             ("published_domain_name", "photo"), ("creation_identity", "1:2")):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as root, \
+                 fake_runtime(sites_path=sites_volume(root)) as fake:
+                seed_actor(fake)
+                request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+                    request_key="visit-stray-key-0001", visit_binding=binding, image_bytes=JPEG_BYTES)
+                op = stage_visit_fixture(request)
+                target = exclusion.target_identity_for_operation(op.id)
+                with exclusion.hold_exclusion(op.id, target):
+                    row = fake.db.docs[journal.OPERATION_DOCTYPE][op.id]
+                    row[field] = value
+                    original = copy.deepcopy(row)
+                    with self.assertRaises(journal.JournalIntegrityError):
+                        journal.prepare(op)
+                    self.assertEqual(row, original)
+
+    def test_visit_continuation_rejects_changed_prepared_evidence_and_poisons_owner(self):
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-cont-key-00001", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                row = fake.db.docs[journal.OPERATION_DOCTYPE][prepared.id]
+                row["expected_sha256"] = "0" * 64
+                with self.assertRaises(exclusion.ExclusionDenied):
+                    owner.continue_after_own_preparation(prepared)
+                self.assertTrue(owner.poisoned)
+
+    def test_visit_continuation_compares_complete_reconstructed_value(self):
+        from dataclasses import replace
+        from unittest.mock import patch
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-cont-key-00002", visit_binding=binding, image_bytes=JPEG_BYTES)
+        with tempfile.TemporaryDirectory() as root:
+            with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                fake.db.allow_transaction_control = True
+                fake.db.commit()
+                changed = replace(prepared, visit_binding=replace(binding, body_area="Leg"))
+                with patch.object(journal, "_prepared_operation", return_value=changed):
+                    with self.assertRaises(exclusion.ExclusionDenied):
+                        owner.continue_after_own_preparation(prepared)
+                self.assertTrue(owner.poisoned)
+
+    def test_both_slots_prepare_under_live_owner_with_same_opaque_target(self):
+        binding = contracts.VisitBinding(
+            appointment="PRIVATE-APT", patient="PAT-1", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT-1",
+        )
+        from dataclasses import replace
+        targets = []
+        for index, value in enumerate((
+            binding, replace(binding, slot="After", encounter="ENC-1", encounter_creation="ec"),
+        )):
+            request = contracts.SaveRequest(
+                kind=contracts.VISIT_ORIGINAL_CREATE, request_key=f"visit-owner-key-{index:04d}",
+                visit_binding=value, image_bytes=JPEG_BYTES,
+            )
+            with tempfile.TemporaryDirectory() as root:
+                with prepared_in_owner_scope(sites_volume(root), request=request) as (fake, owner, prepared):
+                    self.assertEqual(prepared.visit_binding, value)
+                    self.assertEqual(prepared.state, "PREPARED")
+                    self.assertEqual(prepared.target_identity, journal.target_identity(request))
+                    self.assertNotIn("PRIVATE-APT", prepared.target_identity)
+                    self.assertNotIn("PRIVATE-APT", prepared.key)
+                    self.assertEqual(owner.target_identity, prepared.target_identity)
+                    self.assertEqual(fake.db.committed.get(journal.OPERATION_DOCTYPE, {}), {})
+                    fake.db.allow_transaction_control = True
+                    fake.db.commit()
+                    self.assertEqual(journal.load_verified_operation(prepared.id).request, request)
+                    self.assertEqual(owner.continue_after_own_preparation(prepared).state, "PREPARED")
+                    with self.assertRaises(exclusion.ExclusionError):
+                        owner.continue_after_own_preparation(prepared)
+                    targets.append(prepared.target_identity)
+        self.assertEqual(targets[0], targets[1])
+
+    def test_opposite_slots_compete_for_same_target_without_takeover(self):
+        from dataclasses import replace
+        binding = contracts.VisitBinding(
+            appointment="PRIVATE-APT", patient="PAT-1", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT-1",
+        )
+        with tempfile.TemporaryDirectory() as root, fake_runtime(sites_path=sites_volume(root)) as fake:
+            seed_actor(fake)
+            first = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+                request_key="visit-lock-key-0001", visit_binding=binding, image_bytes=JPEG_BYTES)
+            second = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+                request_key="visit-lock-key-0002",
+                visit_binding=replace(binding, slot="After", encounter="E", encounter_creation="ec"),
+                image_bytes=JPEG_BYTES)
+            op1 = stage_visit_fixture(first)
+            op2 = stage_visit_fixture(second)
+            target = exclusion.target_identity_for_operation(op1.id)
+            self.assertEqual(target, exclusion.target_identity_for_operation(op2.id))
+            with exclusion.hold_exclusion(op1.id, target):
+                with self.assertRaises(exclusion.ExclusionBusy):
+                    with exclusion.hold_exclusion(op2.id, target):
+                        self.fail("opposite slot acquired held target")
+
+    def test_owner_refuses_tampered_visit_binding_before_preparation(self):
+        binding = contracts.VisitBinding(
+            appointment="PRIVATE-APT", patient="PAT-1", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT-1",
+        )
+        with tempfile.TemporaryDirectory() as root, fake_runtime(sites_path=sites_volume(root)) as fake:
+            seed_actor(fake)
+            request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+                request_key="visit-tamper-key-001", visit_binding=binding, image_bytes=JPEG_BYTES)
+            operation = stage_visit_fixture(request)
+            target = exclusion.target_identity_for_operation(operation.id)
+            with exclusion.hold_exclusion(operation.id, target):
+                row = fake.db.docs[journal.OPERATION_DOCTYPE][operation.id]
+                row["visit_binding_json"] = row["visit_binding_json"].replace("Arm", "Leg")
+                with self.assertRaises(exclusion.ExclusionDenied):
+                    journal.prepare(operation)
+                self.assertEqual(row["state"], "SUBMITTED")
+
+
 class FirstWriterExactObjectTests(unittest.TestCase):
     def test_first_writer_preserves_exact_jpeg_and_key_inside_native_window(self):
         with tempfile.TemporaryDirectory() as root:

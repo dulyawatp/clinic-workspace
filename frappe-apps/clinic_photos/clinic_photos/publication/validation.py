@@ -25,6 +25,8 @@ MAX_REQUEST_BYTES = 12 * 1024 * 1024
 MAX_ANNOTATION_BYTES = 256 * 1024
 MAX_JSON_CONTAINERS = 8
 MAX_SHAPES = 512
+MAX_FREEHAND_POINTS = 1024
+MAX_DOCUMENT_POINTS = 8192
 MAX_TEXT_CHARS = 1024
 MIN_REQUEST_KEY = 16
 MAX_REQUEST_KEY = 128
@@ -150,16 +152,22 @@ def _positive(value) -> float:
     return number
 
 
-def _validate_shape(shape) -> str:
+def _validate_shape(shape, *, visit: bool = False) -> str:
     if not isinstance(shape, Mapping) or any(
         not isinstance(key, str) for key in shape
     ):
         _reject()
 
     kind = shape.get("type")
-    if not isinstance(kind, str) or kind not in SHAPE_TYPES:
+    if not isinstance(kind, str) or (
+        kind not in SHAPE_TYPES and not (visit and kind == "freehand")
+    ):
         _reject()
-    if set(shape) != _SHAPE_FIELDS[kind]:
+    fields = (
+        {"id", "type", "color", "stroke_width", "points"}
+        if kind == "freehand" else _SHAPE_FIELDS[kind]
+    )
+    if set(shape) != fields:
         _reject()
 
     shape_id = shape["id"]
@@ -169,6 +177,18 @@ def _validate_shape(shape) -> str:
     color = shape["color"]
     if not isinstance(color, str) or _COLOR.fullmatch(color) is None:
         _reject()
+
+    if kind == "freehand":
+        _in_open_unit_interval(shape["stroke_width"], 0.1)
+        points = shape["points"]
+        if not isinstance(points, list) or not 2 <= len(points) <= MAX_FREEHAND_POINTS:
+            _reject()
+        for point in points:
+            if not isinstance(point, Mapping) or set(point) != {"x", "y"}:
+                _reject()
+            _unit(point["x"])
+            _unit(point["y"])
+        return shape_id
 
     x = _unit(shape["x"])
     y = _unit(shape["y"])
@@ -193,7 +213,19 @@ def _validate_shape(shape) -> str:
 
 
 def canonical_annotation(value) -> str:
-    """Validate the exact annotation envelope and return its canonical JSON text."""
+    """Validate the legacy v1 envelope and return canonical JSON text."""
+    return _canonical_annotation(value, version=SCHEMA_VERSION)
+
+
+def canonical_visit_annotation(value) -> str:
+    """Validate the isolated visit v2 envelope and return canonical JSON text."""
+    try:
+        return _canonical_annotation(value, version=2)
+    except OverflowError:
+        _reject()
+
+
+def _canonical_annotation(value, *, version: int) -> str:
     if not isinstance(value, Mapping) or any(
         not isinstance(key, str) for key in value
     ):
@@ -203,8 +235,8 @@ def canonical_annotation(value) -> str:
     if set(value) != {"schema_version", "coordinate_space", "shapes"}:
         _reject()
 
-    version = value["schema_version"]
-    if isinstance(version, bool) or not isinstance(version, int) or version != SCHEMA_VERSION:
+    actual_version = value["schema_version"]
+    if isinstance(actual_version, bool) or not isinstance(actual_version, int) or actual_version != version:
         _reject()
     if value["coordinate_space"] != COORDINATE_SPACE:
         _reject()
@@ -214,11 +246,16 @@ def canonical_annotation(value) -> str:
         _reject()
 
     seen = set()
+    point_count = 0
     for shape in shapes:
-        shape_id = _validate_shape(shape)
+        shape_id = _validate_shape(shape, visit=version == 2)
         if shape_id in seen:
             _reject()
         seen.add(shape_id)
+        if shape["type"] == "freehand":
+            point_count += len(shape["points"])
+            if point_count > MAX_DOCUMENT_POINTS:
+                _reject()
 
     try:
         text = json.dumps(

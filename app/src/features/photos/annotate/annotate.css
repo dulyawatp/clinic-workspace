@@ -70,25 +70,33 @@
   width: 100%;
   height: 100%;
   object-fit: contain;
+  pointer-events: none;
 }
 
-.annotation-stage svg {
+/* Native drawings use the displayed original itself, not the surrounding letterbox. */
+.annotation-stage--visit {
+  container-type: size;
+  display: grid;
+  place-items: center;
+}
+
+.annotation-stage--visit .annotation-stage__inner {
+  position: relative;
+  inset: auto;
+  width: min(100%, calc(100cqh * var(--annotation-photo-ratio)));
+  aspect-ratio: var(--annotation-photo-ratio);
+}
+
+.annotation-stage__surface {
   position: absolute;
   inset: 0;
-  width: 100%;
-  height: 100%;
   touch-action: none;
   cursor: crosshair;
 }
 
-.annotation-stage svg:focus-visible {
+.annotation-stage:has(.annotation-stage__surface:focus-visible) {
   outline: 3px solid var(--primary);
   outline-offset: -3px;
-}
-
-.annotation-shape.is-selected {
-  stroke-dasharray: 4 3;
-  stroke-width: 1.4;
 }
 
 .annotation-save {

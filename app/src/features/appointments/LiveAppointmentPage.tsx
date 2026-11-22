@@ -19,6 +19,7 @@ import { useLiveAppointment } from "./live-appointment";
 import { NativeAppointmentCheckIn } from "./NativeAppointmentCheckIn";
 import { ReturnVisitLink } from "./ReturnVisitLink";
 import { NativeLabReportPanel } from "../clinical/NativeLabReports";
+import { NativeVisitPhotos } from "../clinical/NativeVisitPhotos";
 
 const TERMINAL_STATUSES = new Set(["Closed", "Cancelled", "No Show", "Checked Out"]);
 
@@ -415,6 +416,13 @@ export function LiveAppointmentPage({ id }: { id: string }) {
             </form>
           )}
         </section>
+        {detail.isFetchedAfterMount && appointment.is_fixture === false && appointment.native_appointment_id && (
+          <section className="appointment-card" aria-labelledby="appointment-visit-photos">
+            <h2 id="appointment-visit-photos">{t("workspace.photos")}</h2>
+            <NativeVisitPhotos source={{ appointment: appointment.native_appointment_id }}
+              staffTarget={{ appointment: appointment.native_appointment_id }} />
+          </section>
+        )}
         {appointment.is_fixture === false && (
           <section className="appointment-card" aria-labelledby="appointment-lab-reports">
             <h2 id="appointment-lab-reports">{t("labReports.title")}</h2>

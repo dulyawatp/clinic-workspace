@@ -51,6 +51,7 @@ OUTCOME_SAVED = "saved"
 OUTCOME_REJECTED = frozenset({"rejected", "conflict"})
 
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
+_VISIT_SITE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*")
 
 
 def _frappe():
@@ -65,6 +66,18 @@ def _valid_operation_id(value) -> bool:
 
 def _valid_site(value) -> bool:
     return isinstance(value, str) and value in ALLOWED_SITES
+
+
+def _valid_visit_site(value) -> bool:
+    return isinstance(value, str) and len(value) <= 253 and _VISIT_SITE.fullmatch(value) is not None
+
+
+def _visit_gate_enabled(site, conf) -> bool:
+    try:
+        from clinic_photos.visit import runtime
+        return runtime.enabled_for_site(site, conf) is True
+    except Exception:
+        return False
 
 
 def _result(status: str, operation_id) -> int:
@@ -173,6 +186,9 @@ def run(operation_id: str, *, site: str) -> int:
 
         if committed.site != site:
             return _result(STATUS_REFUSED, operation_id)
+        from clinic_photos.publication.contracts import VISIT_ORIGINAL_CREATE
+        if committed.kind == VISIT_ORIGINAL_CREATE:
+            return _result(STATUS_REFUSED, operation_id)
 
         # Adopt the persisted submission actor; the initial lookup itself grants no
         # domain or publication authority.
@@ -218,9 +234,67 @@ def run(operation_id: str, *, site: str) -> int:
                 pass
 
 
+def run_visit(operation_id: str, *, site: str) -> int:
+    """Explicit visit-only child; no synthetic-site or legacy-authority fallback."""
+    if not _valid_operation_id(operation_id) or not _valid_visit_site(site):
+        return _result(STATUS_REFUSED, operation_id)
+    frappe = None
+    try:
+        frappe = _frappe()
+        frappe.init(site=site, sites_path=SITES_PATH)
+        frappe.connect(set_admin_as_user=False)
+        if (getattr(frappe.local, "site", "") != site or
+            not _visit_gate_enabled(site, getattr(frappe, "conf", None)) or
+            not _context_is_clean(frappe) or
+            type(getattr(frappe.db, "transaction_writes", None)) is not int or
+            getattr(frappe.local, "request", None) is not None or
+            getattr(frappe.local, "job", None) is not None):
+            return _result(STATUS_REFUSED, operation_id)
+        from clinic_photos.publication import journal
+        from clinic_photos.publication.contracts import (
+            SaveOutcome, SubmittedOperation, VISIT_ORIGINAL_CREATE,
+        )
+        try:
+            committed = journal.load_submission(operation_id)
+        except journal.JournalError:
+            return _result(STATUS_REFUSED, operation_id)
+        if (not isinstance(committed, SubmittedOperation) or committed.id != operation_id or
+            committed.site != site or committed.kind != VISIT_ORIGINAL_CREATE):
+            return _result(STATUS_REFUSED, operation_id)
+        frappe.set_user(committed.actor)
+        if ((frappe.session.user or "") != committed.actor or not _context_is_clean(frappe) or
+            type(getattr(frappe.db, "transaction_writes", None)) is not int or
+            getattr(frappe.local, "request", None) is not None or
+            getattr(frappe.local, "job", None) is not None):
+            return _result(STATUS_REFUSED, operation_id)
+        import importlib
+        coordinator = importlib.import_module(COORDINATOR_MODULE)
+        publish = getattr(coordinator, "publish_visit_submission", None)
+        child_scope = getattr(coordinator, "child_process_publication", None)
+        if not callable(publish) or not callable(child_scope):
+            return _result(STATUS_UNAVAILABLE, operation_id)
+        with child_scope(mode="visit"):
+            outcome = publish(committed)
+        if not isinstance(outcome, SaveOutcome):
+            return _result(STATUS_UNAVAILABLE, operation_id)
+        return _result(_outcome_status(outcome, operation_id), operation_id)
+    except Exception:
+        return _result(STATUS_UNAVAILABLE, operation_id)
+    finally:
+        if frappe is not None:
+            try:
+                frappe.destroy()
+            except Exception:
+                pass
+
+
 def main(argv=None) -> int:
     """Strict fixed-order argument guard for the module entry point."""
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if len(arguments) == 5 and arguments[0] == "--visit":
+        if arguments[1] == "--site" and arguments[3] == "--operation-id":
+            return run_visit(arguments[4], site=arguments[2])
+        return _result(STATUS_REFUSED, None)
     if (
         len(arguments) != 4
         or arguments[0] != "--site"

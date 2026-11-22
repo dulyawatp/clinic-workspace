@@ -39,7 +39,7 @@ import hashlib
 import mimetypes
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from clinic_photos.access import frappe_context, storage
 from clinic_photos.publication import exclusion, journal
@@ -245,6 +245,11 @@ def _require_exact_file(file_doc, operation: PreparedOperation) -> bytes:
         _refuse(operation.id, "file_not_new")
     if getattr(file_doc, "name", ""):
         _refuse(operation.id, "file_already_named")
+    if operation.visit_binding is not None and any(
+        getattr(file_doc, field, None) not in (None, "")
+        for field in ("attached_to_doctype", "attached_to_name", "attached_to_field")
+    ):
+        _refuse(operation.id, "visit_file_preattached")
 
     raw = storage.file_url_of(file_doc)
     try:
@@ -296,6 +301,61 @@ def _relative_basename(key: str) -> str:
     if os.sep in relative or (os.altsep and os.altsep in relative):
         raise FirstObjectDenied(SAFE_WRITER_DENIED)
     return relative
+
+
+def _open_visit_files_directory(owner):
+    """Open existing active-site private/files without following directory links."""
+    import frappe
+    from clinic_photos.publication import staging
+
+    descriptors = []
+    try:
+        if not all(getattr(os, flag, 0) for flag in ("O_DIRECTORY", "O_NOFOLLOW")):
+            raise ValueError
+        exclusion.require_visit_annotation_owner(owner)
+        site, sites_real = exclusion._site_binding()
+        if (site != owner.site or getattr(frappe.local, "site", None) != site
+                or sites_real != owner._tree.sites_path
+                or site in (".", "..")):
+            raise ValueError
+        path = frappe.get_site_path("private", "files")
+        if not isinstance(path, str) or not path:
+            raise ValueError
+        path = staging._absolute_staging_path(path)
+        if path != os.path.join(sites_real, site, "private", "files"):
+            raise ValueError
+        sites_fd = os.open(sites_real, _DIRECTORY_FLAGS)
+        descriptors.append(sites_fd)
+        site_fd = os.open(site, _DIRECTORY_FLAGS, dir_fd=sites_fd)
+        descriptors.append(site_fd)
+        private_fd = os.open("private", _DIRECTORY_FLAGS, dir_fd=site_fd)
+        descriptors.append(private_fd)
+        files_fd = os.open("files", _DIRECTORY_FLAGS, dir_fd=private_fd)
+        descriptors.append(files_fd)
+        for descriptor, name, parent in (
+            (sites_fd, sites_real, None), (site_fd, site, sites_fd),
+            (private_fd, "private", site_fd),
+            (files_fd, "files", private_fd),
+        ):
+            opened = os.fstat(descriptor)
+            entry = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(entry.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino)):
+                raise ValueError
+        exclusion.require_visit_annotation_owner(owner)
+        if (exclusion._site_binding() != (site, sites_real)
+                or getattr(frappe.local, "site", None) != site):
+            raise ValueError
+        descriptors.pop()
+        return files_fd
+    except Exception:
+        raise FirstObjectDenied(SAFE_WRITER_DENIED) from None
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -425,92 +485,15 @@ def _create_exact_object(operation, data) -> CreationReceipt:
     unlinked, truncated or retried on failure; the residue stays as protected evidence
     and the owner is poisoned.
     """
-    try:
-        root = _confined_root()
-        name = _relative_basename(operation.key)
-        directory = os.open(root, _DIRECTORY_FLAGS)
-    except FirstObjectError:
-        _refuse(operation.id, "confinement_unavailable")
-    except OSError:
-        _refuse(operation.id, "confinement_unavailable")
+    def fail(kind, reason):
+        if kind == "exists":
+            _deny(operation.id, reason, FirstObjectExists(SAFE_WRITER_EXISTS))
+        elif kind == "uncertain":
+            _refuse_uncertain(operation.id, reason)
+        else:
+            _refuse(operation.id, reason)
 
-    try:
-        if not stat.S_ISDIR(os.fstat(directory).st_mode):
-            _refuse(operation.id, "confinement_unavailable")
-
-        try:
-            descriptor = os.open(name, _CREATE_FLAGS, FILE_MODE, dir_fd=directory)
-        except FileExistsError:
-            _deny(operation.id, "target_exists", FirstObjectExists(SAFE_WRITER_EXISTS))
-        except OSError:
-            _refuse(operation.id, "create_refused")
-
-        try:
-            try:
-                _require_created_object(os.fstat(descriptor))
-            except FirstObjectUncertain:
-                _refuse_uncertain(operation.id, "created_identity_unexpected")
-
-            try:
-                _write_all(descriptor, data)
-            except OSError:
-                _refuse_uncertain(operation.id, "write_incomplete")
-
-            try:
-                _fsync_file(descriptor)
-            except OSError:
-                _refuse_uncertain(operation.id, "file_not_durable")
-
-            info = os.fstat(descriptor)
-            try:
-                _require_created_object(info)
-            except FirstObjectUncertain:
-                _refuse_uncertain(operation.id, "object_identity_changed")
-        finally:
-            try:
-                os.close(descriptor)
-            except OSError:
-                _refuse_uncertain(operation.id, "descriptor_close_failed")
-
-        # Verify the actual object, never an unchecked pathname: a fresh confined
-        # no-follow descriptor must resolve to the same inode and the same bytes.
-        try:
-            reader = os.open(name, _READ_FLAGS, dir_fd=directory)
-        except OSError:
-            _refuse_uncertain(operation.id, "readback_failed")
-        try:
-            read_info = os.fstat(reader)
-            if (read_info.st_dev, read_info.st_ino) != (info.st_dev, info.st_ino):
-                _refuse_uncertain(operation.id, "object_identity_changed")
-            if int(read_info.st_size) != len(data):
-                _refuse_uncertain(operation.id, "object_size_changed")
-            try:
-                written = _read_all(reader, len(data))
-            except OSError:
-                _refuse_uncertain(operation.id, "readback_failed")
-            if written != data:
-                _refuse_uncertain(operation.id, "readback_mismatch")
-        finally:
-            try:
-                os.close(reader)
-            except OSError:
-                _refuse_uncertain(operation.id, "descriptor_close_failed")
-
-        try:
-            _require_matching_entry(directory, name, info.st_dev, info.st_ino, len(data))
-        except (OSError, FirstObjectUncertain):
-            _refuse_uncertain(operation.id, "object_identity_changed")
-
-        try:
-            _fsync_directory(directory)
-        except OSError:
-            _refuse_uncertain(operation.id, "directory_not_durable")
-    finally:
-        try:
-            os.close(directory)
-        except OSError:
-            pass
-
+    info = _create_confined_bytes(operation.key, data, fail)
     return CreationReceipt(
         operation_id=operation.id,
         generation=operation.generation,
@@ -520,6 +503,121 @@ def _create_exact_object(operation, data) -> CreationReceipt:
         size=len(data),
         sha256=hashlib.sha256(data).hexdigest(),
     )
+
+
+def _create_confined_bytes(key, data, fail):
+    """Private fd mechanics; caller supplies authority and failure handling."""
+    callback = fail
+
+    def fail(kind, reason):
+        callback(kind, reason)
+        raise FirstObjectDenied(SAFE_WRITER_DENIED)
+
+    try:
+        root = _confined_root()
+        name = _relative_basename(key)
+        directory = os.open(root, _DIRECTORY_FLAGS)
+    except FirstObjectError:
+        fail("denied", "confinement_unavailable")
+    except OSError:
+        fail("denied", "confinement_unavailable")
+
+    try:
+        return _create_bytes_at_directory(directory, name, data, fail)
+    finally:
+        try:
+            os.close(directory)
+        except OSError:
+            pass
+
+
+def _create_bytes_at_directory(directory, name, data, fail):
+    """Use an already-open directory; its lifetime remains with the caller."""
+    callback = fail
+
+    def fail(kind, reason):
+        callback(kind, reason)
+        raise FirstObjectDenied(SAFE_WRITER_DENIED)
+
+    try:
+        if not isinstance(name, str):
+            raise FirstObjectDenied(SAFE_WRITER_DENIED)
+        _relative_basename(storage.PRIVATE_URL_PREFIX + name)
+    except FirstObjectError:
+        fail("denied", "confinement_unavailable")
+
+    if not stat.S_ISDIR(os.fstat(directory).st_mode):
+        fail("denied", "confinement_unavailable")
+
+    try:
+        descriptor = os.open(name, _CREATE_FLAGS, FILE_MODE, dir_fd=directory)
+    except FileExistsError:
+        fail("exists", "target_exists")
+    except OSError:
+        fail("denied", "create_refused")
+
+    try:
+        try:
+            _require_created_object(os.fstat(descriptor))
+        except FirstObjectUncertain:
+            fail("uncertain", "created_identity_unexpected")
+
+        try:
+            _write_all(descriptor, data)
+        except OSError:
+            fail("uncertain", "write_incomplete")
+
+        try:
+            _fsync_file(descriptor)
+        except OSError:
+            fail("uncertain", "file_not_durable")
+
+        info = os.fstat(descriptor)
+        try:
+            _require_created_object(info)
+        except FirstObjectUncertain:
+            fail("uncertain", "object_identity_changed")
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            fail("uncertain", "descriptor_close_failed")
+
+    # Verify the actual object, never an unchecked pathname: a fresh confined
+    # no-follow descriptor must resolve to the same inode and the same bytes.
+    try:
+        reader = os.open(name, _READ_FLAGS, dir_fd=directory)
+    except OSError:
+        fail("uncertain", "readback_failed")
+    try:
+        read_info = os.fstat(reader)
+        if (read_info.st_dev, read_info.st_ino) != (info.st_dev, info.st_ino):
+            fail("uncertain", "object_identity_changed")
+        if int(read_info.st_size) != len(data):
+            fail("uncertain", "object_size_changed")
+        try:
+            written = _read_all(reader, len(data))
+        except OSError:
+            fail("uncertain", "readback_failed")
+        if written != data:
+            fail("uncertain", "readback_mismatch")
+    finally:
+        try:
+            os.close(reader)
+        except OSError:
+            fail("uncertain", "descriptor_close_failed")
+
+    try:
+        _require_matching_entry(directory, name, info.st_dev, info.st_ino, len(data))
+    except (OSError, FirstObjectUncertain):
+        fail("uncertain", "object_identity_changed")
+
+    try:
+        _fsync_directory(directory)
+    except OSError:
+        fail("uncertain", "directory_not_durable")
+
+    return info
 
 
 def _read_exact_target(receipt: CreationReceipt) -> bytes:
@@ -606,6 +704,7 @@ def _context_pair(context) -> tuple:
         getattr(context, "storage_key", None),
         getattr(context, "synthetic_patient", None),
         getattr(context, "operation_id", None),
+        getattr(context, "visit_operation", False),
     )
 
 
@@ -618,7 +717,8 @@ def _expected_context(operation: PreparedOperation) -> tuple:
         "pending_insert",
         operation.key,
         operation.synthetic_patient,
-        operation.id if operation.synthetic_patient else None,
+        operation.id if operation.synthetic_patient or operation.visit_binding else None,
+        operation.visit_binding is not None,
     )
 
 
@@ -643,6 +743,120 @@ def _register_intent(operation, file_doc, data) -> dict:
     }
     _intents()[operation.key] = entry
     return entry
+
+
+def _arm_visit_transaction(operation, entry):
+    """Deny commits until future exact slot/PUBLISHED handshake exists."""
+    import frappe
+
+    lifetime = {"active": True, "db": frappe.local.db, "finalized": None,
+                "commit_verified": False, "commit_acknowledged": False}
+    entry["visit_lifetime"] = lifetime
+    db = frappe.local.db
+
+    def invalidate():
+        lifetime["active"] = False
+
+    def acknowledge_commit():
+        if lifetime["commit_verified"]:
+            lifetime["commit_acknowledged"] = True
+        lifetime["active"] = False
+
+    def refuse_early_commit():
+        # CallbackManager pops before invoking; re-arm before raising so retrying
+        # commit cannot pass. Frappe clears rollback hooks before before_commit.
+        try:
+            pending = getattr(db.before_commit, "_functions", None)
+            if pending is None:
+                raise FirstObjectDenied(SAFE_WRITER_DENIED)
+            allowed = tuple(
+                item.get("before_commit_callback")
+                for item in frappe_context._lock_registry().values()
+                if item.get("before_commit_registered")
+            )
+            if any(not any(callback is known for known in allowed) for callback in pending):
+                raise FirstObjectDenied(SAFE_WRITER_DENIED)
+            bound = lifetime["finalized"]
+            if bound is None:
+                raise FirstObjectDenied(SAFE_WRITER_DENIED)
+            _verify_staged_visit_final(operation, bound)
+            lifetime["commit_verified"] = True
+        except BaseException:
+            lifetime["active"] = False
+            db.before_commit.add(refuse_early_commit)
+            _poison(operation.id, "visit_commit_not_finalized")
+            raise
+
+    try:
+        pending = getattr(db.before_commit, "_functions", None)
+        if pending is None or pending:
+            _refuse(operation.id, "visit_precommit_callbacks_not_audited")
+        db.before_commit.add(refuse_early_commit)
+        db.after_commit.add(acknowledge_commit)
+        db.before_rollback.add(invalidate)
+    except Exception:
+        lifetime["active"] = False
+        _refuse(operation.id, "visit_transaction_hooks_unavailable")
+
+
+def _require_visit_lifetime(operation, owner, entry):
+    import frappe
+
+    if ((frappe.session.user or "") != operation.actor or
+        (getattr(frappe.local, "site", "") or "") != operation.site or
+        frappe_context.current_publication_owner() is not owner or
+        not entry or not entry.get("visit_lifetime", {}).get("active") or
+        entry["visit_lifetime"].get("db") is not getattr(frappe.local, "db", None)):
+        _refuse_receipt(operation.id, "visit_transaction_mismatch")
+    owner.require_continued()
+
+
+def finish_visit_transaction(operation, owner, action):
+    """Finish the exact owning transaction; any finish error is uncertain."""
+    import frappe
+
+    entry = _intent_for_key(operation.key)
+    _require_visit_lifetime(operation, owner, entry)
+    if action not in ("commit", "rollback"):
+        _refuse(operation.id, "visit_invalid_finish")
+    lifetime = entry["visit_lifetime"]
+    try:
+        getattr(lifetime["db"], action)()
+        if action == "commit" and not (
+            lifetime["commit_verified"] and lifetime["commit_acknowledged"]
+        ):
+            raise FirstObjectUncertain(SAFE_WRITER_UNCERTAIN)
+    except BaseException:
+        lifetime["active"] = False
+        owner.poison("visit_transaction_finish_uncertain")
+        raise FirstObjectUncertain(SAFE_WRITER_UNCERTAIN) from None
+
+
+def rollback_visit_transaction(operation, owner, db):
+    """One cleanup rollback on the pinned connection, even after owner poison."""
+    import frappe
+
+    attempted = getattr(frappe.local, "_clinic_visit_rollbacks", None)
+    if attempted is None:
+        attempted = set()
+        frappe.local._clinic_visit_rollbacks = attempted
+    token = (id(owner), id(db), operation.id)
+    entry = _intent_for_key(operation.key)
+    if (token in attempted or frappe_context.current_publication_owner() is not owner or
+        getattr(frappe.local, "db", None) is not db or
+        (frappe.session.user or "") != operation.actor or
+        (getattr(frappe.local, "site", "") or "") != operation.site or
+        (entry is not None and (entry.get("operation") != operation or
+         entry.get("visit_lifetime", {}).get("db") is not db))):
+        raise FirstObjectUncertain(SAFE_WRITER_UNCERTAIN)
+    attempted.add(token)
+    if entry and entry.get("visit_lifetime"):
+        entry["visit_lifetime"]["active"] = False
+    try:
+        db.rollback()
+    except BaseException:
+        owner.poison("visit_transaction_rollback_uncertain")
+        raise FirstObjectUncertain(SAFE_WRITER_UNCERTAIN) from None
 
 
 def _intent_for_document(file_doc):
@@ -680,7 +894,7 @@ def first_write_intent_authorized(file_doc, storage_key: str, context) -> bool:
         return False
     if entry["context"] != _context_pair(context):
         return False
-    expected_operation_id = operation.id if operation.synthetic_patient else None
+    expected_operation_id = operation.id if operation.synthetic_patient or operation.visit_binding else None
     if getattr(context, "operation_id", None) != expected_operation_id:
         return False
     if (frappe.session.user or "") != operation.actor:
@@ -826,13 +1040,16 @@ def write_first_object(operation: PreparedOperation, file_doc) -> PersistedObjec
     """
     if not isinstance(operation, PreparedOperation):
         raise FirstObjectDenied(SAFE_WRITER_DENIED)
-
     owner = _live_owner(operation)
+    if operation.visit_binding is not None:
+        owner.require_continued()
     with frappe_context.owned_publication_transaction(owner):
         _require_persisted_prepared(operation)
         _require_exact_file(file_doc, operation)
         _require_no_alias(operation, error=FirstObjectDenied)
         entry = _register_intent(operation, file_doc, file_doc.content)
+        if operation.visit_binding is not None:
+            _arm_visit_transaction(operation, entry)
 
         try:
             with frappe_context.bound_publication(
@@ -840,10 +1057,11 @@ def write_first_object(operation: PreparedOperation, file_doc) -> PersistedObjec
                 draft=operation.draft or "",
                 operation="pending_insert",
                 operation_id=(
-                    operation.id if operation.synthetic_patient else None
+                    operation.id if operation.synthetic_patient or operation.visit_binding else None
                 ),
                 storage_key=operation.key,
                 synthetic_patient=operation.synthetic_patient,
+                visit_operation=operation.visit_binding is not None,
             ):
                 file_doc.insert()
         except BaseException:
@@ -989,6 +1207,12 @@ def domain_linkage(
 
     if not isinstance(operation, PreparedOperation):
         raise FirstObjectDenied(SAFE_WRITER_DENIED)
+    if operation.visit_binding is not None:
+        owner = _live_owner(operation)
+        owner.require_continued()
+        _require_persisted_prepared(operation)
+        if doctype != "Clinic Photo":
+            _refuse(operation.id, "visit_linkage_doctype")
     kind = _LINKAGE_KINDS.get(doctype)
     if kind is None or not isinstance(name, str) or not name or name.strip() != name:
         _refuse(operation.id, "linkage_doctype_or_name")
@@ -1022,7 +1246,9 @@ def domain_linkage(
         if (
             (row.get("original_file") or "") != file_name
             or (row.get("original_sha256") or "") != operation.expected_sha256
-            or (row.get("patient_reference") or "") != operation.synthetic_patient
+            or (row.get("patient_reference") or "") != (
+                operation.visit_binding.patient if operation.visit_binding else operation.synthetic_patient
+            )
         ):
             _refuse(operation.id, "linkage_original_mismatch")
     return DomainLinkage(
@@ -1092,6 +1318,8 @@ def consume_persisted_object(
         raise FirstObjectDenied(SAFE_WRITER_DENIED)
     owner = _live_owner(operation)
     with frappe_context.owned_publication_transaction(owner):
+        if operation.visit_binding is not None:
+            _require_visit_lifetime(operation, owner, _intent_for_key(operation.key))
         return _consume_locked(operation, bound, domain_linkage)
 
 
@@ -1111,6 +1339,8 @@ def _consume_locked(operation, bound, linkage=None) -> str:
         _refuse_receipt(operation.id, "receipt_substituted")
     if bound._used or entry.get("used"):
         _refuse_receipt(operation.id, "receipt_replay")
+    if operation.visit_binding is not None and type(linkage) is not DomainLinkage:
+        _refuse_receipt(operation.id, "visit_linkage_missing")
 
     _require_persisted_prepared(operation)
     _require_persisted_file(operation, receipt, bound._file_name)
@@ -1120,6 +1350,8 @@ def _consume_locked(operation, bound, linkage=None) -> str:
         _refuse_uncertain(operation.id, "persisted_bytes_changed")
     if linkage is not None:
         _require_domain_linkage(operation, linkage, bound._file_name)
+    if operation.visit_binding is not None:
+        _require_visit_attachment(operation, bound._file_name, linkage)
     actual = _reference_markers(operation, bound._file_name, linkage)
     expected = tuple(
         sorted(
@@ -1136,6 +1368,102 @@ def _consume_locked(operation, bound, linkage=None) -> str:
     return bound._file_name
 
 
+def _require_visit_attachment(operation, file_name, linkage):
+    import frappe
+
+    if type(linkage) is not DomainLinkage or linkage.doctype != "Clinic Photo":
+        _refuse_receipt(operation.id, "visit_linkage_missing")
+    row = frappe.db.get_value(
+        "File", file_name, ["name", "attached_to_doctype", "attached_to_name"],
+        as_dict=True, for_update=True,
+    )
+    if (not row or row.get("name") != file_name or
+        row.get("attached_to_doctype") != "Clinic Photo" or
+        row.get("attached_to_name") != linkage.name):
+        _refuse_receipt(operation.id, "visit_file_attachment_mismatch")
+
+
+def require_visit_consumed_object(operation: PreparedOperation, bound):
+    """Reverify and return exact issued evidence for a future same-transaction slot."""
+    if not isinstance(operation, PreparedOperation) or operation.visit_binding is None:
+        raise FirstObjectDenied(SAFE_WRITER_DENIED)
+    owner = _live_owner(operation)
+    owner.require_continued()
+    with frappe_context.owned_publication_transaction(owner):
+        _require_visit_lifetime(operation, owner, _intent_for_key(operation.key))
+        if type(bound) is not PersistedObject or _issued().get(id(bound)) is not bound:
+            _refuse_receipt(operation.id, "unissued_binding")
+        entry = _intent_for_key(operation.key)
+        if (entry is None or entry.get("operation") != operation or
+            entry.get("bound") is not bound or entry.get("receipt") is not bound._receipt or
+            not bound._used or not entry.get("used")):
+            _refuse_receipt(operation.id, "visit_binding_mismatch")
+        linkage = entry.get("linkage")
+        _require_persisted_prepared(operation)
+        _require_persisted_file(operation, bound._receipt, bound._file_name)
+        try:
+            _read_exact_target(bound._receipt)
+        except FirstObjectUncertain:
+            _refuse_uncertain(operation.id, "persisted_bytes_changed")
+        _require_domain_linkage(operation, linkage, bound._file_name)
+        _require_visit_attachment(operation, bound._file_name, linkage)
+        _reference_markers(operation, bound._file_name, linkage)
+        return bound, linkage
+
+
+def _verify_staged_visit_final(operation, bound):
+    """Recheck exact consumed receipt, staged PUBLISHED outcome and slot."""
+    import frappe
+
+    owner = _live_owner(operation)
+    entry = _intent_for_key(operation.key)
+    _require_visit_lifetime(operation, owner, entry)
+    if (type(bound) is not PersistedObject or _issued().get(id(bound)) is not bound or
+        entry.get("operation") != operation or entry.get("bound") is not bound or
+        entry.get("receipt") is not bound._receipt or not entry.get("used") or
+        not bound._used or entry.get("published") is not True):
+        _refuse_receipt(operation.id, "visit_final_binding_mismatch")
+    linkage = entry.get("linkage")
+    if type(linkage) is not DomainLinkage or linkage.doctype != "Clinic Photo":
+        _refuse_receipt(operation.id, "visit_final_linkage_missing")
+    try:
+        verified = journal.load_verified_operation(operation.id, for_update=True)
+    except journal.JournalError:
+        _refuse_receipt(operation.id, "visit_final_journal_invalid")
+    published = verified.published
+    if (verified.state != "PUBLISHED" or not published or
+        published.reservation != replace(operation, state="PUBLISHED") or
+        published.file_name != bound._file_name or published.domain_doctype != linkage.doctype or
+        published.domain_name != linkage.name or
+        published.creation_identity != f"{bound._receipt.device}:{bound._receipt.inode}"):
+        _refuse_receipt(operation.id, "visit_final_journal_mismatch")
+    _require_persisted_file(operation, bound._receipt, bound._file_name)
+    try:
+        _read_exact_target(bound._receipt)
+    except FirstObjectUncertain:
+        _refuse_uncertain(operation.id, "persisted_bytes_changed")
+    row = frappe.db.get_value(
+        "Clinic Photo", linkage.name, list(_LINKAGE_FIELDS["Clinic Photo"]),
+        as_dict=True, for_update=True,
+    )
+    if (not row or row.get("name") != linkage.name or
+        row.get("storage_key") != operation.key or row.get("original_file") != bound._file_name or
+        row.get("original_sha256") != operation.expected_sha256 or
+        row.get("patient_reference") != operation.visit_binding.patient):
+        _refuse_receipt(operation.id, "visit_final_photo_mismatch")
+    _require_visit_attachment(operation, bound._file_name, linkage)
+    _reference_markers(operation, bound._file_name, linkage)
+
+
+def arm_visit_final_commit(operation: PreparedOperation, bound):
+    """Authorize only this issued receipt after exact PUBLISHED+slot staging."""
+    if not isinstance(operation, PreparedOperation) or operation.visit_binding is None:
+        raise FirstObjectDenied(SAFE_WRITER_DENIED)
+    _verify_staged_visit_final(operation, bound)
+    entry = _intent_for_key(operation.key)
+    entry["visit_lifetime"]["finalized"] = bound
+
+
 def require_consumed_object(operation: PreparedOperation, bound):
     """Narrow one-shot handoff: this exact bound object was consumed for this write.
 
@@ -1150,6 +1478,8 @@ def require_consumed_object(operation: PreparedOperation, bound):
         raise FirstObjectDenied(SAFE_WRITER_DENIED)
     owner = _live_owner(operation)
     with frappe_context.owned_publication_transaction(owner):
+        if operation.visit_binding is not None:
+            _require_visit_lifetime(operation, owner, _intent_for_key(operation.key))
         return _require_consumed_locked(operation, bound)
 
 

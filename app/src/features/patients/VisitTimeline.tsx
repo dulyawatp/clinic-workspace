@@ -12,6 +12,7 @@ import { Button } from "../../ui/Button";
 import { StatePanel } from "../../ui/StatePanel";
 import { EncounterReadFailure, EncounterStatus } from "../clinical/ApprovedVisitWorkspace";
 import { LabReportDisclosure } from "../clinical/NativeLabReports";
+import { NativeVisitPhotos } from "../clinical/NativeVisitPhotos";
 import { HistoryNoteDisclosure } from "./HistoryNoteDisclosure";
 import { SampleLabFiles, SamplePhotos } from "../clinical/VisitEvidencePreview";
 import { approvedVisitNarrative, SAMPLE_REPORT, sampleLabFiles, samplePhotoSides, sampleVisitHistory, type SampleHistoryPreview } from "../clinical/visit-preview";
@@ -84,7 +85,7 @@ export function NativeVisitTimeline({ patientRef }: { patientRef: string }) {
                     </div>
                     <div className="visit-history-evidence visit-preview-stack">
                       <h4>{t("workspace.photos")}</h4>
-                      <p className="pc-note">{t("workspace.nativePhotosUnavailable")}</p>
+                      <NativeVisitPhotos source={{ encounterId: visit.id, patientId: visit.patientId }} />
                     </div>
                     <div className="visit-history-narrative visit-preview-stack">
                       <HistoryNoteDisclosure encounterId={visit.id} patientId={visit.patientId} />

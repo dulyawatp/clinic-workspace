@@ -70,9 +70,12 @@ import os
 import re
 import stat
 import sys
+import threading
 from collections import OrderedDict
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from clinic_photos.access import frappe_context
 from clinic_photos.publication.contracts import PreparedOperation
@@ -85,7 +88,7 @@ SITE_DOMAIN = b"clinic-photos-exclusion-site-v1"
 OPERATION_DOMAIN = b"clinic-photos-exclusion-operation-v1"
 TARGET_DOMAIN = b"clinic-photos-exclusion-target-v1"
 
-TARGET_PREFIXES = ("draft", "patient-creation")
+TARGET_PREFIXES = ("draft", "patient-creation", "visit")
 MAX_TARGET_IDENTITY_LENGTH = 512
 
 SUBMITTED_STATE = "SUBMITTED"
@@ -178,6 +181,8 @@ def _require_target_identity(value) -> str:
     if not separator or prefix not in TARGET_PREFIXES:
         raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
     if not remainder or remainder.strip() != remainder:
+        raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
+    if prefix == "visit" and re.fullmatch(r"[0-9a-f]{64}", remainder) is None:
         raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
     return value
 
@@ -493,7 +498,7 @@ def _read_operation(operation_id: str, *, for_update: bool):
 
 BINDING_FIELDS = ("site", "actor", "kind", "draft", "original", "synthetic_patient")
 
-_REQUEST_KINDS = ("annotation_append", "synthetic_original_create")
+_REQUEST_KINDS = ("annotation_append", "synthetic_original_create", "visit_original_create")
 
 
 def _initial_bindings(row) -> dict:
@@ -523,6 +528,13 @@ def _target_from_row(row) -> str:
         return "draft:" + _row_text(row, "draft")
     if kind == "synthetic_original_create":
         return "patient-creation:" + _row_text(row, "synthetic_patient")
+    if kind == "visit_original_create":
+        try:
+            from clinic_photos.publication import journal
+            verified = journal._verified_operation(row)
+            return journal.target_identity(verified.request)
+        except Exception:
+            raise ExclusionDenied(SAFE_EXCLUSION_DENIED) from None
     raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
 
 
@@ -867,6 +879,15 @@ class LockedOwner:
             if (_row_value(row, "reservation_key") or "") != prepared.key:
                 self._poisoned = True
                 raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
+            if prepared.kind == "visit_original_create":
+                try:
+                    current = journal._prepared_operation(row)
+                except Exception:
+                    self._poisoned = True
+                    raise ExclusionDenied(SAFE_EXCLUSION_DENIED) from None
+                if current != prepared:
+                    self._poisoned = True
+                    raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
         except ExclusionError:
             self._prepared_continuation = False
             raise
@@ -1196,5 +1217,153 @@ def hold_exclusion(operation_id: str, target_identity: str):
                 lost = lost or error
         if owner is not None and lost is not None:
             owner._poisoned = True
+        if lost is not None and sys.exc_info()[0] is None:
+            raise lost
+
+
+_VISIT_OWNER_CONTEXT = ContextVar("clinic_visit_exclusion_owner", default=None)
+
+
+class _VisitAnnotationOwner:
+    """Scoped lock evidence only; never a DB or clinical authorization decision."""
+
+    __slots__ = ("_operation_id", "_site", "_actor", "_target_identity", "_intent",
+                 "_projection", "_tree", "_operation_lock", "_target_lock",
+                 "_pid", "_thread", "_token", "_closed", "_poisoned",
+                 "_visit_prepare_phase", "_visit_prepare_handle", "_visit_prepared_values")
+
+    def __init__(self, *args, **kwargs):
+        raise TypeError("visit owner is created only by exclusion")
+
+    def __setattr__(self, name, value):
+        raise AttributeError("visit owner is immutable")
+
+    def __copy__(self):
+        raise TypeError("visit owner cannot be copied")
+
+    def __deepcopy__(self, memo):
+        raise TypeError("visit owner cannot be copied")
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("visit owner cannot be pickled")
+
+    operation_id = property(lambda self: self._operation_id)
+    site = property(lambda self: self._site)
+    actor = property(lambda self: self._actor)
+    target_identity = property(lambda self: self._target_identity)
+    intent = property(lambda self: self._intent)
+    submitted_projection = property(lambda self: self._projection)
+
+    def _invalidate_inherited(self):
+        object.__setattr__(self, "_closed", True)
+
+    def _require_original_scope(self):
+        """Check originating execution context independently of lock health."""
+        if type(self) is not _VisitAnnotationOwner or _OWNERS.get(id(self)) is not self:
+            raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
+        if (self._pid != os.getpid() or self._thread is not threading.current_thread()
+                or _VISIT_OWNER_CONTEXT.get() is not self):
+            raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
+        try:
+            _VISIT_OWNER_CONTEXT.reset(self._token)
+        except (ValueError, RuntimeError):
+            raise ExclusionDenied(SAFE_EXCLUSION_DENIED) from None
+        object.__setattr__(self, "_token", _VISIT_OWNER_CONTEXT.set(self))
+
+    def require_live(self):
+        """Check this scope and locks, not persisted phase or actor authorization."""
+        if type(self) is not _VisitAnnotationOwner or _OWNERS.get(id(self)) is not self:
+            raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
+        if self._closed or self._poisoned:
+            raise ExclusionPoisoned(SAFE_EXCLUSION_POISONED)
+        self._require_original_scope()
+        try:
+            site, sites_real = _site_binding()
+            if (site, sites_real) != (self._site, self._tree.sites_path):
+                raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
+            _verify_stable_tree(self._tree)
+            _verify_lock(self._operation_lock)
+            _verify_lock(self._target_lock)
+        except BaseException:
+            object.__setattr__(self, "_poisoned", True)
+            raise
+        return self
+
+
+def require_visit_annotation_owner(owner):
+    """Require exact registered visit owner, not a caller-supplied liveness method."""
+    if type(owner) is not _VisitAnnotationOwner:
+        raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
+    return _VisitAnnotationOwner.require_live(owner)
+
+
+@contextmanager
+def hold_visit_annotation_exclusion(operation_id: str):
+    """Yield scoped lock evidence; caller owns DB transaction commit/rollback.
+
+    Actor is bound to authenticated submitted evidence, not the current session: the
+    launcher has not established an actor. Separate live authorization is mandatory.
+    ``require_live`` does not read or authorize any durable state or transition.
+    """
+    from clinic_photos.publication import visit_annotation_journal_codec as codec
+
+    operation_id = _require_operation_id(operation_id)
+    site, sites_real = _site_binding()
+    _ensure_fork_hook()
+    tree = _site_lock_directory(sites_real, site)
+    operation_path, _ = _lock_paths(tree.site_path, operation_id, "draft:placeholder")
+    operation_lock = _acquire(operation_path)
+    target_lock = None
+    owner = None
+    try:
+        def verified_intent(*, for_update):
+            row = _read_operation(operation_id, for_update=for_update)
+            if row is None or _row_text(row, "name") != operation_id:
+                raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
+            try:
+                projection = dict(row)
+                projection.setdefault("doctype", codec.journal.OPERATION_DOCTYPE)
+                intent = codec.load_submitted(projection, site=site, actor=_row_text(row, "actor"))
+                return projection, intent
+            except (codec.JournalIntegrityError, TypeError, ValueError):
+                raise ExclusionDenied(SAFE_EXCLUSION_DENIED) from None
+
+        projection, intent = verified_intent(for_update=False)
+        _, target_path = _lock_paths(tree.site_path, operation_id, intent.target_identity)
+        target_lock = _acquire(target_path)
+        current, current_intent = verified_intent(for_update=True)
+        if current != projection or current_intent != intent:
+            raise ExclusionDenied(SAFE_EXCLUSION_DENIED)
+        owner = object.__new__(_VisitAnnotationOwner)
+        for key, value in {
+            "_operation_id": operation_id, "_site": site, "_actor": intent.binding.actor,
+            "_target_identity": intent.target_identity, "_intent": intent,
+            "_projection": MappingProxyType(current.copy()), "_tree": tree,
+            "_operation_lock": operation_lock, "_target_lock": target_lock,
+            "_pid": os.getpid(), "_thread": threading.current_thread(),
+            "_closed": False, "_poisoned": False,
+            "_visit_prepare_phase": "new", "_visit_prepare_handle": None,
+            "_visit_prepared_values": None,
+        }.items():
+            object.__setattr__(owner, key, value)
+        object.__setattr__(owner, "_token", _VISIT_OWNER_CONTEXT.set(owner))
+        _OWNERS[id(owner)] = owner
+        owner.require_live()
+        yield owner
+    finally:
+        if owner is not None:
+            _OWNERS.pop(id(owner), None)
+            object.__setattr__(owner, "_closed", True)
+            try:
+                _VISIT_OWNER_CONTEXT.reset(owner._token)
+            except (ValueError, RuntimeError):
+                pass
+        lost = None
+        for lock in (target_lock, operation_lock):
+            if lock is not None:
+                try:
+                    _release(lock)
+                except ExclusionLost as error:
+                    lost = lost or error
         if lost is not None and sys.exc_info()[0] is None:
             raise lost

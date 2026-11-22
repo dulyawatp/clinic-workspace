@@ -28,6 +28,7 @@ export default defineConfig(({ mode }) => ({
       "e2e/**",
       "e2e-live/**",
       "e2e-marley/**",
+      "e2e-sit/**",
     ],
     // Relative fetch input (what the app sends) resolves here before MSW sees
     // it; the default jsdom origin would be an unrelated localhost port.
