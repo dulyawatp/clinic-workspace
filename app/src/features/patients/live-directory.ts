@@ -58,13 +58,15 @@ function parseLivePatients(body: unknown, native: boolean): LivePatient[] {
       !("display_name" in item) ||
       typeof item.workspace_patient_id !== "string" ||
       !item.workspace_patient_id.trim() ||
+      /[\u0000-\u001f\u007f]/.test(item.workspace_patient_id) ||
+      (item.workspace_patient_id.length > 256 &&
+        (item.workspace_patient_id.length > 808 || !/^cpr1_[A-Za-z0-9_-]+$/.test(item.workspace_patient_id))) ||
       (native
         ? Object.keys(item).length !== 2
         : !("native_patient_id" in item) || typeof item.native_patient_id !== "string" || !item.native_patient_id.trim()) ||
       typeof item.display_name !== "string" ||
       !item.display_name.trim() ||
       [
-        item.workspace_patient_id,
         ...(!native && "native_patient_id" in item && typeof item.native_patient_id === "string" ? [item.native_patient_id] : []),
         item.display_name,
       ].some(

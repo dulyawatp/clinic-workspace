@@ -202,6 +202,19 @@ describe("app wiring", () => {
     expect(screen.queryByRole("table")).toBeNull();
   });
 
+  it("renders a native directory row with a maximum-length opaque patient reference", async () => {
+    vi.stubEnv("VITE_CLINIC_NATIVE", "1");
+    server.use(
+      http.get(BOOTSTRAP, () => HttpResponse.json({ message: liveMessage() })),
+      http.get(DIRECTORY, () => HttpResponse.json({ message: { items: [{
+        workspace_patient_id: `cpr1_${"a".repeat(803)}`,
+        display_name: "Long Reference Patient",
+      }] } })),
+    );
+    renderWithFixtures(<PatientDirectoryPage />, { role: "DOC" });
+    expect(await screen.findByText("Long Reference Patient")).toBeVisible();
+  });
+
   it.each([
     { workspace_patient_id: "workspace-1", display_name: "Leaked", native_patient_id: "native-1" },
     { workspace_patient_id: "workspace-1", display_name: "Leaked", phone: "private" },

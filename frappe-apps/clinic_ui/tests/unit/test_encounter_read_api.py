@@ -1,6 +1,7 @@
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 from clinic_ui.runtime.frappe_gateway import Gateway
 
@@ -75,6 +76,9 @@ class Frappe:
         self.queries.append((doctype, kwargs))
         if not self.allowed:
             raise Denied()
+        if "name" in kwargs["filters"]:
+            name = kwargs["filters"]["name"]
+            return [] if name in self.query_denied_docs else [{"name": name}]
         rows = [row for row in self.rows if row["patient"] == kwargs["filters"]["patient"]
                 and row["name"] not in self.query_denied_docs]
         rows.sort(key=lambda row: (row["encounter_date"], row["name"]), reverse=True)
@@ -102,6 +106,114 @@ class EncounterReadTests(unittest.TestCase):
         self.frappe = Frappe()
         self.gateway = Gateway(self.frappe)
         self.gateway._site_config = {}
+
+    def test_production_history_uses_creation_bound_patient_reference(self):
+        from clinic_ui.core import production_patient_ref
+
+        key = b"k" * 64
+        created = datetime(2026, 1, 1)
+        ref = production_patient_ref.encode(key, self.gateway.site, "PAT-1", created)
+        with patch("clinic_ui.endpoints.production_read.authorize_if_selected", return_value=object()), \
+             patch("clinic_ui.endpoints.production_read.patient_ref_key", return_value=key), \
+             patch("clinic_ui.runtime.production_read_gateway.exact_readable", return_value=True), \
+             patch("clinic_ui.runtime.production_read_gateway.patient_creation", return_value=created), \
+             patch.object(self.gateway, "native_patient_view", return_value={"patient_name": "Patient One"}):
+            page = self.gateway.list_patient_encounters(ref)
+            detail = self.gateway.view_patient_encounter("ENC-00")
+            self.assertEqual(page["items"][0]["patientId"], ref)
+            self.assertEqual(detail["patientId"], ref)
+            self.assertNotIn("PAT-1", repr((page, detail)))
+            with self.assertRaises(Denied):
+                self.gateway.list_patient_encounters("PAT-1")
+            with self.assertRaises(Denied):
+                self.gateway.list_patient_encounters(ref + "x" * 808)
+            with patch("clinic_ui.runtime.production_read_gateway.exact_readable", return_value=False):
+                with self.assertRaises(Denied):
+                    self.gateway.list_patient_encounters(ref)
+                with self.assertRaises(Denied):
+                    self.gateway.view_patient_encounter("ENC-00")
+            with patch("clinic_ui.runtime.production_read_gateway.patient_creation", return_value=datetime(2026, 1, 2)):
+                with self.assertRaises(Denied):
+                    self.gateway.list_patient_encounters(ref)
+
+    def test_production_history_checks_patient_query_and_accepts_maximum_reference(self):
+        from clinic_ui.core import production_patient_ref
+
+        key = b"k" * 64
+        created = datetime(2026, 1, 1)
+        patient = "😀" * 140
+        for row in self.frappe.rows:
+            row["patient"] = patient
+        ref = production_patient_ref.encode(key, self.gateway.site, patient, created)
+        self.assertEqual(len(ref), 808)
+        with patch("clinic_ui.endpoints.production_read.authorize_if_selected", return_value=object()), \
+             patch("clinic_ui.endpoints.production_read.patient_ref_key", return_value=key), \
+             patch("clinic_ui.runtime.production_read_gateway.patient_creation", return_value=created), \
+             patch.object(self.gateway, "native_patient_view", return_value={"patient_name": "Patient One"}):
+            self.assertEqual(self.gateway.list_patient_encounters(ref)["items"][0]["patientId"], ref)
+            self.frappe.query_denied_docs.add(patient)
+            with self.assertRaises(Denied):
+                self.gateway.list_patient_encounters(ref)
+            with self.assertRaises(Denied):
+                self.gateway.view_patient_encounter("ENC-00")
+
+    def test_production_history_rejects_unenrolled_role(self):
+        from clinic_ui.core import production_enrollment
+        from clinic_ui.runtime.production_read_gateway import history_photo_appointment
+        from .fake_gateway import session_view
+        from .test_production_read_adapter import gateway
+
+        configured = gateway()
+        self.gateway._site_config = configured._settings
+        self.frappe.local.site = configured.site
+        self.frappe.get_site_path = lambda *args: "private"
+        with patch.object(Gateway, "current_session", new_callable=PropertyMock,
+                          return_value=session_view(roles=("Unrelated",))), \
+             patch.object(production_enrollment, "verify_production_enrollment", return_value=True):
+            with self.assertRaises(Denied):
+                self.gateway.list_patient_encounters("PAT-1")
+            with self.assertRaises(Denied):
+                self.gateway.view_patient_encounter("ENC-00")
+            with self.assertRaises(Denied):
+                history_photo_appointment(self.gateway, "ENC-00", "cpr1_invalid")
+
+    def test_production_history_photo_binding_is_exact_and_authorized(self):
+        from clinic_ui.core import production_patient_ref
+        from clinic_ui.runtime import production_read_gateway
+
+        key = b"k" * 64
+        created = datetime(2026, 1, 1)
+        ref = production_patient_ref.encode(key, self.gateway.site, "PAT-1", created)
+        self.frappe.rows[0]["appointment"] = "APT-1"
+        self.frappe.meta["Patient Encounter"].fields["appointment"] = None
+        self.frappe.meta["Patient Appointment"] = Meta({"patient": None})
+        with patch("clinic_ui.endpoints.production_read.authorize_if_selected", return_value=object()), \
+             patch("clinic_ui.endpoints.production_read.patient_ref_key", return_value=key), \
+             patch.object(production_read_gateway, "patient_creation", return_value=created), \
+             patch.object(self.gateway, "native_patient_view", return_value={"patient_name": "Patient One"}), \
+             patch.object(self.gateway, "native_appointment_view", return_value={"patient": "PAT-1"}):
+            self.assertEqual(production_read_gateway.history_photo_appointment(
+                self.gateway, "ENC-00", ref), {"appointment": "APT-1"})
+            with self.assertRaises(Denied):
+                production_read_gateway.history_photo_appointment(self.gateway, "ENC-00", "PAT-1")
+            with patch.object(self.gateway, "native_appointment_view", return_value={"patient": "PAT-OTHER"}):
+                with self.assertRaises(Denied):
+                    production_read_gateway.history_photo_appointment(self.gateway, "ENC-00", ref)
+            for name in ("PAT-1", "ENC-00", "APT-1"):
+                self.frappe.query_denied_docs.add(name)
+                with self.assertRaises(Denied):
+                    production_read_gateway.history_photo_appointment(self.gateway, "ENC-00", ref)
+                self.frappe.query_denied_docs.remove(name)
+            self.frappe.denied_docs.add("ENC-00")
+            with self.assertRaises(Denied):
+                production_read_gateway.history_photo_appointment(self.gateway, "ENC-00", ref)
+            self.frappe.denied_docs.clear()
+            self.frappe.meta["Patient Encounter"].masked = None
+            with self.assertRaises(Denied):
+                production_read_gateway.history_photo_appointment(self.gateway, "ENC-00", ref)
+            self.frappe.meta["Patient Encounter"].masked = ("appointment",)
+            with self.assertRaises(Denied):
+                production_read_gateway.history_photo_appointment(self.gateway, "ENC-00", ref)
 
     def test_native_patient_without_pilot_configuration_and_bounded_pagination(self):
         result = self.gateway.list_patient_encounters("PAT-1", 0)

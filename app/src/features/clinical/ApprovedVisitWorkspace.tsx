@@ -207,7 +207,7 @@ export function SavedEncounterWorkspace({ encounterId }: { encounterId: string }
         </div>}
         note={<p className="pc-note">{t("workspace.savedNoteUnavailable")}</p>}
         medications={<p className="pc-note">{t("workspace.savedMedicationsUnavailable")}</p>}
-        photos={<NativeVisitPhotos source={{ encounterId: encounter.id, patientId: encounter.patientId }} />}
+        photos={<NativeVisitPhotos source={{ encounterId: encounter.id, patientId: encounter.patientId }} comparison />}
       />
     </div>
   );

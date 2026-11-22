@@ -9,11 +9,12 @@ from dataclasses import dataclass, field
 
 import frappe
 
+from clinic_photos.access import storage
 from clinic_photos.access.draft_identity import visit_draft_name
 from clinic_photos.publication import journal, staging, writer
 from clinic_photos.publication import visit_annotation_journal_codec as codec
 from clinic_photos.publication import visit_annotation_domain as domain
-from clinic_photos.publication.validation import MAX_ANNOTATION_BYTES
+from clinic_photos.publication.validation import MAX_ANNOTATION_BYTES, MAX_IMAGE_BYTES
 from clinic_photos.publication.visit_annotation_intent import VisitAnnotationBinding, VisitAnnotationIntent
 from clinic_photos.visit import actor, pair, runtime
 
@@ -137,7 +138,7 @@ def resolve_read_metadata(appointment_name, slot, *, version=None):
                         annotation_file=row["annotation_file"], storage_key=row["storage_key"])
 
 
-def _read_file_bytes(site, key, size, identity):
+def _read_file_bytes(site, key, size, identity, *, require_private_object=False):
     """Open exact site tree without symlinks and verify all identities twice."""
     if not all(getattr(os, name, 0) for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")):
         raise ValueError
@@ -180,6 +181,8 @@ def _read_file_bytes(site, key, size, identity):
                         (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino)):
                     raise ValueError
             opened = os.fstat(fd)
+            if require_private_object:
+                writer._require_created_object(opened)
             entry = os.stat(basename, dir_fd=parent, follow_symlinks=False)
             if (not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(entry.st_mode) or
                     (opened.st_dev, opened.st_ino, opened.st_size) !=
@@ -205,6 +208,22 @@ def _read_file_bytes(site, key, size, identity):
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def read_verified_original_bytes(site, key, size, identity, sha256):
+    """Read a bounded original, verifying private object and immutable evidence."""
+    if (type(size) is not int or not 0 < size <= MAX_IMAGE_BYTES or
+            not isinstance(key, str) or storage.canonical_private_key(key) != key or
+            not key.endswith((".png", ".jpg")) or
+            not isinstance(sha256, str) or len(sha256) != 64 or
+            any(c not in "0123456789abcdef" for c in sha256)):
+        raise ValueError
+    data = _read_file_bytes(site, key, size, identity, require_private_object=True)
+    if (hashlib.sha256(data).hexdigest() != sha256 or
+            not ((key.endswith(".png") and data.startswith(b"\x89PNG\r\n\x1a\n")) or
+                 (key.endswith(".jpg") and data.startswith(b"\xff\xd8\xff")))):
+        raise ValueError
+    return data
 
 
 def read_committed(appointment, slot, *, version=None, operation=None, request_key=None):

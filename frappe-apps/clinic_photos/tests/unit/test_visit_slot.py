@@ -41,6 +41,10 @@ def test_slot_schema_has_unique_key_and_photo():
     fields = {field["fieldname"]: field for field in schema["fields"]}
     assert fields["slot_key"]["unique"] == 1
     assert fields["photo"]["unique"] == 1
+    for name in ("photo_creation", "file_name", "file_creation"):
+        assert fields[name]["fieldtype"] == "Data"
+        assert fields[name]["read_only"] == 1
+        assert not fields[name].get("reqd")
     assert schema["permissions"] == []
 
 
@@ -177,14 +181,22 @@ def test_slot_key_separates_appointments_and_slots(env):
 
 def test_prepared_slot_insert_uses_exact_consumed_evidence(env):
     from clinic_photos.publication import writer
-    prepared = types.SimpleNamespace(id="op", visit_binding=env.binding)
-    bound = object()
+    prepared = types.SimpleNamespace(id="op", visit_binding=env.binding, key="key", expected_sha256="sha")
+    bound = types.SimpleNamespace(file_name="file")
     linkage = types.SimpleNamespace(doctype="Clinic Photo", name="photo")
+    photo = types.SimpleNamespace(name="photo", creation="2026-11-22 12:00:00.123456",
+                                  original_file="file", storage_key="key", original_sha256="sha",
+                                  patient_reference="P")
+    file = types.SimpleNamespace(name="file", creation="2026-11-22 12:00:01.123456",
+                                 file_url="key", is_private=1,
+                                 attached_to_doctype="Clinic Photo", attached_to_name="photo")
     created = types.SimpleNamespace(
         doctype="Clinic Visit Photo Slot", name="slot", flags=types.SimpleNamespace(),
         insert=Mock(),
     )
-    env.frappe.get_doc = Mock(return_value=created)
+    env.frappe.get_doc = Mock(side_effect=lambda *args, **kwargs: (
+        created if isinstance(args[0], dict) else {"Clinic Photo": photo, "File": file}[args[0]]
+    ))
     with patch.object(env.capture, "check_slot_availability") as available, \
          patch.object(writer, "require_visit_consumed_object", return_value=(bound, linkage)) as verify:
         assert env.capture.insert_prepared_slot_link(prepared, bound) == "slot"
@@ -192,6 +204,36 @@ def test_prepared_slot_insert_uses_exact_consumed_evidence(env):
     available.assert_called_once_with(env.binding)
     values = env.frappe.get_doc.call_args.args[0]
     assert values["operation"] == "op" and values["photo"] == "photo"
+    assert values["photo_creation"] == photo.creation
+    assert values["file_creation"] == file.creation
+    assert values["file_name"] == file.name
+    file.attached_to_name = "wrong"
+    with patch.object(env.capture, "check_slot_availability"), \
+         patch.object(writer, "require_visit_consumed_object", return_value=(bound, linkage)), \
+         pytest.raises(PermissionError):
+        env.capture.insert_prepared_slot_link(prepared, bound)
+    file.attached_to_name = "photo"
+    photo.creation = "not-a-generation"
+    with patch.object(env.capture, "check_slot_availability"), \
+         patch.object(writer, "require_visit_consumed_object", return_value=(bound, linkage)), \
+         pytest.raises(PermissionError):
+        env.capture.insert_prepared_slot_link(prepared, bound)
+
+
+def test_after_slot_does_not_require_or_persist_generation_evidence(env):
+    from clinic_photos.publication import writer
+    prepared = types.SimpleNamespace(id="op", visit_binding=replace(
+        env.binding, slot="After", encounter="E", encounter_creation="ec"))
+    bound = object()
+    linkage = types.SimpleNamespace(doctype="Clinic Photo", name="photo")
+    created = types.SimpleNamespace(doctype=env.capture.SLOT, name="slot",
+                                    flags=types.SimpleNamespace(), insert=Mock())
+    env.frappe.get_doc = Mock(return_value=created)
+    with patch.object(env.capture, "check_slot_availability"), \
+         patch.object(writer, "require_visit_consumed_object", return_value=(bound, linkage)):
+        env.capture.insert_prepared_slot_link(prepared, bound)
+    values = env.frappe.get_doc.call_args.args[0]
+    assert not {"photo_creation", "file_name", "file_creation"} & values.keys()
 
 
 def test_vacancy_uses_indexed_key_locking_reads(env):

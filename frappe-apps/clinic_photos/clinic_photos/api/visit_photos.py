@@ -147,16 +147,39 @@ def read_image(payload=None, **extra):
         raise frappe.PermissionError(SAFE_DENIAL) from None
 
 
+def read_own_before(payload=None, **extra):
+    from clinic_photos.access.entrypoints import mark_protected_request
+
+    mark_protected_request()
+    require_visit_request()
+    appointment = _payload(payload, {"appointment"}, extra, "visit_photos.read_own_before")
+    frappe = photo_save._frappe()
+    try:
+        from werkzeug.wrappers import Response
+        from clinic_photos.visit import reception_read
+
+        data, mime = reception_read.read_own_before(appointment)
+        response = Response(data, content_type=mime)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+    except Exception:
+        raise frappe.PermissionError(SAFE_DENIAL) from None
+
+
 def _register_site_contract():
     try:
         import frappe
     except ModuleNotFoundError:
         return
-    global read_pair, grant_consent, revoke_consent, read_image
+    global read_pair, grant_consent, revoke_consent, read_image, read_own_before
     read_pair = frappe.whitelist(methods=["POST"])(read_pair)
     grant_consent = frappe.whitelist(methods=["POST"])(grant_consent)
     revoke_consent = frappe.whitelist(methods=["POST"])(revoke_consent)
     read_image = frappe.whitelist(methods=["POST"])(read_image)
+    read_own_before = frappe.whitelist(methods=["POST"])(read_own_before)
 
 
 _register_site_contract()

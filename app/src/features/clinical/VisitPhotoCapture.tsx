@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useId, useState } from "react";
+import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSession } from "../../app/SessionProvider";
 import { Button } from "../../design/components";
@@ -39,10 +39,28 @@ export function useVisitPhotoActivity(appointment: string) {
   return { data, update };
 }
 
-export function VisitPhotoCapture({ target, activity, pair }: {
+export function ReceptionPhotoSteps({ consent, before }: { consent?: ReactNode; before?: ReactNode }) {
+  const { t } = useTranslation();
+  return (
+    <div className="appointment-intake-grid">
+      <div className="visit-preview-stack">
+        <h3>{t("appointmentIntake.verify")}</h3>
+        <p className="pc-note">{t("appointmentIntake.consentOptional")}</p>
+        {consent}
+      </div>
+      <div className="visit-preview-stack">
+        <h3>{t("appointmentIntake.before")}</h3>
+        {before ?? <p className="pc-note">{t("workspace.nativePhotosUnavailable")}</p>}
+      </div>
+    </div>
+  );
+}
+
+export function VisitPhotoCapture({ target, activity, pair, intakeBefore }: {
   target: VisitPhotoTarget;
   activity: ReturnType<typeof useVisitPhotoActivity>;
-  pair: Pair | null | undefined;
+  pair?: Pair | null;
+  intakeBefore?: ReactNode;
 }) {
   const { t } = useTranslation();
   const { authGeneration } = useSession();
@@ -131,35 +149,57 @@ export function VisitPhotoCapture({ target, activity, pair }: {
   }
 
   const consentWritable = flags && !data.consent && data.notice !== "consentUnknown";
-  const slot = consentWritable && pair && flags.has_active_consent && !upload
-    ? flags.can_capture_before && !pair.Before && !pair.After ? "Before"
-      : flags.can_capture_after && target.encounter && pair.framing && !pair.After ? "After" : null
+  // Intake uses server capture eligibility; it does not need generic pair access.
+  const slot = consentWritable && flags.has_active_consent && !upload
+    ? intakeBefore !== undefined ? (flags.can_capture_before ? "Before" : null)
+      : pair && flags.can_capture_before && !pair.Before && !pair.After ? "Before"
+        : pair && flags.can_capture_after && target.encounter && pair.framing && !pair.After ? "After" : null
     : null;
+  const notice = data.notice && <p className="pc-note" role="status">{t(`workspace.visitPhotos.${data.notice}`)}</p>;
+  const consentNotice = data.notice === "consentRecorded" || data.notice === "consentRevoked" || data.notice === "consentUnknown";
+  const consent = <>
+    {data.consent && <p className="pc-note" role="status">{t("common.loading")}</p>}
+    {data.notice === "consentUnknown" && <div>
+      <Button size="sm" variant="secondary" onClick={() => update((current) => ({
+        ...current, revision: current.revision + 1, notice: undefined,
+      }))}>{t("workspace.visitPhotos.checkConsent")}</Button>
+    </div>}
+  </>;
+  const consentControls = <>
+    {options.isFetching ? <p className="pc-note" role="status">{t("common.loading")}</p>
+      : !flags && <p className="pc-note">{t("workspace.visitPhotos.controlsUnavailable")}</p>}
+    {consentWritable && !flags.has_active_consent && flags.can_grant && <ConsentForm onGrant={submitConsent} />}
+    {consentWritable && flags.has_active_consent && flags.can_revoke && <div className="visit-preview-stack">
+      <p className="pc-note">{t("workspace.visitPhotos.activeConsent")}</p>
+      <div><Button size="sm" variant="secondary" onClick={() => void submitConsent(null)}>
+        {t("workspace.visitPhotos.revoke")}
+      </Button></div>
+    </div>}
+  </>;
+  const capture = <>
+    {upload && <>
+      <p className="pc-note" role="status">{t(`workspace.visitPhotos.upload.${upload.state}`)}</p>
+      {upload.key && upload.state !== "sending" && upload.state !== "checking" && <div>
+        <Button size="sm" variant="secondary" onClick={() => void checkUpload()}>{t("workspace.visitPhotos.check")}</Button>
+      </div>}
+    </>}
+  </>;
+  const captureForm = slot && <CaptureForm key={`${slot}:${data.revision}`} slot={slot} framing={pair?.framing ?? null} onCapture={submitPhoto} />;
+  if (intakeBefore !== undefined) {
+    return <ReceptionPhotoSteps consent={<>{consentNotice && notice}{consent}{consentControls}</>} before={<>
+      {intakeBefore}
+      {!consentNotice && notice}
+      {capture}
+      {captureForm}
+    </>} />;
+  }
   return (
     <div className="visit-preview-stack visit-photo-capture">
-      {data.notice && <p className="pc-note" role="status">{t(`workspace.visitPhotos.${data.notice}`)}</p>}
-      {data.consent && <p className="pc-note" role="status">{t("common.loading")}</p>}
-      {data.notice === "consentUnknown" && <div>
-        <Button size="sm" variant="secondary" onClick={() => update((current) => ({
-          ...current, revision: current.revision + 1, notice: undefined,
-        }))}>{t("workspace.visitPhotos.checkConsent")}</Button>
-      </div>}
-      {upload && <>
-        <p className="pc-note" role="status">{t(`workspace.visitPhotos.upload.${upload.state}`)}</p>
-        {upload.key && upload.state !== "sending" && upload.state !== "checking" && <div>
-          <Button size="sm" variant="secondary" onClick={() => void checkUpload()}>{t("workspace.visitPhotos.check")}</Button>
-        </div>}
-      </>}
-      {options.isFetching ? <p className="pc-note" role="status">{t("common.loading")}</p>
-        : !flags && <p className="pc-note">{t("workspace.visitPhotos.controlsUnavailable")}</p>}
-      {consentWritable && !flags.has_active_consent && flags.can_grant && <ConsentForm onGrant={submitConsent} />}
-      {consentWritable && flags.has_active_consent && flags.can_revoke && <div className="visit-preview-stack">
-        <p className="pc-note">{t("workspace.visitPhotos.activeConsent")}</p>
-        <div><Button size="sm" variant="secondary" onClick={() => void submitConsent(null)}>
-          {t("workspace.visitPhotos.revoke")}
-        </Button></div>
-      </div>}
-      {slot && <CaptureForm key={`${slot}:${data.revision}`} slot={slot} framing={pair?.framing ?? null} onCapture={submitPhoto} />}
+      {notice}
+      {consent}
+      {capture}
+      {consentControls}
+      {captureForm}
     </div>
   );
 }

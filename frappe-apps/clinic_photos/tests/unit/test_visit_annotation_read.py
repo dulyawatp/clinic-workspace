@@ -117,6 +117,75 @@ def published(env, tmp_path):
         yield types.SimpleNamespace(env=env, row=row, file=file_row, path=path, item=item)
 
 
+@pytest.mark.parametrize("suffix,data", [
+    (".png", b"\x89PNG\r\n\x1a\npayload"),
+    (".jpg", b"\xff\xd8\xffpayload"),
+])
+def test_verified_original_private_bytes(published, suffix, data):
+    path = published.path.with_name("original" + suffix)
+    path.write_bytes(data)
+    path.chmod(0o600)
+    info = path.stat()
+    key = "/private/files/" + path.name
+    read = published.env.module.read_verified_original_bytes
+    args = ("site", key, len(data), f"{info.st_dev}:{info.st_ino}", hashlib.sha256(data).hexdigest())
+    assert read(*args) == data
+    with pytest.raises(ValueError):
+        read(*args[:-1], "0" * 64)
+    with pytest.raises(ValueError):
+        read(*args[:3], f"{info.st_dev}:{info.st_ino + 1}", args[4])
+    path.chmod(0o644)
+    with pytest.raises(published.env.module.writer.FirstObjectUncertain):
+        read(*args)
+    path.chmod(0o600)
+    link = path.with_name("hardlink")
+    link.hardlink_to(path)
+    with pytest.raises(published.env.module.writer.FirstObjectUncertain):
+        read(*args)
+    link.unlink()
+    path.unlink()
+    path.symlink_to(published.path)
+    with pytest.raises((OSError, ValueError)):
+        read(*args)
+
+
+def test_verified_original_rechecks_private_mode_after_read(published):
+    path = published.path.with_name("original.png")
+    data = b"\x89PNG\r\n\x1a\npayload"
+    path.write_bytes(data)
+    path.chmod(0o600)
+    info = path.stat()
+    module = published.env.module
+    original_read = module.os.read
+
+    def change_mode(fd, size):
+        result = original_read(fd, size)
+        path.chmod(0o644)
+        return result
+
+    with patch.object(module.os, "read", side_effect=change_mode):
+        with pytest.raises(module.writer.FirstObjectUncertain):
+            module.read_verified_original_bytes(
+                "site", "/private/files/original.png", len(data),
+                f"{info.st_dev}:{info.st_ino}", hashlib.sha256(data).hexdigest())
+
+
+@pytest.mark.parametrize("key,data,size,digest", [
+    ("/private/files/a.jpg", b"\x89PNG\r\n\x1a\nx", 9, hashlib.sha256(b"\x89PNG\r\n\x1a\nx").hexdigest()),
+    ("/private/files/a.jpeg", b"\xff\xd8\xffx", 4, "0" * 64),
+    ("/private/files/a%2epng", b"x", 1, "0" * 64),
+    ("/private/files/a.png", b"x", 8 * 1024 * 1024 + 1, "0" * 64),
+])
+def test_verified_original_rejects_invalid_evidence(published, key, data, size, digest):
+    path = published.path.with_name(key.rsplit("/", 1)[-1])
+    path.write_bytes(data)
+    path.chmod(0o600)
+    info = path.stat()
+    with pytest.raises(ValueError):
+        published.env.module.read_verified_original_bytes(
+            "site", key, size, f"{info.st_dev}:{info.st_ino}", digest)
+
+
 def test_read_committed_author_drawing_after_write_grant_revocation(published):
     e = published.env
     e.frappe.has_permission.side_effect = lambda dt, action, **kw: action == "read"

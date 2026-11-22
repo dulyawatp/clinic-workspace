@@ -370,6 +370,7 @@ _REVIEWED_BOUNDARY = {
         "evaluate_milestone",
     ),
     "override_doctype_class": (),
+    "clinic_photos_installed": False,
     "checkin_whitelisted_override": (),
     "scheduler_all": (
         "frappe.email.queue.flush",
@@ -945,12 +946,29 @@ def _normalized_sequence(value):
     return tuple(value or ())
 
 
+def checkin_profile(snapshot):
+    """Resolve only the two reviewed installed-app and override combinations."""
+    installed = snapshot.get("clinic_photos_installed")
+    overrides = snapshot.get("checkin_whitelisted_override")
+    if not isinstance(overrides, (tuple, list)):
+        return None
+    if installed is False and not overrides:
+        return "stock"
+    if installed is True and tuple(overrides) == (
+        "clinic_photos.visit.checkin.check_in_appointment",
+    ):
+        return "photo"
+    return None
+
+
 def boundary_problem(snapshot):
     """Return the first unreviewed boundary drift, or ``None`` when pinned."""
 
     if not isinstance(snapshot, dict):
         return "boundary snapshot unreadable"
     expected = _REVIEWED_BOUNDARY
+    if checkin_profile(snapshot) is None:
+        return "checkin_whitelisted_override drift"
     for key in ("versions", "source_sha256"):
         actual = snapshot.get(key)
         if not isinstance(actual, dict):
@@ -984,7 +1002,6 @@ def boundary_problem(snapshot):
         "wildcard_validate",
         "wildcard_on_change",
         "override_doctype_class",
-        "checkin_whitelisted_override",
         "cancel_whitelisted_override",
         "scheduler_all",
         "scheduler_daily",

@@ -248,6 +248,14 @@ class FakeFrappe(types.SimpleNamespace):
         self.appointment_boundary_snapshot = (
             appointment_contract.reviewed_boundary_snapshot()
         )
+        self.installed_apps = []
+        self.hooks = {}
+
+    def get_installed_apps(self):
+        return self.installed_apps
+
+    def get_hooks(self):
+        return self.hooks
 
     def get_meta(self, doctype):
         self.meta_doctypes.append(doctype)
@@ -2548,6 +2556,68 @@ class AppointmentWriteAdapterTests(GatewayTestCase):
 
     # -- check-in ---------------------------------------------------------
 
+    def test_checkin_photo_profile_dispatch_and_drift(self):
+        target = "clinic_photos.visit.checkin.check_in_appointment"
+        hook_key = f"{frappe_gateway.NATIVE_CHECKIN_MODULE}.check_in_appointment"
+        for installed, overrides, expected in (
+            (True, [target], "photo"),
+            (False, [], "stock"),
+            (True, [], None),
+            (False, [target], None),
+            (True, ["unknown.path"], None),
+            (True, [target, target], None),
+            (True, [target, "unknown.path"], None),
+        ):
+            with self.subTest(installed=installed, overrides=overrides):
+                stub, doc = self.locked_stub(status="Open")
+                state = self.locked_state(doc)
+                stub.installed_apps = ["clinic_photos"] if installed else []
+                stub.hooks = {"override_whitelisted_methods": {hook_key: overrides}}
+                calls = []
+                def invoke(kind):
+                    def call(appointment_id):
+                        calls.append((kind, appointment_id))
+                        doc.status = "Checked In"
+                        doc.position_in_queue = 1
+                    return call
+                self.inject_checkin(invoke("stock"))
+                photo = types.ModuleType("clinic_photos.visit.checkin")
+                photo.check_in_appointment = invoke("photo")
+                with mock.patch.dict(sys.modules, {"clinic_photos.visit.checkin": photo}):
+                    if expected is None:
+                        with self.assertRaises(patient_write.WriteUncertain):
+                            self.gateway(stub).native_appointment_checkin(state, self.TODAY)
+                        self.assertEqual(calls, [])
+                    else:
+                        self.gateway(stub).native_appointment_checkin(state, self.TODAY)
+                        self.assertEqual(calls, [(expected, self.NATIVE)])
+
+    def test_photo_wrapper_failure_never_retries_stock(self):
+        stub, doc = self.locked_stub(status="Open")
+        stub.installed_apps = ["clinic_photos"]
+        key = f"{frappe_gateway.NATIVE_CHECKIN_MODULE}.check_in_appointment"
+        stub.hooks = {"override_whitelisted_methods": {
+            key: ["clinic_photos.visit.checkin.check_in_appointment"]
+        }}
+        stock = mock.Mock()
+        self.inject_checkin(stock)
+        photo = types.ModuleType("clinic_photos.visit.checkin")
+        photo.check_in_appointment = mock.Mock(side_effect=RuntimeError("uncertain"))
+        with mock.patch.dict(sys.modules, {"clinic_photos.visit.checkin": photo}):
+            with self.assertRaises(patient_write.WriteUncertain):
+                self.gateway(stub).native_appointment_checkin(self.locked_state(doc), self.TODAY)
+        photo.check_in_appointment.assert_called_once_with(self.NATIVE)
+        stock.assert_not_called()
+
+    def test_checkin_fails_closed_when_installed_app_evidence_unreadable(self):
+        stub, doc = self.locked_stub(status="Open")
+        stub.get_installed_apps = lambda: None
+        stock = mock.Mock()
+        self.inject_checkin(stock)
+        with self.assertRaises(patient_write.WriteUncertain):
+            self.gateway(stub).native_appointment_checkin(self.locked_state(doc), self.TODAY)
+        stock.assert_not_called()
+
     def inject_checkin(self, function):
         module = types.ModuleType(frappe_gateway.NATIVE_CHECKIN_MODULE)
         module.check_in_appointment = function
@@ -3322,6 +3392,9 @@ class CollectorStub(types.SimpleNamespace):
 
     def get_app_path(self, app, *parts):
         return str(self._app_path.joinpath(parts[-1]))
+
+    def get_installed_apps(self):
+        return []
 
     def get_hooks(self):
         return {

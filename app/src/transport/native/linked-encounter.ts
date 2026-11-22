@@ -8,6 +8,9 @@ import { classifyNativeForbidden, nativeCsrfToken } from "./session";
 const id = z.string().max(256).refine((value) =>
   value.trim() !== "" && value.trim() === value &&
     !Array.from(value).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127));
+const patientId = z.string().refine((value) => value.startsWith("cpr1_")
+  ? value.length <= 808 && /^cpr1_[A-Za-z0-9_-]+$/.test(value)
+  : id.safeParse(value).success);
 const version = z.string().refine((value) => value.trim() !== "");
 const note = z.object({ id, modified: version, text: z.string() });
 const reference = z.union([id, z.literal(""), z.null()]);
@@ -43,7 +46,7 @@ const medications = z.discriminatedUnion("state", [
   z.object({ state: z.literal("unavailable"), complete: z.literal(false), items: z.tuple([]) }),
 ]);
 const projection = z.object({
-  context: z.object({ appointment: id, patient: id, practitioner: id, status: z.string().min(1) }),
+  context: z.object({ appointment: id, patient: patientId, practitioner: id, status: z.string().min(1) }),
   encounter: z.object({
     id, modified: version, docstatus: z.union([z.literal(0), z.literal(1)]),
     symptoms: z.array(id), diagnoses: z.array(id),

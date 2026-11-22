@@ -1088,12 +1088,14 @@ class VisitPreparationOwnerTests(unittest.TestCase):
                 owner.continue_after_own_preparation(prepared)
                 with frappe_context.owned_publication_transaction(owner):
                     document = exact_file(prepared)
+                    document.creation = "2026-11-22 12:00:01.123456"
                     bound = writer.write_first_object(prepared, document)
                     fake.db.add("Clinic Photo", "PHOTO", storage_key=prepared.key,
                                 original_file=document.name, original_sha256=prepared.expected_sha256,
-                                patient_reference="PAT")
+                                patient_reference="PAT", creation="2026-11-22 12:00:00.123456")
                     fake.db.docs["File"][document.name].update(
-                        attached_to_doctype="Clinic Photo", attached_to_name="PHOTO")
+                        attached_to_doctype="Clinic Photo", attached_to_name="PHOTO",
+                        creation=document.creation)
                     linkage = writer.domain_linkage(prepared, "Clinic Photo", "PHOTO", document.name)
                     writer.consume_persisted_object(prepared, bound, domain_linkage=linkage)
                     class FakeSlot:
@@ -1111,9 +1113,12 @@ class VisitPreparationOwnerTests(unittest.TestCase):
 
                     self_test = self
                     original_get_doc = fake.get_doc
-                    def get_doc(values):
-                        if values.get("doctype") == "Clinic Visit Photo Slot":
+                    def get_doc(values, *args, **kwargs):
+                        if isinstance(values, dict) and values.get("doctype") == "Clinic Visit Photo Slot":
                             return FakeSlot(values)
+                        if isinstance(values, str):
+                            self.assertEqual(kwargs, {"for_update": True})
+                            return types.SimpleNamespace(**fake.db.docs[values][args[0]])
                         return original_get_doc(values)
                     with patch.object(capture, "frappe", fake), \
                          patch.object(capture, "check_slot_availability"), \
@@ -1125,6 +1130,10 @@ class VisitPreparationOwnerTests(unittest.TestCase):
                     self.assertTrue(writer._intent_for_key(prepared.key)["visit_lifetime"]["commit_acknowledged"])
                     self.assertEqual(fake.db.committed[journal.OPERATION_DOCTYPE][prepared.id]["state"],
                                      "PUBLISHED")
+                    slot = fake.db.committed["Clinic Visit Photo Slot"][capture.slot_key("APT", "Before")]
+                    self.assertEqual((slot["photo"], slot["file_name"], slot["photo_creation"], slot["file_creation"]),
+                                     ("PHOTO", document.name, "2026-11-22 12:00:00.123456",
+                                      "2026-11-22 12:00:01.123456"))
 
     def test_commit_rechecks_slot_after_handshake(self):
         binding = contracts.VisitBinding(

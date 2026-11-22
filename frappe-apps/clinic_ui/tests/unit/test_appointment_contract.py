@@ -567,6 +567,29 @@ class BoundarySnapshotTests(unittest.TestCase):
                 mutate(snapshot)
                 self.assertIsNotNone(contract.boundary_problem(snapshot))
 
+    def test_checkin_profiles_accept_only_exact_installed_photo_override(self):
+        target = "clinic_photos.visit.checkin.check_in_appointment"
+        for installed, overrides, allowed in (
+            (False, (), True),
+            (True, (target,), True),
+            (True, (), False),
+            (False, (target,), False),
+            (True, ("other.target",), False),
+            (True, (target, target), False),
+            (True, (target, "other.target"), False),
+            (False, None, False),
+            (True, target, False),
+            (None, (), False),
+        ):
+            with self.subTest(installed=installed, overrides=overrides):
+                snapshot = self.snapshot()
+                snapshot["clinic_photos_installed"] = installed
+                snapshot["checkin_whitelisted_override"] = overrides
+                self.assertEqual(contract.boundary_problem(snapshot) is None, allowed)
+                if allowed:
+                    snapshot["enabled_server_scripts"] = 1
+                    self.assertIsNotNone(contract.boundary_problem(snapshot))
+
     def test_hook_override_server_script_and_metadata_drift_is_rejected(self):
         mutators = {
             "patient doc event": lambda s: s.update(

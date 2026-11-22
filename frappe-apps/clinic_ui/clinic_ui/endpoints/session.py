@@ -116,6 +116,22 @@ def _appointment_write_flags(gateway, settings, role):
         return disabled
 
 
+def _production_booking_enabled(gateway, role):
+    """Advertise only stock booking after production enrollment and native probes."""
+    if role != "REC":
+        return False
+    try:
+        return (
+            gateway.setting("clinic_ui_production_booking_enabled") is True
+            and gateway.native_appointment_boundary_problem() is None
+            and gateway.healthcare_appointment_side_effects_unsafe() is False
+            and gateway.native_appointment_can_create() is True
+            and gateway.native_doctype_can_read("Patient Appointment") is True
+        )
+    except Exception:
+        return False
+
+
 def _encounter_write_flags(gateway, settings, role):
     """Return ``(draft, complete, amend)`` after the encounter write gate.
 
@@ -406,6 +422,8 @@ def _admin_write_flags(gateway, settings, role):
 
 
 def bootstrap(gateway):
+    from clinic_ui.endpoints import production_read
+
     common.begin(gateway)
 
     view = common.live_view(gateway)
@@ -413,6 +431,27 @@ def bootstrap(gateway):
         return gateway.respond_anonymous()
 
     common.require_authorized_session(gateway, view)
+    production = production_read.authorize_if_selected(
+        gateway, SUPPORTED_ROLE_CODES, begun=True
+    )
+    if production is not None:
+        settings, view, role = production
+        csrf_token = gateway.csrf_token()
+        if not dto.is_valid_text(csrf_token, dto.MAX_CSRF_TOKEN_LENGTH):
+            gateway.deny()
+        try:
+            return dto.build_bootstrap(
+                session_epoch=session_epoch(settings.epoch_secret, gateway.site, view.sid),
+                user_id=view.user,
+                display_name=view.full_name,
+                role=role,
+                csrf_token=csrf_token,
+                capabilities=bootstrap_capabilities(
+                    write_appointment_book=_production_booking_enabled(gateway, role),
+                ),
+            )
+        except ValueError:
+            gateway.deny()
     settings = common.settings_or_deny(gateway)
     role = common.role_or_deny(gateway, view, settings, SUPPORTED_ROLE_CODES)
 

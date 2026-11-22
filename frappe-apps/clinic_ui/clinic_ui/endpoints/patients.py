@@ -69,6 +69,31 @@ def _is_editable(gateway, settings, actor, role, alias, resolved):
 
 
 def view(gateway, workspace_patient_id):
+    from clinic_ui.endpoints import production_read
+    from clinic_ui.core import production_patient_ref
+    from clinic_ui.runtime.production_read_gateway import exact_readable, patient_creation
+
+    production = production_read.authorize_if_selected(gateway, PATIENT_VIEW_ROLE_CODES)
+    if production is not None:
+        decoded = production_patient_ref.decode(
+            production_read.patient_ref_key(gateway), gateway.site, workspace_patient_id
+        )
+        if decoded is None:
+            gateway.deny()
+        patient_id, expected_creation = decoded
+        if not exact_readable(gateway, "Patient", patient_id):
+            gateway.deny()
+        if gateway.native_patient_can_read(patient_id) is not True:
+            gateway.deny()
+        if patient_creation(gateway, patient_id) != expected_creation:
+            gateway.deny()
+        detail = gateway.native_patient_view(patient_id)
+        if detail is None:
+            gateway.deny()
+        try:
+            return dto.patient_detail(workspace_patient_id, detail, editable=False)
+        except ValueError:
+            gateway.deny()
     settings, session, role = common.authorize(gateway, PATIENT_VIEW_ROLE_CODES)
 
     alias = normalize_identifier(workspace_patient_id)

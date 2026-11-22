@@ -46,6 +46,26 @@ def test_disabled_and_strict_config_fail_before_private_access(env):
             env.api.read_pair({"appointment": "A"})
 
 
+def test_own_before_response_and_safe_denial(env):
+    from clinic_photos.access import entrypoints
+    from clinic_photos.visit import reception_read
+
+    env.frappe.conf.update(clinic_visit_photos_enabled=True, clinic_visit_photos_site="site.test")
+    with patch.object(entrypoints, "mark_protected_request") as protected, \
+         patch.object(reception_read, "read_own_before", return_value=(b"image", "image/png")) as read:
+        response = env.api.read_own_before({"appointment": "A"})
+        assert response.data == b"image" and response.content_type == "image/png"
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        read.assert_called_once_with("A")
+        protected.assert_called_once()
+        read.side_effect = RuntimeError("secret")
+        with pytest.raises(PermissionError, match="^Visit photo request unavailable$"):
+            env.api.read_own_before({"appointment": "A"})
+        with pytest.raises(ValueError):
+            env.api.read_own_before({"appointment": "A", "key": "x"})
+
+
 def test_read_pair_filters_sensitive_private_projection(env):
     env.frappe.conf["clinic_visit_photos_enabled"] = True
     env.frappe.conf["clinic_visit_photos_site"] = "site.test"

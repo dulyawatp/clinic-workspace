@@ -18,7 +18,7 @@ def require_visit_actor(*, doctor=False, for_update=True):
         (user,),
     )
     roles = {row[0] for row in rows}
-    allowed = {"Physician"} if doctor else {"Physician", "Healthcare Administrator"}
+    allowed = {"Physician"} if doctor else {"Physician", "Healthcare Administrator", "Receptionist"}
     if not roles.intersection(allowed):
         frappe.throw("Not permitted", frappe.PermissionError)
     return user

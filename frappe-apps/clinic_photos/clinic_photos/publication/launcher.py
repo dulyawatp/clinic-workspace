@@ -213,10 +213,18 @@ def _execute_child(
     surviving-child possibility is why a timeout remains unknown rather than a
     rollback claim.
     """
+    if env is None:
+        env = child_environment()
+        marker = "CLINIC_UI_PRODUCTION_MARKER_PATH"
+        if (argv[:4] == [PYTHON_EXECUTABLE, "-m", PROCESS_MODULE, "--visit"] or
+            argv[:3] == [PYTHON_EXECUTABLE, "-m",
+                         "clinic_photos.publication.visit_annotation_process"]):
+            if marker in os.environ:
+                env[marker] = os.environ[marker]
     process = subprocess.Popen(
         argv,
         cwd=cwd,
-        env=child_environment() if env is None else env,
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

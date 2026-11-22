@@ -123,14 +123,15 @@ def _created_items(gateway, settings, static_aliases, static_natives):
     return items, accepted_aliases, accepted_natives
 
 
-def _native_items(gateway, seen_aliases, seen_natives, available):
+def _native_items(gateway, seen_aliases, seen_natives, available, names=None):
     """Bounded, permission-aware native discovery for the converted lane."""
 
     limit = min(MAX_NATIVE_PATIENTS, available)
     if limit <= 0:
         return []
 
-    names = gateway.list_readable_patients(limit)
+    if names is None:
+        names = gateway.list_readable_patients(limit)
     if not isinstance(names, (list, tuple)):
         return []
 
@@ -153,6 +154,44 @@ def _native_items(gateway, seen_aliases, seen_natives, available):
 
 
 def synthetic_patients(gateway):
+    from clinic_ui.endpoints import production_read
+
+    production = production_read.authorize_if_selected(gateway, DIRECTORY_ROLE_CODES)
+    if production is not None:
+        from clinic_ui.core import production_patient_ref
+        from clinic_ui.runtime.production_read_gateway import exact_readable, patient_creation
+
+        try:
+            names = gateway.list_readable_patients(
+                min(MAX_NATIVE_PATIENTS, dto.MAX_DIRECTORY_ITEMS)
+            )
+        except Exception:
+            gateway.deny()
+        if not isinstance(names, (list, tuple)) or len(names) > MAX_NATIVE_PATIENTS:
+            gateway.deny()
+        items = []
+        seen = set()
+        for name in names:
+            if not isinstance(name, str) or name in seen:
+                continue
+            seen.add(name)
+            if not exact_readable(gateway, "Patient", name) or gateway.native_patient_can_read(name) is not True:
+                continue
+            display = gateway.native_patient_display_name(name)
+            creation = patient_creation(gateway, name)
+            if display is None or creation is None:
+                continue
+            try:
+                ref = production_patient_ref.encode(
+                    production_read.patient_ref_key(gateway), gateway.site, name, creation
+                )
+                items.append(dto.patient_item(ref, display))
+            except ValueError:
+                continue
+        try:
+            return dto.build_directory(items)
+        except ValueError:
+            gateway.deny()
     settings, _session, _role = common.authorize(gateway, DIRECTORY_ROLE_CODES)
 
     items, seen_aliases, seen_natives = _static_items(gateway, settings)

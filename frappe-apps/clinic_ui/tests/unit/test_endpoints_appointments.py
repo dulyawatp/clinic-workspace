@@ -478,6 +478,8 @@ class AppointmentDetailTests(unittest.TestCase):
         )
         self.assertNotIn("NATIVE-APPT-1", repr(payload))
         self.assertNotIn("PAT-1", repr(payload))
+        fake._settings["clinic_ui_production_checkin_enabled"] = True
+        self.assertEqual(appointments_endpoint.appointment_detail(fake, "APPT-1"), payload)
 
     def test_booked_detail_exposes_actions_only_to_its_creator(self):
         fake = gateway(

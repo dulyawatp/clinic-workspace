@@ -16,6 +16,9 @@ class Gateway:
         self.calls = []
         self.fixture = set()
 
+    def setting(self, key):
+        return None
+
     def linked_resolve(self, ref):
         if ref in self.fixture:
             raise ValueError("fixture")

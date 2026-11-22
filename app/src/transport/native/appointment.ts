@@ -50,6 +50,20 @@ function isSafeId(value: unknown): value is string {
   );
 }
 
+function isPatientReference(value: unknown): value is string {
+  if (isSafeId(value)) return true;
+  if (typeof value === "string" && value.startsWith("cpr1_")) {
+    return value.length <= 808 && /^cpr1_[A-Za-z0-9_-]+$/.test(value);
+  }
+  return false;
+}
+
+function isSafePatientDisplayName(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 &&
+    value.trim() === value && value !== "XXXXXXXX" &&
+    [...value].length <= 140 && !/[<>\p{Cc}\p{Cf}\p{Cs}]/u.test(value);
+}
+
 function isCalendarDate(value: unknown): value is string {
   if (typeof value !== "string") return false;
   const match = ISO_DATE.exec(value);
@@ -84,7 +98,7 @@ function hasExactKeys(
 
 function readItemFields(value: Record<string, unknown>): NativeAppointmentItem {
   if (
-    !isSafeId(value.workspace_patient_id) ||
+    !isPatientReference(value.workspace_patient_id) ||
     !isSafeId(value.appointment_id) ||
     !isCalendarDate(value.appointment_date) ||
     typeof value.appointment_time !== "string" ||
@@ -131,6 +145,8 @@ export interface NativeAppointmentRead extends NativeAppointmentDetail {
   can_checkin: boolean;
   is_fixture?: boolean;
   native_appointment_id?: string;
+  native_checkin_enabled?: boolean;
+  patient_display_name?: string;
 }
 
 /**
@@ -174,10 +190,14 @@ export function parseNativeAppointmentRead(
   if (!isRecord(value)) throw unavailable();
   const hasFixture = Object.hasOwn(value, "is_fixture");
   const hasNativeId = Object.hasOwn(value, "native_appointment_id");
+  const hasNativeCheckin = Object.hasOwn(value, "native_checkin_enabled");
+  const hasPatientName = Object.hasOwn(value, "patient_display_name");
   if (!hasExactKeys(value, [
     ...READ_KEYS,
     ...(hasFixture ? ["is_fixture"] : []),
     ...(hasNativeId ? ["native_appointment_id"] : []),
+    ...(hasNativeCheckin ? ["native_checkin_enabled"] : []),
+    ...(hasPatientName ? ["patient_display_name"] : []),
   ]))
     throw unavailable();
   const detail = readDetailFields(value, expectedId);
@@ -185,6 +205,7 @@ export function parseNativeAppointmentRead(
     typeof value.can_reschedule !== "boolean" ||
     typeof value.can_checkin !== "boolean" ||
     (hasFixture && typeof value.is_fixture !== "boolean") ||
+    (hasNativeCheckin && typeof value.native_checkin_enabled !== "boolean") ||
     (hasNativeId && (value.is_fixture !== false || !isSafeId(value.native_appointment_id)))
   )
     throw unavailable();
@@ -193,8 +214,17 @@ export function parseNativeAppointmentRead(
     can_reschedule: value.can_reschedule,
     can_checkin: value.can_checkin,
     ...(typeof value.is_fixture === "boolean" ? { is_fixture: value.is_fixture } : {}),
+    ...(typeof value.native_checkin_enabled === "boolean"
+      ? { native_checkin_enabled: value.native_checkin_enabled }
+      : {}),
     ...(typeof value.native_appointment_id === "string"
       ? { native_appointment_id: value.native_appointment_id }
+      : {}),
+    // Bad optional identity text must not break the existing detail or actions.
+    ...(hasPatientName && value.is_fixture === false &&
+      isSafePatientDisplayName(value.patient_display_name) &&
+      value.patient_display_name !== detail.workspace_patient_id
+      ? { patient_display_name: value.patient_display_name }
       : {}),
   };
 }

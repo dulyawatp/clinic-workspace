@@ -6,6 +6,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from clinic_photos.visit.actor import require_visit_actor
+
 
 @pytest.fixture
 def env():
@@ -35,13 +37,14 @@ def env():
     with patch.dict(sys.modules, {"frappe": frappe}):
         sys.modules.pop("clinic_photos.api.visit_options", None)
         api = importlib.import_module("clinic_photos.api.visit_options")
-        from clinic_photos.visit import pair
+        pair = importlib.import_module("clinic_photos.visit.pair")
         def structure(appointment, patient, slot):
             item = projection[slot.lower()]
             return (types.SimpleNamespace(**item), types.SimpleNamespace(name=item["photo"]),
                     types.SimpleNamespace(name=item["file"])) if item else None
         with patch.object(api.photo_save, "require_post"), \
              patch.object(api.photo_save, "require_native_session"), \
+             patch.object(api.photo_save, "_frappe", return_value=frappe), \
              patch.object(api.capture, "frappe", frappe), \
              patch.object(pair, "_read_slot_structure", side_effect=structure), \
              patch.object(api, "_read_pair", return_value=projection), \
@@ -58,6 +61,28 @@ def test_options_before_with_active_grant(env):
         "has_active_consent": True, "can_grant": False, "can_revoke": True,
         "can_capture_before": True, "can_capture_after": False,
     }
+
+
+def test_receptionist_options_respect_file_create_and_doctor_boundary(env):
+    env.frappe.session.user = "reception@example.test"
+    env.frappe.throw = lambda message, exc: (_ for _ in ()).throw(exc(message))
+    env.frappe.db.get_value.side_effect = lambda doctype, *args, **kwargs: (
+        1 if doctype == "User" else "STATE"
+    )
+    env.frappe.db.sql = Mock(return_value=[("Receptionist",)])
+    env.api.actor.require_visit_actor.side_effect = require_visit_actor
+    with patch.dict(sys.modules, {"frappe": env.frappe}):
+        result = env.api.capture_options({"appointment": "APT"})
+        assert result["can_capture_before"] and result["can_revoke"]
+        env.frappe.has_permission.side_effect = lambda dt, perm, **kw: not (dt == "File" and perm == "create")
+        assert not env.api.capture_options({"appointment": "APT"})["can_capture_before"]
+        env.frappe.has_permission.side_effect = None
+        env.projection["before"] = {"photo": "PHOTO", "file": "FILE",
+                                    "body_area": "Arm", "viewpoint": "Front"}
+        assert not env.api.capture_options({"appointment": "APT", "encounter": "ENC"})["can_capture_after"]
+        env.visit.consent_granted = 0
+        env.visit.active_grant_audit = None
+        assert env.api.capture_options({"appointment": "APT"})["can_grant"]
 
 
 def test_options_v1_dispatch_cmd(env):
@@ -114,7 +139,7 @@ def test_after_capability_tracks_authoritative_guards(env, blocked):
 
 
 def test_options_refuses_invisible_pair_or_encounter(env):
-    from clinic_photos.visit import pair
+    pair = importlib.import_module("clinic_photos.visit.pair")
     with patch.object(pair, "_read_slot_structure", side_effect=PermissionError):
         with pytest.raises(PermissionError):
             env.api.capture_options({"appointment": "APT"})

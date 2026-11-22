@@ -484,6 +484,9 @@ class Gateway:
 
     def linked_context(self, ref):
         doc = self.frappe.get_doc("Patient Appointment", ref)
+        return self._linked_context_from_doc(doc)
+
+    def _linked_context_from_doc(self, doc):
         doc.check_permission("read")
         self._linked_fields("Patient Appointment", (
             "patient", "practitioner", "status", "procedure_template",
@@ -503,12 +506,15 @@ class Gateway:
 
     def _linked_doc(self, context, encounter_id):
         doc = self.frappe.get_doc("Patient Encounter", encounter_id)
+        self._linked_validate_doc(context, doc)
+        return doc
+
+    def _linked_validate_doc(self, context, doc):
         doc.check_permission("read")
         self._linked_fields("Patient Encounter", ("appointment", "patient", "practitioner"))
         if (doc.appointment != context["appointment"] or doc.patient != context["patient"]
                 or doc.practitioner != context["practitioner"]):
             raise LinkedEncounterError("encounter identity mismatch")
-        return doc
 
     def _linked_map(self, context):
         from healthcare.healthcare.doctype.patient_appointment.patient_appointment import make_encounter
@@ -669,7 +675,14 @@ class Gateway:
             return {"context": public_context, "encounter": None,
                     "medications": {"state": "available", "items": [], "complete": True},
                     "notes": {"state": "available", "items": [], "next_offset": None}}
-        doc = self._linked_doc(context, encounter["id"])
+        doc = self.frappe.get_doc("Patient Encounter", encounter["id"])
+        return self._linked_project_doc(context, encounter, doc, note_offset)
+
+    def _linked_project_doc(self, context, encounter, doc, note_offset=0):
+        self._linked_validate_doc(context, doc)
+        if doc.name != encounter["id"]:
+            raise LinkedEncounterError("encounter identity mismatch")
+        public_context = {key: value for key, value in context.items() if not key.startswith("_")}
         meta = self.frappe.get_meta("Patient Encounter")
         symptoms = self._encounter_read_children(doc, meta, "symptoms", "Patient Encounter Symptom", "complaint")
         diagnoses = self._encounter_read_children(doc, meta, "diagnosis", "Patient Encounter Diagnosis", "diagnosis")
@@ -681,6 +694,12 @@ class Gateway:
             "medications": self._linked_medications(doc),
             "notes": self._linked_notes(context, doc.name, note_offset),
         }
+
+    def _persist_linked_draft(self, doc, is_new):
+        if is_new:
+            doc.insert()
+        else:
+            doc.save()
 
     def linked_save(self, context, encounter, clinical):
         if encounter is None:
@@ -1299,7 +1318,24 @@ class Gateway:
             self._encounter_read_denied()
         return meta
 
-    def _encounter_summary(self, row):
+    def _production_encounter_patient_ref(self, patient):
+        from clinic_ui.core import production_patient_ref
+        from clinic_ui.endpoints import production_read
+        from clinic_ui.runtime.production_read_gateway import exact_readable, patient_creation
+
+        if not exact_readable(self, "Patient", patient) or self.native_patient_can_read(patient) is not True:
+            self._encounter_read_denied()
+        if self.native_patient_view(patient) is None:
+            self._encounter_read_denied()
+        creation = patient_creation(self, patient)
+        try:
+            return production_patient_ref.encode(
+                production_read.patient_ref_key(self), self.site, patient, creation
+            )
+        except ValueError:
+            self._encounter_read_denied()
+
+    def _encounter_summary(self, row, production=False):
         patient = self._row_value(row, "patient")
         if not patient or not self.native_patient_can_read(patient):
             self._encounter_read_denied()
@@ -1308,7 +1344,7 @@ class Gateway:
             self._encounter_read_denied()
         return {
             "id": self._row_value(row, "name"),
-            "patientId": patient,
+            "patientId": self._production_encounter_patient_ref(patient) if production else patient,
             "patientName": name,
             "practitioner": self._text_value(self._row_value(row, "practitioner")),
             "encounterDate": self._text_value(self._row_value(row, "encounter_date")),
@@ -1316,9 +1352,24 @@ class Gateway:
         }
 
     def list_patient_encounters(self, patient_ref, offset=0):
+        from clinic_ui.core import production_patient_ref
+        from clinic_ui.core.policy import PATIENT_VIEW_ROLE_CODES
+        from clinic_ui.endpoints import production_read
+
         self.mark_no_store()
         self.suppress_traceback()
-        patient = self._encounter_patient_ref(patient_ref)
+        production = production_read.authorize_if_selected(self, PATIENT_VIEW_ROLE_CODES) is not None
+        if production:
+            decoded = production_patient_ref.decode(
+                production_read.patient_ref_key(self), self.site, patient_ref
+            )
+            if decoded is None:
+                self._encounter_read_denied()
+            patient, _ = decoded
+            if self._production_encounter_patient_ref(patient) != patient_ref:
+                self._encounter_read_denied()
+        else:
+            patient = self._encounter_patient_ref(patient_ref)
         if isinstance(offset, bool) or not (
             isinstance(offset, int)
             or isinstance(offset, str)
@@ -1351,7 +1402,7 @@ class Gateway:
                     continue
             except (self.frappe.PermissionError, self.frappe.DoesNotExistError):
                 continue
-            items.append(self._encounter_summary(doc))
+            items.append(self._encounter_summary(doc, production))
         return {
             "items": items,
             "nextOffset": offset + 20 if len(rows) > 20 and offset + 20 <= 1000000 else None,
@@ -1393,10 +1444,13 @@ class Gateway:
             return None
 
     def view_patient_encounter(self, encounter_id):
+        from clinic_ui.core.policy import PATIENT_VIEW_ROLE_CODES
         from clinic_ui.core.text import is_valid_identifier, normalize_identifier
+        from clinic_ui.endpoints import production_read
 
         self.mark_no_store()
         self.suppress_traceback()
+        production = production_read.authorize_if_selected(self, PATIENT_VIEW_ROLE_CODES) is not None
         encounter_id = normalize_identifier(encounter_id)
         if not is_valid_identifier(encounter_id):
             self._encounter_read_denied()
@@ -1406,7 +1460,7 @@ class Gateway:
         ):
             self._encounter_read_denied()
         meta = self._encounter_read_meta()
-        result = self._encounter_summary(doc)
+        result = self._encounter_summary(doc, production)
         result["symptoms"] = self._encounter_read_children(
             doc, meta, "symptoms", "Patient Encounter Symptom", "complaint"
         )
@@ -1537,6 +1591,21 @@ class Gateway:
         except Exception:
             return "boundary unreadable"
 
+    def _checkin_profile_snapshot(self, hooks=None):
+        if hooks is None:
+            hooks = self.frappe.get_hooks() or {}
+        overrides = hooks.get("override_whitelisted_methods") or {}
+        key = f"{appointment_contract.CHECKIN_MODULE}.{appointment_contract.CHECKIN_NAME}"
+        installed = self.frappe.get_installed_apps()
+        if not isinstance(installed, (tuple, list)) or not all(
+            isinstance(app, str) for app in installed
+        ):
+            raise ValueError("installed apps unreadable")
+        return {
+            "clinic_photos_installed": "clinic_photos" in installed,
+            "checkin_whitelisted_override": overrides.get(key, ()),
+        }
+
     def _collect_appointment_boundary_snapshot(self):
         """Collect the executable and effective-metadata boundary from Frappe."""
 
@@ -1580,6 +1649,7 @@ class Gateway:
             value = meta.get(name)
             behavior[name] = "" if value is None else value
         return {
+            **self._checkin_profile_snapshot(hooks),
             "versions": {
                 "frappe": version("frappe", frappe),
                 "erpnext": version("erpnext"),
@@ -1712,13 +1782,6 @@ class Gateway:
             "wildcard_on_change": tuple(wildcard.get("on_change") or ()),
             "override_doctype_class": tuple(
                 overrides.get(appointment_contract.APPOINTMENT_DOCTYPE) or ()
-            ),
-            "checkin_whitelisted_override": tuple(
-                whitelisted.get(
-                    f"{appointment_contract.CHECKIN_MODULE}."
-                    f"{appointment_contract.CHECKIN_NAME}"
-                )
-                or ()
             ),
             "cancel_whitelisted_override": tuple(
                 whitelisted.get(
@@ -2282,8 +2345,16 @@ class Gateway:
         if state.appointment_date != today:
             raise appointment_write.AppointmentTargetNotEligible()
 
-        check_in = self._native_check_in_function()
         try:
+            profile = appointment_contract.checkin_profile(self._checkin_profile_snapshot())
+            if profile == "stock":
+                check_in = self._native_check_in_function()
+            elif profile == "photo":
+                from clinic_photos.visit.checkin import check_in_appointment
+
+                check_in = check_in_appointment
+            else:
+                raise patient_write.WriteUncertain()
             check_in(state.doc.name)
         except Exception:
             raise patient_write.WriteUncertain() from None

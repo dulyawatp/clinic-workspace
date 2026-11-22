@@ -6,7 +6,7 @@
  "autoname": "field:slot_key",
  "naming_rule": "By fieldname",
  "allow_rename": 0,
- "field_order": ["slot_key", "appointment", "patient", "slot", "appointment_creation", "patient_creation", "body_area", "viewpoint", "operation", "photo"],
+ "field_order": ["slot_key", "appointment", "patient", "slot", "appointment_creation", "patient_creation", "body_area", "viewpoint", "operation", "photo", "photo_creation", "file_name", "file_creation"],
  "fields": [
   {"fieldname": "slot_key", "fieldtype": "Data", "label": "Slot Key", "length": 64, "reqd": 1, "unique": 1, "read_only": 1},
   {"fieldname": "appointment", "fieldtype": "Data", "label": "Appointment", "reqd": 1, "read_only": 1},
@@ -17,7 +17,10 @@
   {"fieldname": "body_area", "fieldtype": "Data", "label": "Body Area", "reqd": 1, "read_only": 1},
   {"fieldname": "viewpoint", "fieldtype": "Data", "label": "Viewpoint", "reqd": 1, "read_only": 1},
   {"fieldname": "operation", "fieldtype": "Data", "label": "Publication Operation", "reqd": 1, "unique": 1, "read_only": 1},
-  {"fieldname": "photo", "fieldtype": "Link", "options": "Clinic Photo", "label": "Photo", "reqd": 1, "unique": 1, "read_only": 1}
+  {"fieldname": "photo", "fieldtype": "Link", "options": "Clinic Photo", "label": "Photo", "reqd": 1, "unique": 1, "read_only": 1},
+  {"fieldname": "photo_creation", "fieldtype": "Data", "label": "Photo Creation", "read_only": 1},
+  {"fieldname": "file_name", "fieldtype": "Data", "label": "File Name", "read_only": 1},
+  {"fieldname": "file_creation", "fieldtype": "Data", "label": "File Creation", "read_only": 1}
  ],
  "permissions": []
 }

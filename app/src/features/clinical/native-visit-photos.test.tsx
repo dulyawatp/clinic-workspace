@@ -60,10 +60,11 @@ afterEach(() => {
   localStorage.removeItem(LOCALE_KEY);
 });
 
-it("keeps mobile History geometry and requests exact appointment/slot only on disclosure and View", async () => {
+it("loads only opened History originals, compares both without refetch, and revokes on close", async () => {
   setViewport(390);
   const restore = installDialogMethods();
-  const create = vi.fn(() => "blob:synthetic-visit-photo");
+  let id = 0;
+  const create = vi.fn(() => `blob:synthetic-visit-photo-${++id}`);
   const revoke = vi.fn();
   vi.stubGlobal("URL", class extends URL {
     static override createObjectURL = create;
@@ -72,6 +73,7 @@ it("keeps mobile History geometry and requests exact appointment/slot only on di
   const lookups = vi.fn();
   const pairs = vi.fn();
   const images = vi.fn();
+  const annotations = vi.fn();
   server.use(
     http.post(`${rpc}frappe.client.get`, async ({ request }) => {
       const input = await body(request) as { name: string };
@@ -90,6 +92,10 @@ it("keeps mobile History geometry and requests exact appointment/slot only on di
         headers: { "Content-Type": "image/png" },
       });
     }),
+    http.post(`${rpc}clinic_photos.api.visit_annotations.*`, () => {
+      annotations();
+      return HttpResponse.error();
+    }),
   );
   try {
     setup();
@@ -103,25 +109,84 @@ it("keeps mobile History geometry and requests exact appointment/slot only on di
     await openPanel(earlier);
     expect(await earlier.findByRole("button", { name: "View Before photo" })).toBeVisible();
     expect(earlier.queryByRole("button", { name: "View After photo" })).toBeNull();
+    expect(earlier.getByText("Pair incomplete")).toBeVisible();
+    expect(earlier.getByText("Not recorded")).toBeVisible();
+    expect(earlier.queryByRole("button", { name: "Compare pair" })).toBeNull();
     expect(later.queryByRole("button", { name: "View Before photo" })).toBeNull();
-    await openPanel(later);
-    const view = await later.findByRole("button", { name: "View After photo" });
+    expect(images).toHaveBeenCalledExactlyOnceWith({ payload: { appointment: "APT-one", slot: "Before" } });
+    const disclosure = await openPanel(later);
+    const compare = await later.findByRole("button", { name: "Compare pair" });
+    const before = later.getByRole("img", { name: "Before photo" });
+    const after = later.getByRole("img", { name: "After photo" });
+    expect(before.closest(".visit-photo-shots")).toBe(after.closest(".visit-photo-shots"));
+    expect(before.getAttribute("src")).toMatch(/^blob:/);
+    expect(after.getAttribute("src")).toMatch(/^blob:/);
+    expect(before.getAttribute("src")).not.toEqual(after.getAttribute("src"));
     expect(lookups.mock.calls).toEqual([
       [{ doctype: "Patient Encounter", name: first.id }],
       [{ doctype: "Patient Encounter", name: second.id }],
     ]);
     expect(pairs.mock.calls).toEqual([[{ payload: { appointment: "APT-one" } }], [{ payload: { appointment: "APT-two" } }]]);
-    expect(images).not.toHaveBeenCalled();
     expect(screen.queryByText("INTERNAL-PHOTO")).toBeNull();
     expect(later.queryByRole("button", { name: /annotate|capture|upload|consent|save/i })).toBeNull();
-    await userEvent.setup().click(view);
-    const dialog = screen.getByRole("dialog", { name: "After photo" });
+    await userEvent.setup().click(compare);
+    const dialog = screen.getByRole("dialog", { name: "Compare before & after" });
     expect(within(dialog).getByRole("button", { name: "Close" })).toHaveFocus();
-    expect(await within(dialog).findByRole("img", { name: "After photo" })).toHaveAttribute("src", "blob:synthetic-visit-photo");
-    expect(images.mock.calls).toEqual([[{ payload: { appointment: "APT-two", slot: "After" } }]]);
+    expect(within(dialog).getByRole("img", { name: "Before photo" })).toHaveAttribute("src", before.getAttribute("src"));
+    expect(within(dialog).getByRole("img", { name: "After photo" })).toHaveAttribute("src", after.getAttribute("src"));
+    expect(images).toHaveBeenCalledTimes(3);
+    expect(images).toHaveBeenCalledWith({ payload: { appointment: "APT-two", slot: "Before" } });
+    expect(images).toHaveBeenCalledWith({ payload: { appointment: "APT-two", slot: "After" } });
+    expect(annotations).not.toHaveBeenCalled();
     fireEvent(dialog, new Event("cancel", { cancelable: true }));
+    expect(compare).toHaveFocus();
+    expect(revoke).not.toHaveBeenCalled();
+    await userEvent.setup().click(disclosure);
+    await waitFor(() => expect(revoke).toHaveBeenCalledTimes(2));
+    expect(revoke).toHaveBeenCalledWith(before.getAttribute("src"));
+    expect(revoke).toHaveBeenCalledWith(after.getAttribute("src"));
+} finally {
+    restore();
+  }
+});
+
+it("shows two saved Encounter originals and zooms one without another request", async () => {
+  const restore = installDialogMethods();
+  const originals = vi.fn();
+  let id = 0;
+  vi.stubGlobal("URL", class extends URL {
+    static override createObjectURL = () => `blob:synthetic-encounter-photo-${++id}`;
+    static override revokeObjectURL = vi.fn();
+  });
+  server.use(
+    http.post(`${rpc}frappe.client.get`, () => record(first.id, "APT-one")),
+    http.post(`${method}read_pair`, () => reply(pair("APT-one", metadata, metadata))),
+    http.post(`${method}read_image`, async ({ request }) => {
+      originals(await body(request));
+      return new HttpResponse(Uint8Array.from([255, 216, 255, 0]), { headers: { "Content-Type": "image/jpeg" } });
+    }),
+  );
+  try {
+    setup(ROUTES.visit(first.id));
+    const section = within(await screen.findByRole("region", { name: "Same-visit photos" }));
+    expect(originals).not.toHaveBeenCalled();
+    await openPanel(section);
+    const view = await section.findByRole("button", { name: "View After photo" });
+    expect(await section.findByRole("button", { name: "Compare pair" })).toBeVisible();
+    expect(section.getByRole("img", { name: "Before photo" })).toBeVisible();
+    const after = section.getByRole("img", { name: "After photo" });
+    await userEvent.setup().click(view);
+    const zoom = section.getByRole("dialog", { name: "After photo" });
+    expect(within(zoom).getByRole("img", { name: "After photo" })).toHaveAttribute("src", after.getAttribute("src"));
+    expect(originals).toHaveBeenCalledTimes(2);
+    expect(originals).toHaveBeenCalledWith({ payload: { appointment: "APT-one", slot: "Before" } });
+    expect(originals).toHaveBeenCalledWith({ payload: { appointment: "APT-one", slot: "After" } });
+    fireEvent(zoom, new Event("cancel", { cancelable: true }));
     expect(view).toHaveFocus();
-    expect(revoke).toHaveBeenCalledExactlyOnceWith("blob:synthetic-visit-photo");
+    fireEvent.error(after);
+    expect(section.getByText("This photo can’t be opened.")).toBeVisible();
+    expect(section.queryByRole("button", { name: "Compare pair" })).toBeNull();
+    expect(section.getByRole("img", { name: "Before photo" })).toBeVisible();
   } finally {
     restore();
   }
@@ -224,7 +289,10 @@ it.each([
         await userEvent.setup().click(open);
         const dialog = section.getByRole("dialog", { name: "Annotate Before photo" });
         expect(await within(dialog).findByText("Could not open this drawing.")).toBeVisible();
-        expect(originalRead).toHaveBeenCalledExactlyOnceWith({ payload: { appointment: "APT-linked", slot: "Before" } });
+        expect(originalRead.mock.calls).toEqual([
+          [{ payload: { appointment: "APT-linked", slot: "Before" } }],
+          [{ payload: { appointment: "APT-linked", slot: "Before" } }],
+        ]);
         if (native) {
           expect(nativeDrawingRead).toHaveBeenCalledExactlyOnceWith({ payload: { appointment: "APT-linked", slot: "Before" } });
         } else {
@@ -242,7 +310,6 @@ it.each([
 });
 
 it("aborts a pending original on close and never publishes the late response", async () => {
-  const restore = installDialogMethods();
   const create = vi.fn(() => "blob:late-visit-photo");
   const revoke = vi.fn();
   vi.stubGlobal("URL", class extends URL {
@@ -261,25 +328,22 @@ it("aborts a pending original on close and never publishes the late response", a
   );
   try {
     setup(ROUTES.visit(first.id));
-    await openPanel();
-    const view = await screen.findByRole("button", { name: "View Before photo" });
-    await userEvent.setup().click(view);
+    const disclosure = await openPanel();
     await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
     expect(read.mock.calls[0]?.[0]).toMatchObject({
       credentials: "same-origin", mode: "same-origin", cache: "no-store", redirect: "error",
     });
     const signal = read.mock.calls[0]?.[0]?.signal;
     expect(signal?.aborted).toBe(false);
-    await userEvent.setup().click(screen.getByRole("button", { name: "Close" }));
-    expect(signal?.aborted).toBe(true);
+    await userEvent.setup().click(disclosure);
+    await waitFor(() => expect(signal?.aborted).toBe(true));
     await act(async () => release(new Response(Uint8Array.from([255, 216, 255, 0]), {
       headers: { "Content-Type": "image/jpeg" },
     })));
     expect(create).not.toHaveBeenCalled();
-    expect(view).toHaveFocus();
+    expect(screen.queryByRole("img", { name: "Before photo" })).toBeNull();
   } finally {
     spy.mockRestore();
-    restore();
   }
 });
 
@@ -288,7 +352,6 @@ it.each([
   ["SVG", () => new HttpResponse("<svg/>", { headers: { "Content-Type": "image/svg+xml" } })],
   ["spoofed PNG", () => new HttpResponse("<html>Sign in</html>", { headers: { "Content-Type": "image/png" } })],
 ] as const)("rejects %s originals without producing a blob URL", async (_, response) => {
-  const restore = installDialogMethods();
   const create = vi.fn(() => "blob:unexpected");
   vi.stubGlobal("URL", class extends URL { static override createObjectURL = create; });
   server.use(
@@ -296,16 +359,11 @@ it.each([
     http.post(`${method}read_pair`, () => reply(pair("APT-one", metadata, null))),
     http.post(`${method}read_image`, response),
   );
-  const page = setup(ROUTES.visit(first.id));
-  try {
-    await openPanel();
-    await userEvent.setup().click(await screen.findByRole("button", { name: "View Before photo" }));
-    const dialog = within(screen.getByRole("dialog", { name: "Before photo" }));
-    expect(await dialog.findByText("This photo can’t be opened.")).toBeVisible();
-    expect(dialog.queryByRole("img")).toBeNull();
-    expect(create).not.toHaveBeenCalled();
-  } finally {
-    page.unmount();
-    restore();
-  }
+  setup(ROUTES.visit(first.id));
+  const section = within(await screen.findByRole("region", { name: "Same-visit photos" }));
+  await openPanel(section);
+  expect(await section.findByText("This photo can’t be opened.")).toBeVisible();
+  expect(section.queryByRole("img")).toBeNull();
+  expect(section.queryByRole("button", { name: "Compare pair" })).toBeNull();
+  expect(create).not.toHaveBeenCalled();
 });

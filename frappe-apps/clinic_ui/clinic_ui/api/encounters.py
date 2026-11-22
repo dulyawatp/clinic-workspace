@@ -63,3 +63,10 @@ def list_for_patient(patient_ref=None, offset=0):
 @frappe.whitelist(methods=["GET"])
 def view(encounter_id=None):
     return Gateway().view_patient_encounter(encounter_id)
+
+
+@frappe.whitelist(methods=["POST"])
+def history_photo_appointment(encounter_id=None, patient_ref=None):
+    from clinic_ui.runtime.production_read_gateway import history_photo_appointment as project
+
+    return project(Gateway(), encounter_id, patient_ref)

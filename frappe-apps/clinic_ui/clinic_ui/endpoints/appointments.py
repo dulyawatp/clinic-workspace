@@ -28,7 +28,9 @@ the current user holds the native ``Patient Appointment`` write permission.
 
 from dataclasses import dataclass
 
-from clinic_ui.core import appointment_contract, appointment_write, dto, patient_write
+from clinic_ui.core import (
+    appointment_contract, appointment_write, dto, patient_alias, patient_write,
+)
 from clinic_ui.core.policy import APPOINTMENT_ROLE_CODES
 from clinic_ui.core.text import is_valid_text
 from clinic_ui.endpoints import aliases, common
@@ -506,7 +508,82 @@ def _item_for(settings, gateway, workspace_appointment_id, native_appointment_id
         gateway.deny()
 
 
+def _production_appointment(gateway, appointment_id, *, detail=False, reception=False):
+    from clinic_ui.core import production_patient_ref
+    from clinic_ui.endpoints import production_read
+    from clinic_ui.runtime.production_read_gateway import exact_readable, patient_creation
+
+    row = (
+        gateway.native_appointment_detail(appointment_id)
+        if detail
+        else gateway.native_appointment_view(appointment_id)
+    )
+    if not isinstance(row, dict):
+        return None
+    patient = row.get("patient")
+    if (
+        not is_valid_text(patient, 256)
+        or patient.startswith(patient_alias.PREFIX)
+        or not exact_readable(gateway, "Patient", patient)
+        or gateway.native_patient_can_read(patient) is not True
+    ):
+        return None
+    creation = patient_creation(gateway, patient)
+    if creation is None:
+        return None
+    try:
+        patient_ref = production_patient_ref.encode(
+            production_read.patient_ref_key(gateway), gateway.site, patient, creation
+        )
+        fields = dict(
+            workspace_patient_id=patient_ref,
+            appointment_id=appointment_id,
+            appointment_date=row["appointment_date"],
+            appointment_time=row["appointment_time"],
+            status=row["status"],
+        )
+        if not detail:
+            return dto.appointment_item(**fields)
+        result = dto.appointment_read(
+            dto.appointment_detail(**fields, modified=row["modified"])
+        )
+        result["is_fixture"] = False
+        result["native_appointment_id"] = appointment_id
+        result["native_checkin_enabled"] = False
+        if reception:
+            display_name = gateway.native_patient_display_name(patient)
+            if is_valid_text(display_name, 140) and display_name.strip() != patient:
+                result["patient_display_name"] = display_name.strip()
+        return result
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def synthetic_appointments(gateway):
+    from clinic_ui.endpoints import production_read
+
+    production = production_read.authorize_if_selected(gateway, APPOINTMENT_ROLE_CODES)
+    if production is not None:
+        names = gateway.list_readable_appointments(MAX_NATIVE_APPOINTMENTS)
+        if not isinstance(names, (list, tuple)) or len(names) > MAX_NATIVE_APPOINTMENTS:
+            gateway.deny()
+        items = []
+        seen = set()
+        for name in names:
+            if (
+                not is_valid_text(name, appointment_write.MAX_APPOINTMENT_ID_LENGTH)
+                or name.startswith(appointment_write.ALIAS_PREFIX)
+                or name in seen
+            ):
+                gateway.deny()
+            seen.add(name)
+            item = _production_appointment(gateway, name)
+            if item is not None:
+                items.append(item)
+        try:
+            return dto.build_appointments(items)
+        except ValueError:
+            gateway.deny()
     settings, _session, _role = common.authorize(gateway, APPOINTMENT_ROLE_CODES)
 
     items = []
@@ -591,6 +668,33 @@ def synthetic_appointments(gateway):
 
 def appointment_detail(gateway, workspace_appointment_id=None):
     """Return one versioned appointment with explicit action eligibility."""
+
+    from clinic_ui.endpoints import production_read
+    from clinic_ui.runtime.production_read_gateway import exact_readable
+
+    production = production_read.authorize_if_selected(gateway, APPOINTMENT_ROLE_CODES)
+    if production is not None:
+        appointment_id = workspace_appointment_id
+        if (
+            not is_valid_text(appointment_id, appointment_write.MAX_APPOINTMENT_ID_LENGTH)
+            or appointment_id.startswith(appointment_write.ALIAS_PREFIX)
+        ):
+            gateway.deny()
+        if not exact_readable(gateway, "Patient Appointment", appointment_id):
+            gateway.deny()
+        result = _production_appointment(
+            gateway, appointment_id, detail=True, reception=production[2] == "REC"
+        )
+        if result is None:
+            gateway.deny()
+        from clinic_ui.runtime.production_read_gateway import production_checkin_ready
+
+        result["native_checkin_enabled"] = (
+            production[2] == "REC"
+            and gateway.setting("clinic_ui_production_checkin_enabled") is True
+            and production_checkin_ready(gateway, appointment_id) is True
+        )
+        return result
 
     settings, view, role = common.authorize(gateway, APPOINTMENT_ROLE_CODES)
 

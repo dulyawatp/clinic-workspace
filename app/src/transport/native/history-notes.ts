@@ -44,6 +44,8 @@ async function read(path: "get" | "get_list", params: object, signal: AbortSigna
 export async function listHistoryNotes(
   encounterId: string, patientId: string, offset: number, signal: AbortSignal,
 ): Promise<HistoryNotePage> {
+  // Opaque production patients require a server-side note projection, not generic resource reads.
+  if (patientId.startsWith("cpr1_")) throw malformed;
   if (!name.safeParse(encounterId).success || !name.safeParse(patientId).success ||
       !Number.isSafeInteger(offset + pageSize) || offset < 0) throw malformed;
   const parsed = names.safeParse(await read("get_list", {

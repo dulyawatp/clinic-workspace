@@ -6,6 +6,26 @@ import pytest
 from clinic_photos.visit import actor
 
 
+@pytest.mark.parametrize("for_update", [True, False])
+def test_receptionist_can_act_for_before_but_not_doctor_actions(for_update):
+    frappe = types.SimpleNamespace(
+        session=types.SimpleNamespace(user="reception@example.test"), PermissionError=PermissionError,
+        throw=lambda message, exc: (_ for _ in ()).throw(exc(message)),
+        db=types.SimpleNamespace(get_value=Mock(return_value=1), sql=Mock(return_value=[("Receptionist",)])),
+    )
+    with patch.dict("sys.modules", {"frappe": frappe}):
+        assert actor.require_visit_actor(for_update=for_update) == "reception@example.test"
+        with pytest.raises(PermissionError):
+            actor.require_visit_actor(doctor=True, for_update=for_update)
+        frappe.db.get_value.return_value = 0
+        with pytest.raises(PermissionError):
+            actor.require_visit_actor(for_update=for_update)
+        frappe.db.get_value.return_value = 1
+        frappe.db.sql.return_value = []
+        with pytest.raises(PermissionError):
+            actor.require_visit_actor(for_update=for_update)
+
+
 def test_actor_read_has_same_role_policy_without_locks():
     frappe = types.SimpleNamespace(
         session=types.SimpleNamespace(user="doctor"), PermissionError=PermissionError,

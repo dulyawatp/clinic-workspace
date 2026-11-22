@@ -20,6 +20,7 @@ import { NativeAppointmentCheckIn } from "./NativeAppointmentCheckIn";
 import { ReturnVisitLink } from "./ReturnVisitLink";
 import { NativeLabReportPanel } from "../clinical/NativeLabReports";
 import { NativeVisitPhotos } from "../clinical/NativeVisitPhotos";
+import { ReceptionPhotoSteps } from "../clinical/VisitPhotoCapture";
 
 const TERMINAL_STATUSES = new Set(["Closed", "Cancelled", "No Show", "Checked Out"]);
 
@@ -193,60 +194,95 @@ export function LiveAppointmentPage({ id }: { id: string }) {
     setSaving(false);
   }
 
+  const receptionIntake = session?.user.roles.includes("REC") && appointment.is_fixture === false;
+  const nativeId = appointment.native_appointment_id;
+  const labReports = appointment.is_fixture === false && (
+    <section className={receptionIntake ? "visit-preview-card appointment-intake-lab" : "appointment-card"}
+      aria-labelledby="appointment-lab-reports">
+      <h2 id="appointment-lab-reports">{t("labReports.title")}</h2>
+      <NativeLabReportPanel context={{ kind: "appointment", id: appointment.appointment_id }}
+        uploadAppointmentRef={appointment.appointment_id} />
+    </section>
+  );
+
   return (
     <>
       <PageHeader
-        title={t("appointment.detail")}
+        title={t(receptionIntake ? "appointmentIntake.title" : "appointment.detail")}
         breadcrumb={
           <Link to={ROUTES.appointments}>{t("appointment.calendar")}</Link>
         }
       />
       <div className="shell-page-body">
+        {receptionIntake && (
+          <div className="visit-workspace visit-preview appointment-intake">
+            <header className="visit-identity visit-preview-identity">
+              <div className="visit-preview-head">
+                <div className="visit-identity-heading">
+                  <span className="visit-avatar" aria-hidden="true">✚</span>
+                  <div><p>{t("appointmentIntake.reception")}</p>
+                    <h2>{appointment.patient_display_name ?? t("appointmentIntake.patient")}</h2>
+                  </div>
+                </div>
+              </div>
+              <dl>
+                <div><dt>{t("appointmentIntake.patientReference")}</dt><dd>{appointment.workspace_patient_id}</dd></div>
+                <div><dt>{t("liveAppointments.reference")}</dt>
+                  <dd data-testid="appointment-reference">{appointment.appointment_id}</dd></div>
+                <div><dt>{t("appointment.date")} / {t("appointment.time")}</dt>
+                  <dd>{appointment.appointment_date} · {appointment.appointment_time}</dd></div>
+                <div><dt>{t("appointment.status")}</dt><dd>{appointment.status}</dd></div>
+              </dl>
+            </header>
+            <section className="visit-preview-card appointment-intake-card" aria-labelledby="reception-intake-heading">
+              <p className="appointment-intake-kicker">{t("appointmentIntake.beforeCapture")}</p>
+              <h2 id="reception-intake-heading">{t("appointmentIntake.confirm")}</h2>
+              <p className="pc-note">{t("appointmentIntake.intro")}</p>
+              {detail.isFetchedAfterMount && nativeId
+                ? <NativeVisitPhotos source={{ appointment: nativeId }}
+                    staffTarget={{ appointment: nativeId }} receptionIntake />
+                : <ReceptionPhotoSteps />}
+              <div className="appointment-intake-footer">
+                {appointment.native_checkin_enabled !== false && nativeId
+                  ? <NativeAppointmentCheckIn key={nativeId} nativeId={nativeId} />
+                  : <p className="appointment-write-note" role="status">{t("appointmentWrite.eligibilityUnavailable")}</p>}
+              </div>
+            </section>
+            {labReports}
+          </div>
+        )}
         <section className="appointment-card" aria-labelledby="live-detail-title">
           <h2 id="live-detail-title" className="appointment-live-patient">
-            {appointment.workspace_patient_id}
+            {receptionIntake ? t("appointment.detail") : appointment.workspace_patient_id}
           </h2>
-          <p
-            className="appointment-patient-id appointment-live-reference"
-            style={{ minWidth: 0 }}
-          >
-            {t("liveAppointments.reference")}:{" "}
-            <span
-              className="appointment-patient-id-value"
-              data-testid="appointment-reference"
-              style={{ minWidth: 0, overflowWrap: "anywhere" }}
+          {!receptionIntake && (
+            <p
+              className="appointment-patient-id appointment-live-reference"
+              style={{ minWidth: 0 }}
             >
-              {appointment.appointment_id}
-            </span>
-          </p>
+              {t("liveAppointments.reference")}:{" "}
+              <span
+                className="appointment-patient-id-value"
+                data-testid="appointment-reference"
+                style={{ minWidth: 0, overflowWrap: "anywhere" }}
+              >
+                {appointment.appointment_id}
+              </span>
+            </p>
+          )}
           <dl className="appointment-detail-list">
-            <div>
-              <dt>{t("appointment.date")}</dt>
-              <dd>{appointment.appointment_date}</dd>
-            </div>
-            <div>
-              <dt>{t("appointment.time")}</dt>
-              <dd>{appointment.appointment_time}</dd>
-            </div>
-            <div>
-              <dt>{t("appointment.status")}</dt>
-              <dd>{appointment.status}</dd>
-            </div>
-            <div>
-              <dt>{t("appointmentWrite.version")}</dt>
-              <dd>{appointment.modified}</dd>
-            </div>
+            {!receptionIntake && <>
+              <div><dt>{t("appointment.date")}</dt><dd>{appointment.appointment_date}</dd></div>
+              <div><dt>{t("appointment.time")}</dt><dd>{appointment.appointment_time}</dd></div>
+              <div><dt>{t("appointment.status")}</dt><dd>{appointment.status}</dd></div>
+            </>}
+            <div><dt>{t("appointmentWrite.version")}</dt><dd>{appointment.modified}</dd></div>
           </dl>
 
           <div className="appointment-actions">
-            {session?.user.roles.includes("REC") && appointment.is_fixture === false &&
-              appointment.native_appointment_id && (
-                <NativeAppointmentCheckIn
-                  key={appointment.native_appointment_id}
-                  nativeId={appointment.native_appointment_id}
-                />
-              )}
-            {appointment.is_fixture === false && <Link className="pc-button pc-button--primary" to={ROUTES.linkedVisit(appointment.appointment_id)}>
+            {appointment.is_fixture === false && <Link
+              className={`pc-button pc-button--${receptionIntake ? "secondary" : "primary"}`}
+              to={ROUTES.linkedVisit(appointment.appointment_id)}>
               {t("workspace.openEncounter")}
             </Link>}
             {!canReschedule ? (
@@ -416,20 +452,13 @@ export function LiveAppointmentPage({ id }: { id: string }) {
             </form>
           )}
         </section>
-        {detail.isFetchedAfterMount && appointment.is_fixture === false && appointment.native_appointment_id && (
+        {!receptionIntake && detail.isFetchedAfterMount && appointment.is_fixture === false && nativeId && (
           <section className="appointment-card" aria-labelledby="appointment-visit-photos">
             <h2 id="appointment-visit-photos">{t("workspace.photos")}</h2>
-            <NativeVisitPhotos source={{ appointment: appointment.native_appointment_id }}
-              staffTarget={{ appointment: appointment.native_appointment_id }} />
+            <NativeVisitPhotos source={{ appointment: nativeId }} staffTarget={{ appointment: nativeId }} />
           </section>
         )}
-        {appointment.is_fixture === false && (
-          <section className="appointment-card" aria-labelledby="appointment-lab-reports">
-            <h2 id="appointment-lab-reports">{t("labReports.title")}</h2>
-            <NativeLabReportPanel context={{ kind: "appointment", id: appointment.appointment_id }}
-              uploadAppointmentRef={appointment.appointment_id} />
-          </section>
-        )}
+        {!receptionIntake && labReports}
       </div>
     </>
   );

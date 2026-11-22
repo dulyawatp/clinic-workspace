@@ -847,6 +847,50 @@ class ProcessOutcomeTests(unittest.TestCase):
 
 
 class VisitLauncherTests(unittest.TestCase):
+    def test_visit_children_receive_only_present_marker_path(self):
+        from clinic_photos.publication import visit_annotation_exec
+
+        binding = contracts.VisitBinding(
+            appointment="APT", patient="PAT", slot="Before", encounter=None,
+            body_area="Arm", viewpoint="Front", appointment_creation="ac",
+            patient_creation="pc", encounter_creation=None, grant_audit="GRANT",
+        )
+        request = contracts.SaveRequest(kind=contracts.VISIT_ORIGINAL_CREATE,
+            request_key="visit-launch-key-01", visit_binding=binding,
+            image_bytes=base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGM4wcUFAAJ6AN1nJ0J9AAAAAElFTkSuQmCC"))
+        submitted = contracts.SubmittedOperation(id=OPERATION_ID, site=SITE, actor=ACTOR,
+            kind=request.kind, request_key=request.request_key, payload_digest="a" * 64, request=request)
+        conf = {"clinic_visit_photos_enabled": True, "clinic_visit_photos_site": SITE,
+                "clinic_visit_photo_annotations_enabled": True}
+        key = "CLINIC_UI_PRODUCTION_MARKER_PATH"
+        for marker in (None, "", "/trusted/production-marker"):
+            for launch in (launcher.launch_visit_submission, visit_annotation_exec._launch):
+                with self.subTest(marker=marker, launch=launch.__name__):
+                    environment = {"UNRELATED_SECRET": "must-not-inherit"}
+                    if marker is not None:
+                        environment[key] = marker
+                    with mock.patch.dict(os.environ, environment, clear=True), \
+                         fake_runtime(_target_docs(), conf=conf) as frappe, \
+                         mock.patch.object(launcher, "_visit_server_site", return_value=SITE), \
+                         mock.patch.object(journal, "load_submission", return_value=submitted), \
+                         mock.patch.object(launcher.subprocess, "Popen", side_effect=RuntimeError) as popen:
+                        frappe.local.site = SITE
+                        launch(OPERATION_ID)
+                    popen.assert_called_once()
+                    expected = dict(launcher._CHILD_ENVIRONMENT)
+                    if marker is not None:
+                        expected[key] = marker
+                    self.assertEqual(popen.call_args.kwargs["env"], expected)
+
+    def test_non_visit_child_does_not_receive_marker_path(self):
+        key = "CLINIC_UI_PRODUCTION_MARKER_PATH"
+        with mock.patch.dict(os.environ, {key: "/trusted/production-marker"}, clear=True), \
+             mock.patch.object(launcher.subprocess, "Popen", side_effect=RuntimeError) as popen:
+            with self.assertRaises(RuntimeError):
+                launcher._execute_child(launcher._child_argv(SITE, OPERATION_ID))
+        self.assertEqual(popen.call_args.kwargs["env"], launcher.child_environment())
+
     def test_visit_launcher_rejects_invalid_foreign_advanced_and_dirty(self):
         from dataclasses import replace
         binding = contracts.VisitBinding(

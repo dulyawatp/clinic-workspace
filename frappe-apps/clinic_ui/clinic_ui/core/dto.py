@@ -184,6 +184,14 @@ def build_bootstrap(
     }
 
 
+def _valid_patient_reference(value):
+    if is_valid_text(value):
+        return True
+    if isinstance(value, str) and value.startswith("cpr1_"):
+        return len(value) <= 808 and re.fullmatch(r"cpr1_[A-Za-z0-9_-]+", value) is not None
+    return False
+
+
 def patient_item(workspace_patient_id, display_name):
     """Build one directory item or raise ``ValueError``.
 
@@ -192,9 +200,8 @@ def patient_item(workspace_patient_id, display_name):
     receives the workspace alias and the display name.
     """
 
-    for value in (workspace_patient_id, display_name):
-        if not is_valid_text(value):
-            raise ValueError("invalid patient item")
+    if not _valid_patient_reference(workspace_patient_id) or not is_valid_text(display_name):
+        raise ValueError("invalid patient item")
 
     return {
         "workspace_patient_id": workspace_patient_id,
@@ -228,7 +235,7 @@ def patient_detail(workspace_patient_id, detail, *, editable=False):
     authority checks.
     """
 
-    if not is_valid_text(workspace_patient_id):
+    if not _valid_patient_reference(workspace_patient_id):
         raise ValueError("invalid workspace patient id")
     if not isinstance(detail, dict) or set(detail) != PATIENT_DETAIL_NATIVE_KEYS:
         raise ValueError("invalid patient detail")
@@ -316,7 +323,7 @@ def appointment_item(
     value is invented here.
     """
 
-    if not is_valid_text(workspace_patient_id):
+    if not _valid_patient_reference(workspace_patient_id):
         raise ValueError("invalid workspace patient id")
     if not is_valid_text(appointment_id):
         raise ValueError("invalid appointment id")

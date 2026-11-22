@@ -85,7 +85,7 @@ export function NativeVisitTimeline({ patientRef }: { patientRef: string }) {
                     </div>
                     <div className="visit-history-evidence visit-preview-stack">
                       <h4>{t("workspace.photos")}</h4>
-                      <NativeVisitPhotos source={{ encounterId: visit.id, patientId: visit.patientId }} />
+                      <NativeVisitPhotos source={{ encounterId: visit.id, patientId: visit.patientId }} comparison />
                     </div>
                     <div className="visit-history-narrative visit-preview-stack">
                       <HistoryNoteDisclosure encounterId={visit.id} patientId={visit.patientId} />

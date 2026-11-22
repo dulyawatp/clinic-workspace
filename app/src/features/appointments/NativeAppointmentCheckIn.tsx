@@ -68,6 +68,9 @@ export function NativeAppointmentCheckIn({ nativeId }: { nativeId: string }) {
       {!open && native.isError && (
         <p className="appointment-write-note" role="status">{t("appointmentWrite.eligibilityUnavailable")}</p>
       )}
+      {!open && !native.isError && native.data?.status === "Checked In" && (
+        <p className="appointment-write-success" role="status">{t("nativeCheckIn.checkedIn")}</p>
+      )}
       {open && <CheckInDialog
         assigned={native.data?.practitioner ?? null}
         eligible={eligible}

@@ -62,7 +62,14 @@ async function message(response: Response | null) {
 }
 
 export async function readVisitPhotoAppointment(encounterId: string, patientId: string, signal: AbortSignal) {
-  if (!reference.safeParse(encounterId).success || !reference.safeParse(patientId).success) return null;
+  if (!reference.safeParse(encounterId).success) return null;
+  if (patientId.startsWith("cpr1_")) {
+    if (patientId.length > 808 || !/^cpr1_[A-Za-z0-9_-]+$/.test(patientId)) return null;
+    const response = await request("clinic_ui.api.encounters.history_photo_appointment",
+      { encounter_id: encounterId, patient_ref: patientId }, signal);
+    return z.strictObject({ appointment: reference.nullable() }).safeParse(await message(response)).data?.appointment ?? null;
+  }
+  if (!reference.safeParse(patientId).success) return null;
   // The history projection has no appointment field. Read the exact authorized
   // Encounter; never infer a binding from the patient's other appointments.
   const response = await request("frappe.client.get", { doctype: "Patient Encounter", name: encounterId }, signal);
@@ -86,6 +93,16 @@ export async function readVisitPhotoPair(appointment: string, signal: AbortSigna
 export async function readVisitPhotoImage(appointment: string, slot: VisitPhotoSlot, signal: AbortSignal) {
   if (!reference.safeParse(appointment).success) return null;
   const response = await request(`${method}read_image`, { payload: { appointment, slot } }, signal, "image/png, image/jpeg");
+  return imageBlob(response);
+}
+
+export async function readOwnBeforePhoto(appointment: string, signal: AbortSignal) {
+  if (!reference.safeParse(appointment).success) return null;
+  const response = await request(`${method}read_own_before`, { payload: { appointment } }, signal, "image/png, image/jpeg");
+  return imageBlob(response);
+}
+
+async function imageBlob(response: Response | null) {
   if (!response) return null;
   const mime = response.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase();
   if (mime !== "image/png" && mime !== "image/jpeg") return null;

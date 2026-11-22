@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import re
+from datetime import datetime
 
 import frappe
 
@@ -175,13 +177,37 @@ def insert_prepared_slot_link(prepared, bound):
         _deny()
     binding = prepared.visit_binding
     check_slot_availability(binding)
-    doc = frappe.get_doc({
+    values = {
         "doctype": SLOT, "slot_key": slot_key(binding.appointment, binding.slot),
         "appointment": binding.appointment, "patient": binding.patient, "slot": binding.slot,
         "appointment_creation": binding.appointment_creation,
         "patient_creation": binding.patient_creation, "body_area": binding.body_area,
         "viewpoint": binding.viewpoint, "operation": prepared.id, "photo": linkage.name,
-    })
+    }
+    if binding.slot == "Before":
+        photo = frappe.get_doc("Clinic Photo", linkage.name, for_update=True)
+        file = frappe.get_doc("File", bound.file_name, for_update=True)
+        if (photo.name != linkage.name or photo.original_file != bound.file_name or
+            photo.storage_key != prepared.key or photo.original_sha256 != prepared.expected_sha256 or
+            photo.patient_reference != binding.patient or file.name != bound.file_name or
+            file.file_url != prepared.key or file.is_private != 1 or
+            file.attached_to_doctype != "Clinic Photo" or file.attached_to_name != photo.name):
+            _deny()
+        generations = []
+        for value in (photo.creation, file.creation):
+            if type(value) is datetime and value.tzinfo is None:
+                value = str(value)
+            if (type(value) is not str or
+                not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?", value)):
+                _deny()
+            try:
+                datetime.fromisoformat(value)
+            except ValueError:
+                _deny()
+            generations.append(value)
+        values.update(photo_creation=generations[0], file_creation=generations[1],
+                      file_name=file.name)
+    doc = frappe.get_doc(values)
     if doc.doctype != SLOT:
         _deny()
     with bookkeeping.internal_write(doc):

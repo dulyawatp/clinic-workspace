@@ -546,7 +546,7 @@ function LinkedVisit({ initial, appointmentRef, annotationCallbacks }: {
         medications={<LinkedPrescriptions medications={medications} draft={prescription} editable={!readOnly}
           locked={locked} onChange={setPrescription} />}
         photos={confirmedNativeAppointment
-          ? <NativeVisitPhotos source={{ appointment: context.appointment }}
+           ? <NativeVisitPhotos source={{ appointment: context.appointment }} comparison
             drawing={encounter?.docstatus === 0
               ? { callbacks: annotationCallbacks ?? nativeVisitAnnotationCallbacks, writesBlocked: locked } : undefined}
             staffTarget={encounter?.docstatus === 0 ? { appointment: context.appointment, encounter: encounter.id } : undefined} />

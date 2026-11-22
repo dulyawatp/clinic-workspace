@@ -1,7 +1,7 @@
 import { HttpResponse, http } from "msw";
 import { afterEach, expect, it, vi } from "vitest";
 import { server } from "../../test/msw/server";
-import { fetchNativeAppointmentsBody } from "./appointment";
+import { fetchNativeAppointmentsBody, readNativeAppointmentItem } from "./appointment";
 import {
   clearNativeCsrfToken,
   fetchNativeSession,
@@ -33,6 +33,12 @@ const ITEMS = {
     },
   ],
 };
+
+it("accepts maximum-length opaque patient references", () => {
+  const ref = `cpr1_${"a".repeat(803)}`;
+  const item = { ...ITEMS.items[0], workspace_patient_id: ref };
+  expect(readNativeAppointmentItem(item)).toEqual(item);
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
