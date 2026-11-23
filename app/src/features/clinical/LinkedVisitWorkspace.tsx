@@ -24,6 +24,7 @@ import { nativeVisitAnnotationCallbacks } from "../../transport/native/visit-ann
 import { StatePanel } from "../../ui/StatePanel";
 import { useLiveAppointment } from "../appointments/live-appointment";
 import { EncounterLayout, EncounterReadFailure, EncounterStatus, SavedTerms } from "./ApprovedVisitWorkspace";
+import { LinkedVisitInvoice } from "./LinkedVisitInvoice";
 import { FormattedNoteEditor, FormattedNotePreview } from "./LinkedFormattedNote";
 import { LinkedPrescriptions, prescriptionChange, type PrescriptionDraft, PrescriptionRecovery } from "./LinkedPrescriptions";
 import { NativeLabReportPanel } from "./NativeLabReports";
@@ -471,6 +472,7 @@ function LinkedVisit({ initial, appointmentRef, annotationCallbacks }: {
           {encounter && <div><dt>{t("clinical.encounterId")}</dt><dd>{encounter.id}</dd></div>}
         </dl>
       </header>
+      <LinkedVisitInvoice appointment={context.appointment} />
       <EncounterLayout
         status={encounter ? <EncounterStatus status={encounter.docstatus} /> :
           <Badge tone="warning">{t("linkedEncounter.unsaved")}</Badge>}

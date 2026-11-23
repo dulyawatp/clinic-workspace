@@ -403,6 +403,51 @@ class Gateway:
         self._site_config = None
         self._write_ledger = None
 
+    def preview_native_invoice(self, data):
+        if isinstance(data, str):
+            data = json.loads(data)
+        if not isinstance(data, dict) or data.get("doctype", "Sales Invoice") != "Sales Invoice":
+            raise ValueError("Expected a Sales Invoice draft")
+
+        invoice = self.frappe.new_doc("Sales Invoice")
+        invoice.check_permission("create")
+
+        def fields(meta, values, children=False):
+            result = {}
+            for field in meta.fields:
+                key = field.fieldname
+                if not key or key not in values or key in {
+                    "doctype", "name", "docstatus", "parent", "parenttype",
+                    "parentfield", "idx", "flags", "owner", "creation",
+                    "modified", "modified_by",
+                }:
+                    continue
+                value = values[key]
+                if field.fieldtype == "Table":
+                    if children or not isinstance(value, list):
+                        raise ValueError("Invalid invoice child table")
+                    child_meta = self.frappe.get_meta(field.options)
+                    if any(not isinstance(row, dict) for row in value):
+                        raise ValueError("Invalid invoice child row")
+                    result[key] = [fields(child_meta, row, children=True) for row in value]
+                elif field.fieldtype != "Table MultiSelect":
+                    if isinstance(value, (dict, list)):
+                        raise ValueError("Invalid invoice field value")
+                    result[key] = value
+            return result
+
+        for key, value in fields(invoice.meta, data).items():
+            invoice.set(key, value)
+        invoice.check_permission("create")
+        invoice.validate_higher_perm_levels()
+        invoice.check_permission("read")
+        invoice.set_missing_values()
+        invoice.calculate_taxes_and_totals()
+        invoice.check_permission("read")
+        invoice.apply_fieldlevel_read_permissions()
+        return {"doctype": "Sales Invoice", "docstatus": 0,
+                **fields(invoice.meta, invoice.as_dict())}
+
     @property
     def frappe(self):
         if self._frappe is None:

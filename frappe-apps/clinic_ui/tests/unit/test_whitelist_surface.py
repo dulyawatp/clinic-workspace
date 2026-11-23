@@ -12,6 +12,7 @@ APP_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = APP_ROOT / "clinic_ui"
 
 EXPECTED_ENDPOINTS = {
+    "clinic_ui.api.native_invoice.preview",
     "clinic_ui.api.session.bootstrap",
     "clinic_ui.api.directory.synthetic_patients",
     "clinic_ui.api.appointments.synthetic_appointments",
@@ -65,6 +66,7 @@ EXPECTED_ENDPOINTS = {
 }
 
 EXPECTED_METHODS = {
+    "clinic_ui.api.native_invoice.preview": ["POST"],
     "clinic_ui.api.session.bootstrap": ["GET"],
     "clinic_ui.api.directory.synthetic_patients": ["GET"],
     "clinic_ui.api.appointments.synthetic_appointments": ["GET"],
