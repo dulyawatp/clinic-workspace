@@ -35,7 +35,7 @@
   --pc-sage: #f8fafb; /* subtle panel / table header */
   --pc-sage-deep: #f0f1f5;
   --pc-ink-2: color-mix(in oklch, var(--pc-muted) 94%, var(--pc-fg));
-  --pc-ink-3: #6f7887; /* accessible tertiary metadata */
+  --pc-ink-3: #606a7b; /* accessible tertiary metadata */
   --pc-field: #f8fafb;
   --pc-field-border: #ced1d7;
 
