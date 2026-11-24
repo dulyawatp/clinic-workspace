@@ -30,12 +30,26 @@ const ALL_NAV = [
   ROUTES.appointments,
   ROUTES.profile,
   ROUTES.system,
-  ROUTES.doctor, ROUTES.nurse, ROUTES.nurseTasks,
-  ROUTES.pharmacy, ROUTES.pharmacyItems, ROUTES.pharmacyBatches,
-  ROUTES.pharmacyReceive, ROUTES.pharmacyBalances, ROUTES.pharmacyMovements,
-  ROUTES.pharmacyPurchasing, ROUTES.cashier, ROUTES.invoices, ROUTES.payments,
-  ROUTES.management, ROUTES.managementReports, ROUTES.ownerStaff,
-  ROUTES.admin, ROUTES.adminUsers, ROUTES.adminClinical, ROUTES.adminSettings,
+  ROUTES.doctor,
+  ROUTES.nurse,
+  ROUTES.nurseTasks,
+  ROUTES.pharmacy,
+  ROUTES.pharmacyItems,
+  ROUTES.pharmacyBatches,
+  ROUTES.pharmacyReceive,
+  ROUTES.pharmacyBalances,
+  ROUTES.pharmacyMovements,
+  ROUTES.pharmacyPurchasing,
+  ROUTES.cashier,
+  ROUTES.invoices,
+  ROUTES.payments,
+  ROUTES.management,
+  ROUTES.managementReports,
+  ROUTES.ownerStaff,
+  ROUTES.admin,
+  ROUTES.adminUsers,
+  ROUTES.adminClinical,
+  ROUTES.adminSettings,
   ROUTES.adminSystem,
 ] as const;
 
@@ -94,19 +108,49 @@ const MATRIX: Record<RoleCode, Matrix> = {
   },
   PHA: {
     label: /Pharmacy|เภสัช/,
-    nav: [ROUTES.home, ROUTES.pharmacy, ROUTES.pharmacyItems, ROUTES.pharmacyBatches, ROUTES.pharmacyReceive, ROUTES.pharmacyBalances, ROUTES.pharmacyMovements, ROUTES.pharmacyPurchasing, ROUTES.search, ROUTES.profile],
+    nav: [
+      ROUTES.home,
+      ROUTES.pharmacy,
+      ROUTES.pharmacyItems,
+      ROUTES.pharmacyBatches,
+      ROUTES.pharmacyReceive,
+      ROUTES.pharmacyBalances,
+      ROUTES.pharmacyMovements,
+      ROUTES.pharmacyPurchasing,
+      ROUTES.search,
+      ROUTES.profile,
+    ],
     open: ROUTES.pharmacy,
     heading: { th: "ห้องยา", en: "Pharmacy" },
   },
   CAS: {
     label: /Cashier|การเงิน/,
-    nav: [ROUTES.home, ROUTES.cashier, ROUTES.invoices, ROUTES.payments, ROUTES.checkout, ROUTES.search, ROUTES.profile],
+    nav: [
+      ROUTES.home,
+      ROUTES.cashier,
+      ROUTES.invoices,
+      ROUTES.payments,
+      ROUTES.checkout,
+      ROUTES.search,
+      ROUTES.profile,
+    ],
     open: ROUTES.cashier,
     heading: { th: "รายการรอเรียกเก็บ", en: "Pending bills" },
   },
   MGR: {
     label: /manager|ผู้จัดการ/i,
-    nav: [ROUTES.home, ROUTES.management, ROUTES.managementReports, ROUTES.invoices, ROUTES.payments, ROUTES.pharmacyBatches, ROUTES.pharmacyBalances, ROUTES.system, ROUTES.search, ROUTES.profile],
+    nav: [
+      ROUTES.home,
+      ROUTES.management,
+      ROUTES.managementReports,
+      ROUTES.invoices,
+      ROUTES.payments,
+      ROUTES.pharmacyBatches,
+      ROUTES.pharmacyBalances,
+      ROUTES.system,
+      ROUTES.search,
+      ROUTES.profile,
+    ],
     open: ROUTES.management,
     heading: { th: "ภาพรวมคลินิก", en: "Clinic overview" },
   },
@@ -149,60 +193,87 @@ async function navPaths(page: Page): Promise<string[]> {
 }
 
 test.describe("fixture role matrix (synthetic accounts, not native sign-in)", () => {
-  for (const locale of ["th", "en"] as const) for (const role of ROLES) {
-    const matrix = MATRIX[role];
+  for (const locale of ["th", "en"] as const)
+    for (const role of ROLES) {
+      const matrix = MATRIX[role];
 
-    test(`fixture ${role} ${locale}: login, permitted nav only, permitted surface opens`, async ({
-      page,
-    }) => {
-      await page.setViewportSize({ width: 1440, height: 900 });
-      await page.addInitScript(({ key, locale }) => localStorage.setItem(key, locale), { key: LOCALE_KEY, locale });
-      await loginAs(page, role);
+      test(`fixture ${role} ${locale}: login, permitted nav only, permitted surface opens`, async ({
+        page,
+      }) => {
+        await page.setViewportSize({ width: 1440, height: 900 });
+        await page.addInitScript(
+          ({ key, locale }) => localStorage.setItem(key, locale),
+          { key: LOCALE_KEY, locale },
+        );
+        await loginAs(page, role);
 
-      // Login really bound the fixture role to this session.
-      await expect(page.locator(".shell-role strong")).toHaveText(matrix.label);
-      await expect(page).toHaveURL(endsWith(ROUTES.home));
+        // Login really bound the fixture role to this session.
+        await expect(page.locator(".shell-role strong")).toHaveText(
+          matrix.label,
+        );
+        await expect(page).toHaveURL(endsWith(ROUTES.home));
 
-      const more = page.locator("aside.shell-sidebar details");
-      const primary = page.locator("aside.shell-sidebar .shell-nav-primary > li > a");
-      await expect(primary).toHaveCount(Math.min(6, matrix.nav.length));
-      expect(await primary.evaluateAll((links) => links.map((link) => link.getAttribute("href")))).toEqual(matrix.nav.slice(0, 6));
-      if (matrix.nav.length > 6) {
-        await expect(more).not.toHaveAttribute("open", "");
-        for (const path of matrix.nav.slice(6)) await expect(navLink(page, path)).toBeHidden();
-        await more.locator("summary").click();
-        await expect(more).toHaveAttribute("open", "");
-        for (const path of matrix.nav.slice(6)) await expect(navLink(page, path)).toBeVisible();
-      } else {
-        await expect(more).toHaveCount(0);
-      }
-      // Positive: every permitted destination is advertised, with its href.
-      for (const path of matrix.nav) {
-        await expect(navLink(page, path)).toHaveCount(1);
-      }
-      // Negative: nothing outside the permitted set leaks into the sidebar.
-      for (const path of ALL_NAV) {
-        if (!matrix.nav.includes(path)) {
-          await expect(navLink(page, path)).toHaveCount(0);
+        const more = page.locator("aside.shell-sidebar details");
+        const primary = page.locator(
+          "aside.shell-sidebar .shell-nav-primary > li > a",
+        );
+        await expect(primary).toHaveCount(Math.min(6, matrix.nav.length));
+        expect(
+          await primary.evaluateAll((links) =>
+            links.map((link) => link.getAttribute("href")),
+          ),
+        ).toEqual(matrix.nav.slice(0, 6));
+        if (matrix.nav.length > 6) {
+          await expect(more).not.toHaveAttribute("open", "");
+          for (const path of matrix.nav.slice(6))
+            await expect(navLink(page, path)).toBeHidden();
+          await more.locator("summary").click();
+          await expect(more).toHaveAttribute("open", "");
+          for (const path of matrix.nav.slice(6))
+            await expect(navLink(page, path)).toBeVisible();
+        } else {
+          await expect(more).toHaveCount(0);
         }
-      }
-      expect(await navPaths(page)).toEqual(matrix.nav);
+        // Positive: every permitted destination is advertised, with its href.
+        for (const path of matrix.nav) {
+          await expect(navLink(page, path)).toHaveCount(1);
+        }
+        // Negative: nothing outside the permitted set leaks into the sidebar.
+        for (const path of ALL_NAV) {
+          if (!matrix.nav.includes(path)) {
+            await expect(navLink(page, path)).toHaveCount(0);
+          }
+        }
+        expect(await navPaths(page)).toEqual(matrix.nav);
 
-      // Positive navigation: the permitted surface opens and marks itself
-      // current. No data assertion here: reads stay fixture-only either way.
-      await navLink(page, matrix.open).click();
-      const current = `aside.shell-sidebar a.shell-nav-link[aria-current="page"]`;
-      await expect(page.locator(current)).toHaveCount(1);
-      await expect(
-        page.locator(`${current}[href="${matrix.open}"]`),
-      ).toHaveCount(1);
-      expect(new URL(page.url()).pathname).toBe(matrix.open);
-      await expect(page.locator("main#main").getByRole("heading", { name: matrix.heading[locale], exact: true, level: 1 })).toBeVisible();
-      await expect(page.locator("main#main").getByRole("heading", { name: locale === "th" ? "ไม่มีสิทธิ์เข้าถึงหน้านี้" : "Permission denied", exact: true })).toHaveCount(0);
-    });
-  }
+        // Positive navigation: the permitted surface opens and marks itself
+        // current. No data assertion here: reads stay fixture-only either way.
+        await navLink(page, matrix.open).click();
+        const current = `aside.shell-sidebar a.shell-nav-link[aria-current="page"]`;
+        await expect(page.locator(current)).toHaveCount(1);
+        await expect(
+          page.locator(`${current}[href="${matrix.open}"]`),
+        ).toHaveCount(1);
+        expect(new URL(page.url()).pathname).toBe(matrix.open);
+        await expect(
+          page.locator("main#main").getByRole("heading", {
+            name: matrix.heading[locale],
+            exact: true,
+            level: 1,
+          }),
+        ).toBeVisible();
+        await expect(
+          page.locator("main#main").getByRole("heading", {
+            name: locale === "th" ? "ไม่มีสิทธิ์เข้าถึงหน้านี้" : "Permission denied",
+            exact: true,
+          }),
+        ).toHaveCount(0);
+      });
+    }
 
-  test("fixture PHA: keyboard opens More and navigates to movements", async ({ page }) => {
+  test("fixture PHA: keyboard opens More and navigates to movements", async ({
+    page,
+  }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await loginAs(page, "PHA");
     const more = page.locator("aside.shell-sidebar details");
@@ -215,10 +286,15 @@ test.describe("fixture role matrix (synthetic accounts, not native sign-in)", ()
     await expect(navLink(page, ROUTES.pharmacyMovements)).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(endsWith(ROUTES.pharmacyMovements));
-    await expect(navLink(page, ROUTES.pharmacyMovements)).toHaveAttribute("aria-current", "page");
+    await expect(navLink(page, ROUTES.pharmacyMovements)).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
-  test("fixture PHA: mobile More exposes keyboard navigation at 390", async ({ page }) => {
+  test("fixture PHA: mobile More exposes keyboard navigation at 390", async ({
+    page,
+  }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await loginAs(page, "PHA");
     const nav = page.locator("nav.shell-nav--bottom");
