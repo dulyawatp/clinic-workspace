@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { ROUTES } from "../../app/routes";
 import { useSession } from "../../app/SessionProvider";
 import { useReadQuery } from "../../transport/read/query";
+import { Button } from "../../ui/Button";
 import { LanguageToggle } from "./LanguageToggle";
 import { NotificationsPanel } from "./NotificationsPanel";
 import { NavIcon } from "./SidebarNav";
@@ -21,6 +22,63 @@ function Company() {
     <div className="shell-company">
       <span>{t("field.company")}</span>
       <strong data-testid="shell-company">{company}</strong>
+    </div>
+  );
+}
+
+function WorkspaceProfile({ workspace }: { workspace: string }) {
+  const { t } = useTranslation();
+  const { openWorkspaceChooser } = useSession();
+  const [open, setOpen] = useState(false);
+  const popoverId = useId();
+  const container = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !container.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, [open]);
+  return (
+    <div
+      ref={container}
+      className="shell-notifications"
+      onBlur={(event) => {
+        if (!container.current?.contains(event.relatedTarget)) setOpen(false);
+      }}
+      onKeyDown={(event) => {
+        if (open && event.key === "Escape") {
+          event.preventDefault();
+          setOpen(false);
+          trigger.current?.focus();
+        }
+      }}
+    >
+      <button
+        ref={trigger}
+        type="button"
+        className="shell-icon-control"
+        aria-label={t("shell.profileMenu")}
+        aria-expanded={open}
+        aria-controls={open ? popoverId : undefined}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <NavIcon name="profile" />
+      </button>
+      {open && (
+        <div className="shell-popover workspace-profile" id={popoverId}>
+          <div className="workspace-profile-current">
+            <span>{t("workspace.current")}</span>
+            <strong>{workspace}</strong>
+          </div>
+          <Button variant="secondary" onClick={() => void openWorkspaceChooser()}>
+            {t("workspace.switch")}
+          </Button>
+          <Link to={ROUTES.profile} onClick={() => setOpen(false)}>{t("nav.profile")}</Link>
+        </div>
+      )}
     </div>
   );
 }
@@ -88,6 +146,7 @@ export function Topbar({
   const roles = session.user.roles
     .map((role) => t(`role.${role.toLowerCase()}.short`))
     .join(" · ");
+  const canSwitch = session.mode === "live" && (session.eligibleWorkspaces?.length ?? 0) > 1;
 
   return (
     <header ref={topbarRef} className="shell-topbar">
@@ -107,7 +166,7 @@ export function Topbar({
       <div className="shell-context">
         <div>
           <span className="shell-role">
-            {t("shell.roleContext")}{" "}
+            {t(canSwitch ? "workspace.current" : "shell.roleContext")}{" "}
             <strong>{roles || t("common.unavailable")}</strong>
           </span>
           <Company />
@@ -179,13 +238,15 @@ export function Topbar({
             </div>
           )}
         </div>
-        <Link
-          to={ROUTES.profile}
-          className="shell-icon-control"
-          aria-label={t("shell.profileMenu")}
-        >
-          <NavIcon name="profile" />
-        </Link>
+        {canSwitch ? <WorkspaceProfile workspace={roles} /> : (
+          <Link
+            to={ROUTES.profile}
+            className="shell-icon-control"
+            aria-label={t("shell.profileMenu")}
+          >
+            <NavIcon name="profile" />
+          </Link>
+        )}
       </div>
     </header>
   );

@@ -8,6 +8,7 @@ import {
   RouterProvider,
 } from "react-router-dom";
 import { SignInPage } from "../features/auth/SignInPage";
+import { OwnerStaffRoute } from "../features/owner-staff/OwnerStaffPage";
 import { AppShell } from "../features/shell/AppShell";
 import { StatePanel } from "../ui/StatePanel";
 import { RequireSession } from "./guards";
@@ -59,6 +60,7 @@ export const appRoutes: RouteObject[] = [
             path,
             element: surface === "DOC-02" ? element : <RoleGuard surface={surface}>{element}</RoleGuard>,
           })),
+          { path: ROUTES.ownerStaff, element: <OwnerStaffRoute /> },
           { path: ROUTES.legacyFinance, element: <FinanceRedirect /> },
           {
             // Legacy patient picker: gated as the PAT-04 clinician entry and

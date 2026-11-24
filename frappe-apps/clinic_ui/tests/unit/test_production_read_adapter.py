@@ -34,7 +34,7 @@ def gateway(**changes):
                        current_session=session_view(roles=("Nurse",)),
                        csrf_token="csrf-token-value")
     fake.frappe = SimpleNamespace(
-        local=SimpleNamespace(site="client.example"),
+        local=SimpleNamespace(site="client.example", request=SimpleNamespace(headers={})),
         get_site_path=lambda *args: "sites/client.example/private",
     )
     fake.patient_authority = {"PAT-1": "Patient One"}

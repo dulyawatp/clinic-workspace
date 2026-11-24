@@ -15,6 +15,8 @@ export interface SessionDTO {
     roles: RoleCode[];
   };
   capabilities: CapabilityMap;
+  /** Native bootstrap only; assigned choices are not active roles. */
+  eligibleWorkspaces?: RoleCode[];
   /** Set only by the native bootstrap mapper. */
   paymentSettlement?: "full_balance_v1";
 }
@@ -33,7 +35,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isRoleList(value: unknown): value is RoleCode[] {
+export function isRoleList(value: unknown): value is RoleCode[] {
   return (
     Array.isArray(value) &&
     value.every((role) => typeof role === "string" && ROLE_CODES.has(role))

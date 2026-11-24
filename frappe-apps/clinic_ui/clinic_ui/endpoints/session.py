@@ -19,6 +19,7 @@ payload and are never logged.
 
 from clinic_ui.core import dto
 from clinic_ui.core import finance_contract
+from clinic_ui.core import owner_staff_contract
 from clinic_ui.core import write_fence
 from clinic_ui.core.capabilities import bootstrap_capabilities
 from clinic_ui.core.epoch import session_epoch
@@ -128,6 +129,30 @@ def _production_booking_enabled(gateway, role):
             and gateway.native_appointment_can_create() is True
             and gateway.native_doctype_can_read("Patient Appointment") is True
         )
+    except Exception:
+        return False
+
+
+def _production_owner_staff_enabled(gateway, role, actor):
+    """Advertise the Owner staff surface only for a fresh native Owner.
+
+    The production workspace must resolve to ``MGR``, the caller must currently
+    hold ``System Manager`` in the native ``Has Role`` table (never the cached
+    session roles), and the caller must hold native ``User`` read authority.
+    The list checks document and field access independently on every request.
+    Any failed probe leaves it ``read_only``; the legacy lane never advertises it.
+    """
+
+    if role != owner_staff_contract.OWNER_ROLE_CODE:
+        return False
+    try:
+        fresh = gateway.fresh_user_roles(actor)
+        if (
+            not isinstance(fresh, tuple)
+            or owner_staff_contract.SYSTEM_MANAGER_ROLE not in fresh
+        ):
+            return False
+        return gateway.native_doctype_can_read(owner_staff_contract.USER_DOCTYPE) is True
     except Exception:
         return False
 
@@ -421,7 +446,7 @@ def _admin_write_flags(gateway, settings, role):
     return True, True
 
 
-def bootstrap(gateway):
+def bootstrap(gateway, workspace=None):
     from clinic_ui.endpoints import production_read
 
     common.begin(gateway)
@@ -432,28 +457,45 @@ def bootstrap(gateway):
 
     common.require_authorized_session(gateway, view)
     production = production_read.authorize_if_selected(
-        gateway, SUPPORTED_ROLE_CODES, begun=True
+        gateway, SUPPORTED_ROLE_CODES, begun=True, bootstrap=True, workspace=workspace
     )
     if production is not None:
-        settings, view, role = production
+        settings, view, role, eligible = production
         csrf_token = gateway.csrf_token()
         if not dto.is_valid_text(csrf_token, dto.MAX_CSRF_TOKEN_LENGTH):
             gateway.deny()
         try:
-            return dto.build_bootstrap(
-                session_epoch=session_epoch(settings.epoch_secret, gateway.site, view.sid),
+            epoch = session_epoch(settings.epoch_secret, gateway.site, view.sid)
+            if role is None:
+                return {
+                    "mode": "live",
+                    "sessionEpoch": epoch,
+                    "user": {"id": view.user, "displayName": view.full_name, "roles": []},
+                    "capabilities": {},
+                    "eligibleWorkspaces": eligible,
+                    "csrfToken": csrf_token,
+                }
+            result = dto.build_bootstrap(
+                session_epoch=epoch,
                 user_id=view.user,
                 display_name=view.full_name,
                 role=role,
                 csrf_token=csrf_token,
                 capabilities=bootstrap_capabilities(
                     write_appointment_book=_production_booking_enabled(gateway, role),
+                    write_owner_staff=_production_owner_staff_enabled(
+                        gateway, role, view.user
+                    ),
                 ),
             )
+            result["eligibleWorkspaces"] = eligible
+            return result
         except ValueError:
             gateway.deny()
     settings = common.settings_or_deny(gateway)
     role = common.role_or_deny(gateway, view, settings, SUPPORTED_ROLE_CODES)
+    if workspace is not None and workspace != role:
+        gateway.deny()
 
     csrf_token = gateway.csrf_token()
     if not dto.is_valid_text(csrf_token, dto.MAX_CSRF_TOKEN_LENGTH):
@@ -526,6 +568,7 @@ def bootstrap(gateway):
             csrf_token=csrf_token,
             capabilities=capabilities,
         )
+        result["eligibleWorkspaces"] = [role]
         if write_payment_receive:
             result["paymentSettlement"] = "full_balance_v1"
         return result

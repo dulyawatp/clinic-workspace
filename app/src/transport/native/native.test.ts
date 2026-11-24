@@ -12,6 +12,7 @@ import {
   nativeCsrfToken,
   nativeLogin,
   nativeLogout,
+  subscribeNativeAuthInvalidation,
 } from "./session";
 
 const BOOTSTRAP = "/api/method/clinic_ui.api.session.bootstrap";
@@ -44,8 +45,115 @@ function serveBootstrap(message: unknown, status = 200) {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
   clearNativeCsrfToken();
+});
+
+describe("native auth invalidation broadcast", () => {
+  function watchBroadcast() {
+    const postMessage = vi.fn();
+    const addEventListener = vi.fn();
+    const close = vi.fn();
+    const open = vi.fn(function () { return { postMessage, addEventListener, close }; });
+    vi.stubGlobal("BroadcastChannel", open);
+    return { open, postMessage, close };
+  }
+
+  it.each(["Logged In", "No App"])("signals %s even when Clinic bootstrap fails", async (message) => {
+    const { open, postMessage, close } = watchBroadcast();
+    serveBootstrap(null, 503);
+    server.use(http.post(LOGIN, () => HttpResponse.json({ message })));
+
+    await expect(nativeLogin("u", "p")).rejects.toMatchObject({ code: "UPSTREAM_UNAVAILABLE" });
+    expect(open.mock.calls).toEqual([["clinic.native-auth"]]);
+    expect(postMessage.mock.calls).toEqual([["invalidate"]]);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("signals only a completed logout POST, not bootstrap, rejection or an anonymous no-op", async () => {
+    const { postMessage, close } = watchBroadcast();
+    serveBootstrap(null, 401);
+    await nativeLogout();
+    expect(postMessage).not.toHaveBeenCalled();
+
+    serveBootstrap(liveMessage());
+    await fetchNativeSession();
+    server.use(http.post(LOGOUT, () => new HttpResponse(null, { status: 403 })));
+    await expect(nativeLogout()).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(postMessage).not.toHaveBeenCalled();
+
+    server.use(http.post(LOGOUT, () => HttpResponse.json({ message: "Logged Out" })));
+    await nativeLogout();
+    expect(postMessage.mock.calls).toEqual([["invalidate"]]);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("does not broadcast a rejected login", async () => {
+    const { postMessage } = watchBroadcast();
+    server.use(http.post(LOGIN, () => new HttpResponse(null, { status: 401 })));
+    await expect(nativeLogin("u", "p")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not broadcast a definitive CSRF logout rejection", async () => {
+    const { postMessage } = watchBroadcast();
+    serveBootstrap(liveMessage());
+    await fetchNativeSession();
+    server.use(http.post(LOGOUT, () => HttpResponse.json({ exc_type: "CSRFTokenError" }, { status: 400 })));
+    await expect(nativeLogout()).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it.each(["lost response", "unrecognized response", "server error"])(
+    "signals ambiguous login after dispatch: %s",
+    async (outcome) => {
+      const { postMessage } = watchBroadcast();
+      let posts = 0;
+      server.use(http.post(LOGIN, () => {
+        posts++;
+        if (outcome === "lost response") return HttpResponse.error();
+        if (outcome === "server error") return new HttpResponse(null, { status: 503 });
+        return HttpResponse.json({ message: "ok" });
+      }));
+      await expect(nativeLogin("u", "p")).rejects.toBeDefined();
+      expect(posts).toBe(1);
+      expect(postMessage.mock.calls).toEqual([["invalidate-ambiguous"]]);
+    },
+  );
+
+  it.each(["lost response", "server error"])(
+    "signals ambiguous logout after dispatch: %s",
+    async (outcome) => {
+      const { postMessage } = watchBroadcast();
+      serveBootstrap(liveMessage());
+      await fetchNativeSession();
+      let posts = 0;
+      server.use(http.post(LOGOUT, () => {
+        posts++;
+        return outcome === "lost response" ? HttpResponse.error() : new HttpResponse(null, { status: 503 });
+      }));
+      await expect(nativeLogout()).rejects.toBeDefined();
+      expect(posts).toBe(1);
+      expect(postMessage.mock.calls).toEqual([["invalidate-ambiguous"]]);
+    },
+  );
+
+  it("reuses the receiver's channel so a local login does not notify its own provider", async () => {
+    const { open, postMessage, close } = watchBroadcast();
+    const unsubscribe = subscribeNativeAuthInvalidation(vi.fn());
+    try {
+      serveBootstrap(liveMessage());
+      server.use(http.post(LOGIN, () => HttpResponse.json({ message: "Logged In" })));
+      await nativeLogin("u", "p");
+      expect(open).toHaveBeenCalledOnce();
+      expect(postMessage.mock.calls).toEqual([["invalidate"]]);
+      expect(close).not.toHaveBeenCalled();
+    } finally {
+      unsubscribe();
+    }
+    expect(close).toHaveBeenCalledOnce();
+  });
 });
 
 // Frozen by the full write-contract design. Kept literal so a contract edit
@@ -82,6 +190,7 @@ const FROZEN_CAPABILITY_NAMES = [
   "write.payment.refund",
   "write.admin.user",
   "write.admin.master",
+  "write.owner.staff",
   "read.patient",
   "read.appointment",
   "read.encounter",

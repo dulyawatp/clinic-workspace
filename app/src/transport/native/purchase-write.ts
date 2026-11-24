@@ -1,4 +1,4 @@
-import { FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
+import { captureClinicRequestContext, FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
 import { nativeCsrfToken } from "./session";
 
 export type PurchaseWriteKind =
@@ -266,6 +266,7 @@ async function submit(
   if (!token || purchaseWriteLocked(kind))
     throw new NativePurchaseWriteError("locked");
 
+  const isCurrent = captureClinicRequestContext();
   persistLock(kind);
 
   let response: Response;
@@ -298,7 +299,9 @@ async function submit(
   }
 
   try {
+    if (!isCurrent()) throw new NativePurchaseWriteError("uncertain");
     await acknowledge(token, kind, operationKey, parsed.ackToken);
+    if (!isCurrent()) throw new NativePurchaseWriteError("uncertain");
   } catch {
     notifyLock();
     throw new NativePurchaseWriteError("uncertain");

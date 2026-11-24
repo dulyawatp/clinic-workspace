@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { consumeReturnTo, sanitizeReturnTo } from "../../app/return-to";
 import { ROUTES } from "../../app/routes";
 import { SessionCheckPanel } from "../../app/SessionCheckPanel";
@@ -10,10 +10,11 @@ import { postLogin } from "../../transport/auth";
 import { Button } from "../../ui/Button";
 import { LanguageToggle } from "../shell/LanguageToggle";
 import { ShellBrand } from "../shell/SidebarNav";
+import { WorkspaceChooser } from "./WorkspaceChooser";
 
 export function SignInPage() {
   const { t } = useTranslation();
-  const { refresh, status } = useSession();
+  const { refresh, status, workspaceHomePending } = useSession();
   const [checkingAfterLogin, setCheckingAfterLogin] = useState(false);
   const navigate = useNavigate();
   const [params] = useSearchParams();
@@ -44,7 +45,7 @@ export function SignInPage() {
       result.status === "superseded"
     )
       return;
-    if (result.status === "anonymous") {
+    if (result.status === "anonymous" || result.status === "workspace") {
       setCheckingAfterLogin(false);
       return;
     }
@@ -93,6 +94,10 @@ export function SignInPage() {
       }
     }
   }
+
+  if (status === "workspace") return <WorkspaceChooser />;
+  if (status === "authenticated" && workspaceHomePending)
+    return <Navigate to={workspaceHomePending} replace />;
 
   return (
     <div className="signin-page">

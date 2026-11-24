@@ -11,11 +11,12 @@ SAFE_DENIAL = "Visit photo request unavailable"
 SAFE_VALIDATION = "Invalid visit photo request"
 
 
-def require_visit_request():
+def require_visit_request(allowed_codes=frozenset({"DOC"})):
     """Require the independent site gate and authenticated native POST session."""
     frappe = photo_save._frappe()
     photo_save.require_post()
     photo_save.require_native_session()
+    photo_save.require_production_workspace(allowed_codes)
     user = getattr(getattr(frappe, "session", None), "user", None)
     conf = getattr(frappe, "conf", None)
     if (not isinstance(user, str) or not user or user == "Guest" or
@@ -78,7 +79,7 @@ def read_pair(payload=None, **extra):
 
 
 def grant_consent(payload=None, **extra):
-    require_visit_request()
+    require_visit_request(frozenset({"DOC", "REC", "ADM"}))
     appointment = _payload(payload, {"appointment", "attested", "evidence"}, extra, "visit_photos.grant_consent")
     evidence = payload["evidence"]
     if (payload["attested"] is not True or not isinstance(evidence, str) or
@@ -93,7 +94,7 @@ def grant_consent(payload=None, **extra):
 
 
 def revoke_consent(payload=None, **extra):
-    require_visit_request()
+    require_visit_request(frozenset({"DOC", "REC", "ADM"}))
     appointment = _payload(payload, {"appointment"}, extra, "visit_photos.revoke_consent")
     try:
         _change_consent(appointment, False)
@@ -151,7 +152,7 @@ def read_own_before(payload=None, **extra):
     from clinic_photos.access.entrypoints import mark_protected_request
 
     mark_protected_request()
-    require_visit_request()
+    require_visit_request(frozenset({"REC"}))
     appointment = _payload(payload, {"appointment"}, extra, "visit_photos.read_own_before")
     frappe = photo_save._frappe()
     try:

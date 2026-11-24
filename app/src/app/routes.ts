@@ -74,6 +74,7 @@ export const ROUTES = {
 
   management: "/clinic/management",
   managementReports: "/clinic/management/reports",
+  ownerStaff: "/clinic/management/staff",
 
   admin: "/clinic/admin",
   adminUsers: "/clinic/admin/users",

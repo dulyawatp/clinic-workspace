@@ -16,7 +16,10 @@ authenticated but unauthorized caller — is the framework's own permission erro
 secret, role or record detail is included in either failure.
 """
 
+import hmac
+
 from clinic_ui.core import config, policy, write_fence
+from clinic_ui.core.epoch import session_epoch
 
 
 def begin(gateway):
@@ -51,6 +54,27 @@ def role_or_deny(gateway, view, settings, allowed_codes):
     role = policy.authorize(view, settings.as_role_map(), allowed_codes)
     if role is None:
         gateway.deny()
+    frappe = getattr(gateway, "frappe", None)
+    request = getattr(getattr(frappe, "local", None), "request", None)
+    headers = getattr(request, "headers", {})
+    selected = headers.get("X-Clinic-Workspace")
+    supplied_epoch = headers.get("X-Clinic-Session-Epoch")
+    if selected is not None or supplied_epoch is not None:
+        try:
+            fresh_roles = gateway.fresh_user_roles(view.user)
+        except Exception:
+            fresh_roles = None
+        if (
+            selected != role
+            or not isinstance(supplied_epoch, str)
+            or not hmac.compare_digest(
+                supplied_epoch.encode("utf-8"),
+                session_epoch(settings.epoch_secret, gateway.site, view.sid).encode("ascii"),
+            )
+            or policy.fresh_role_problem(fresh_roles, settings.as_role_map(), role)
+            is not None
+        ):
+            gateway.deny()
     return role
 
 

@@ -263,6 +263,27 @@
   outline: 3px solid var(--primary);
   outline-offset: 3px;
 }
+.workspace-profile,
+.workspace-profile-current {
+  display: grid;
+}
+.workspace-profile {
+  gap: 12px;
+}
+.workspace-profile-current {
+  gap: 3px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.workspace-profile-current span {
+  font-size: 12px;
+}
+.workspace-profile a {
+  display: flex;
+  align-items: center;
+  min-height: var(--target-min);
+  color: var(--primary);
+}
 .work-items-heading {
   display: flex;
   align-items: center;

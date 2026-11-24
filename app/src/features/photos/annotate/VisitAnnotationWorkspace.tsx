@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useSession } from "../../../app/SessionProvider";
+import { nativeWriteMarkerOwner, useSession } from "../../../app/SessionProvider";
 import { Badge, Button } from "../../../design/components";
 import type { VisitAnnotationCallbacks, VisitAnnotationRead, VisitAnnotationTarget } from "../../../transport/native/visit-annotations";
 import { AnnotationWorkspace } from "./AnnotationWorkspace";
@@ -28,12 +28,14 @@ function SlotWorkspace({ target, imageUrl, callbacks, writesBlocked }: {
 }) {
   const { t } = useTranslation();
   const id = useId();
-  const { authGeneration } = useSession();
+  const { authGeneration, session } = useSession();
+  const owner = nativeWriteMarkerOwner(session);
   const { appointment, encounter, slot } = target;
   const cache = useQueryClient();
-  const cacheKey = ["visit-drawing-request", authGeneration, appointment, encounter, slot] as const;
+  const cacheKey = ["visit-drawing-request", owner ?? authGeneration, appointment, encounter, slot] as const;
   const request = useQuery<string | null>({
     queryKey: cacheKey, enabled: false, initialData: null, gcTime: Infinity, queryFn: () => null,
+    ...(owner ? { meta: { nativeWriteMarker: owner } } : {}),
   });
   const [document, setDocument] = useState<VisitAnnotationRead>();
   const [notice, setNotice] = useState<Notice>("loading");

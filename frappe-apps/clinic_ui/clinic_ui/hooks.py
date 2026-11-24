@@ -7,8 +7,8 @@ app_license = "MIT"
 app_version = "0.0.1"
 
 # Intentionally minimal. This app declares no doctype, no doc_event, no
-# permission_query_conditions, no override_whitelisted_methods. It adds five
-# read methods and seven default-off local POST write methods under
+# permission_query_conditions, no override_whitelisted_methods. It adds read
+# methods, including the Owner staff list, and default-off POST writes under
 # `clinic_ui.api`, one website route family and one narrow `before_request`
 # hook, so `/api`, `/app` and `/desk` keep their native behaviour. Adding any
 # other hook here is a review-visible change.

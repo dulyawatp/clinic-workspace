@@ -1,12 +1,52 @@
-import { type CapabilityMap, isCapability } from "../../domain/capability";
+import { type CapabilityMap, isCapability, type RoleCode } from "../../domain/capability";
 import type { AppError } from "../../domain/errors";
-import { isSessionDTO, type SessionDTO } from "../../domain/session";
+import { isRoleList, isSessionDTO, type SessionDTO } from "../../domain/session";
 import { mapHttpError } from "../error-map";
 import { FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
 
 const BOOTSTRAP_METHOD = "clinic_ui.api.session.bootstrap";
 const LOGIN_METHOD = "login";
 const LOGOUT_METHOD = "logout";
+const AUTH_CHANNEL = "clinic.native-auth";
+const AUTH_INVALIDATED = "invalidate";
+const AUTH_AMBIGUOUS = "invalidate-ambiguous";
+let providerAuthChannel: BroadcastChannel | undefined;
+
+function openAuthChannel(): BroadcastChannel | undefined {
+  try {
+    if (typeof BroadcastChannel !== "undefined") return new BroadcastChannel(AUTH_CHANNEL);
+  } catch {
+    // If unavailable, the provider still checks native auth on resume.
+  }
+}
+
+/** Other tabs receive only a hint to verify their own same-origin session. */
+export function subscribeNativeAuthInvalidation(invalidate: (ambiguous: boolean) => void): () => void {
+  const channel = openAuthChannel();
+  providerAuthChannel = channel;
+  channel?.addEventListener("message", (event) => {
+    if (event.data === AUTH_INVALIDATED || event.data === AUTH_AMBIGUOUS)
+      invalidate(event.data === AUTH_AMBIGUOUS);
+  });
+  return () => {
+    if (providerAuthChannel === channel) providerAuthChannel = undefined;
+    channel?.close();
+  };
+}
+
+function broadcastAuthInvalidation(ambiguous = false): void {
+  // Use the provider's instance so BroadcastChannel excludes this tab's listener.
+  const providerChannel = providerAuthChannel;
+  const channel = providerChannel ?? openAuthChannel();
+  if (!channel) return;
+  try {
+    channel.postMessage(ambiguous ? AUTH_AMBIGUOUS : AUTH_INVALIDATED);
+  } catch {
+    // A notification failure must not change the auth request's outcome.
+  } finally {
+    if (!providerChannel) channel.close();
+  }
+}
 
 /**
  * Session CSRF token, memory only.
@@ -109,6 +149,7 @@ const NATIVE_ENABLEABLE = new Set<string>([
   "write.payment.receive",
   "write.admin.user",
   "write.admin.master",
+  "write.owner.staff",
 ]);
 
 function nativeCapabilities(value: unknown): CapabilityMap {
@@ -139,7 +180,21 @@ function parseBootstrap(body: unknown): {
   // Existing validator: roles/epoch/capability shape are unchanged here.
   if (!isSessionDTO(message)) throw unavailable();
   if (message.mode !== "live") throw unavailable();
-  if (!isSafeToken(csrfToken)) throw unavailable();
+  if (!isSafeToken(csrfToken) || !/^[\x21-\x7e]+$/.test(message.sessionEpoch))
+    throw unavailable();
+
+  const roles = message.user.roles;
+  const eligible = message.eligibleWorkspaces;
+  if (eligible !== undefined && (
+    !isRoleList(eligible) || eligible.length === 0 ||
+    eligible.length !== new Set(eligible).size
+  )) throw unavailable();
+  if (roles.length === 0) {
+    if (!eligible || eligible.length < 2 || Object.keys(message.capabilities).length !== 0 || marker !== undefined)
+      throw unavailable();
+  } else if (roles.length !== 1 || (eligible && !eligible.includes(roles[0]!))) {
+    throw unavailable();
+  }
 
   return {
     session: {
@@ -147,6 +202,7 @@ function parseBootstrap(body: unknown): {
       sessionEpoch: message.sessionEpoch,
       user: message.user,
       capabilities: nativeCapabilities(message.capabilities),
+      ...(eligible ? { eligibleWorkspaces: eligible } : {}),
       ...(marker === "full_balance_v1" ? { paymentSettlement: marker } : {}),
     },
     csrfToken,
@@ -172,37 +228,49 @@ function commitBootstrap(
 }
 
 /** Reads and validates the bootstrap response without touching module state. */
-async function loadBootstrap(): Promise<{
+async function loadBootstrap(workspace?: RoleCode): Promise<{
   session: SessionDTO;
   csrfToken: string;
 } | null> {
-  const response = await frappeRequest(BOOTSTRAP_METHOD, { method: "GET" });
+  const method = workspace
+    ? `${BOOTSTRAP_METHOD}?${new URLSearchParams({ workspace })}`
+    : BOOTSTRAP_METHOD;
+  const response = await frappeRequest(method, { method: "GET" });
   // 401 is the only "no session" signal; 403 stays an error.
   if (response.status === 401) return null;
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw mapHttpError(response.status, body);
-  return parseBootstrap(body);
+  const result = parseBootstrap(body);
+  if (workspace && (
+    result.session.user.roles[0] !== workspace || !result.session.eligibleWorkspaces?.includes(workspace)
+  )) throw unavailable();
+  return result;
 }
 
 /**
  * GET the Frappe session. `null` means the server reports no session (401);
  * every other failure is an error state, never an anonymous session.
  */
-export async function fetchNativeSession(): Promise<SessionDTO | null> {
-  return fetchValidatedNativeSession(false);
+export async function fetchNativeSession(workspace?: RoleCode): Promise<SessionDTO | null> {
+  return fetchValidatedNativeSession(false, workspace);
 }
 
-async function fetchValidatedNativeSession(requireClinicIdentity: boolean): Promise<SessionDTO | null> {
+/** Revocation check only: never picks a workspace or replaces CSRF state. */
+export async function inspectNativeSession(): Promise<SessionDTO | null> {
+  return (await loadBootstrap())?.session ?? null;
+}
+
+async function fetchValidatedNativeSession(requireClinicIdentity: boolean, workspace?: RoleCode): Promise<SessionDTO | null> {
   const call = ++bootstrapGeneration;
   let result: { session: SessionDTO; csrfToken: string } | null;
   try {
-    result = await loadBootstrap();
+    result = await loadBootstrap(workspace);
     if (
       requireClinicIdentity &&
       result !== null &&
       (!result.session.user.id.trim() ||
         !result.session.user.displayName.trim() ||
-        result.session.user.roles.length !== 1)
+        (result.session.user.roles.length !== 1 && !result.session.eligibleWorkspaces))
     ) throw unavailable();
   } catch (cause) {
     // A rejected or malformed newest bootstrap leaves no verified session, so
@@ -228,16 +296,26 @@ export async function nativeLogin(
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ usr, pwd }),
+  }).catch((cause: unknown) => {
+    broadcastAuthInvalidation(true);
+    throw cause;
   });
   const body: unknown = await response.json().catch(() => null);
   // A rejected credential pair stays the existing client outcome (FORBIDDEN),
   // not "session expired".
   if (response.status === 401) throw { code: "FORBIDDEN", retryable: false };
-  if (!response.ok) throw mapHttpError(response.status, body);
+  if (!response.ok) {
+    if (response.status === 408 || response.status >= 500) broadcastAuthInvalidation(true);
+    throw mapHttpError(response.status, body);
+  }
 
-  if (!isRecord(body) || (body.message !== "Logged In" && body.message !== "No App"))
+  if (!isRecord(body) || (body.message !== "Logged In" && body.message !== "No App")) {
+    broadcastAuthInvalidation(true);
     throw unavailable();
+  }
 
+  // The browser session changed even if the Clinic bootstrap below fails.
+  broadcastAuthInvalidation();
   const session = await fetchValidatedNativeSession(body.message === "No App");
   if (session === null) throw unavailable();
   return session;
@@ -356,6 +434,9 @@ export async function nativeLogout(): Promise<void> {
       [FRAPPE_CSRF_HEADER]: current.token,
       "content-type": "application/json",
     },
+  }).catch((cause: unknown) => {
+    broadcastAuthInvalidation(true);
+    throw cause;
   });
   const body: unknown = await response.json().catch(() => null);
   if (response.status === 401 || response.status === 403) {
@@ -368,6 +449,10 @@ export async function nativeLogout(): Promise<void> {
     clearNativeCsrfToken();
     throw { code: "FORBIDDEN", retryable: false } satisfies AppError;
   }
-  if (!response.ok) throw mapHttpError(response.status, body);
+  if (!response.ok) {
+    if (response.status === 408 || response.status >= 500) broadcastAuthInvalidation(true);
+    throw mapHttpError(response.status, body);
+  }
   clearNativeCsrfToken();
+  broadcastAuthInvalidation();
 }

@@ -1,4 +1,4 @@
-import { FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
+import { captureClinicRequestContext, FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
 import { nativeCsrfToken } from "./session";
 
 /** Invoice submission is the converted lane in `invoice-write.ts`; the payment lane keeps its fence. */
@@ -223,6 +223,7 @@ async function submit(
   if (!token || financeWriteLocked(kind))
     throw new NativeFinanceWriteError("locked");
 
+  const isCurrent = captureClinicRequestContext();
   persistLock(kind);
 
   let response: Response;
@@ -271,7 +272,9 @@ async function submit(
   }
 
   try {
+    if (!isCurrent()) throw new NativeFinanceWriteError("uncertain");
     await acknowledge(token, kind, operationKey, parsed.ackToken);
+    if (!isCurrent()) throw new NativeFinanceWriteError("uncertain");
   } catch {
     notifyLock();
     throw new NativeFinanceWriteError("uncertain");

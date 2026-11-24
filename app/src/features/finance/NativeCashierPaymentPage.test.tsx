@@ -8,6 +8,7 @@ import { LOCALE_KEY } from "../../i18n/locale-storage";
 import { server } from "../../test/msw/server";
 import { NATIVE_BOOTSTRAP, nativeSession } from "../../test/network-spy";
 import { renderWithDataRouter } from "../../test/render";
+import * as financeWrite from "../../transport/native/finance-write";
 import { clearNativeCsrfToken } from "../../transport/native/session";
 import { PaymentsPage } from "./PaymentsPage";
 
@@ -483,7 +484,7 @@ it("cancels an old balance check when another invoice is selected", async () => 
   expect(post).not.toHaveBeenCalled();
 });
 
-it.each(["invoice", "auth epoch"])("suppresses an acknowledged result from a previous %s", async (change) => {
+it("suppresses an acknowledged result from a previous invoice", async () => {
   optIn();
   list.mockResolvedValue({ rows: [thb, anotherThb], hasMore: false });
   let release!: () => void;
@@ -505,11 +506,6 @@ it.each(["invoice", "auth epoch"])("suppresses an acknowledged result from a pre
   await user.click(await selectInvoice(thb.id));
   await user.click(confirm());
   await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
-  if (change === "auth epoch") {
-    optIn({ sessionEpoch: "replacement-epoch" });
-    await user.click(screen.getByRole("button", { name: "Refresh session" }));
-    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
-  }
   await user.click(await selectInvoice(anotherThb.id));
   await act(async () => release());
   await waitFor(() => {
@@ -520,6 +516,54 @@ it.each(["invoice", "auth epoch"])("suppresses an acknowledged result from a pre
   expect(screen.queryByText(/PE-TEST-1/)).not.toBeInTheDocument();
   expect(readReceipt).not.toHaveBeenCalled();
   expect(confirm()).toBeEnabled();
+});
+
+it("retains the uncertain lock when the auth epoch changes before a dispatched payment returns", async () => {
+  optIn();
+  list.mockResolvedValue({ rows: [thb, anotherThb], hasMore: false });
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const post = vi.fn(async () => {
+    await pending;
+    return received();
+  });
+  const ack = vi.fn(() => HttpResponse.json({ message: { acknowledged: true } }));
+  const readReceipt = vi.fn(() => receipt());
+  const receive = vi.spyOn(financeWrite, "receivePayment");
+  server.use(
+    http.get(`${SALES_INVOICE}/${thb.id}`, () => detail()),
+    http.post(RECEIVE, post),
+    http.post(ACK, ack),
+    http.get(PAYMENT_ENTRY, readReceipt),
+  );
+  const user = userEvent.setup();
+  open();
+  await user.click(await selectInvoice(thb.id));
+  await user.click(confirm());
+  await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
+  const outcome = receive.mock.results[0]!.value;
+
+  optIn({ sessionEpoch: "replacement-epoch" });
+  await user.click(screen.getByRole("button", { name: "Refresh session" }));
+  await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+  expect(review().queryByText(thb.customer)).not.toBeInTheDocument();
+  expect(review().getByText("Select an invoice to review the full amount due.")).toBeVisible();
+
+  await act(async () => {
+    release();
+    await expect(outcome).rejects.toMatchObject({ code: "uncertain" });
+  });
+  await user.click(await selectInvoice(anotherThb.id));
+  expect(review().getByText(anotherThb.customer)).toBeVisible();
+  expect(review().getByRole("alert")).toHaveTextContent("The outcome is uncertain. Do not retry");
+  expect(confirm()).toBeDisabled();
+  await user.click(confirm());
+  expect(post).toHaveBeenCalledTimes(1);
+  expect(ack).not.toHaveBeenCalled();
+  expect(readReceipt).not.toHaveBeenCalled();
+  expect(localStorage.getItem(PAYMENT_LOCK)).toBe("1");
+  expect(screen.queryByText(/PE-TEST-1/)).not.toBeInTheDocument();
+  expect(review().queryByRole("link", { name: RECEIPT_NAME })).not.toBeInTheDocument();
 });
 
 it("defaults to THB, discovers eligible currencies on demand, and resets review at each currency change", async () => {

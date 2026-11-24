@@ -42,6 +42,9 @@ def capture(payload=None, **extra):
         fields.add("encounter")
     if set(payload) != fields:
         raise frappe.ValidationError(SAFE_VALIDATION)
+    photo_save.require_production_workspace(
+        frozenset({"DOC"}) if payload["slot"] == "After" else frozenset({"DOC", "REC", "ADM"})
+    )
 
     def register_notification(submitted):
         attempted = False
@@ -96,6 +99,9 @@ def capture_status(payload=None, **extra):
             raise ValueError
     except Exception:
         raise frappe.ValidationError(SAFE_VALIDATION) from None
+    photo_save.require_production_workspace(
+        frozenset({"DOC"}) if payload["slot"] == "After" else frozenset({"DOC", "REC", "ADM"})
+    )
 
     try:
         if (type(getattr(frappe.db, "transaction_writes", None)) is not int or

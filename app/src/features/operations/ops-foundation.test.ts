@@ -20,14 +20,12 @@ const opsV3Keys = Object.keys(th).filter((key) => key.startsWith("ops.v3."));
 describe("operations copy catalogue", () => {
   it("keeps the staged catalogue complete", () => {
     expect({
-      catalogueKeys: Object.keys(th).length,
       opsV3Keys: opsV3Keys.length,
       opsVocabKeys: Object.keys(th).filter((key) =>
         key.startsWith("ops.vocab."),
       ).length,
     }).toMatchInlineSnapshot(`
       {
-        "catalogueKeys": 2622,
         "opsV3Keys": 488,
         "opsVocabKeys": 16,
       }

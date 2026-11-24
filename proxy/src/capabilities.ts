@@ -56,6 +56,7 @@ export type Capability =
   | "write.payment.refund"
   | "write.admin.user"
   | "write.admin.master"
+  | "write.owner.staff"
   | "read.patient"
   | "read.appointment"
   | "read.encounter"
@@ -108,6 +109,7 @@ export const CAPABILITY_NAMES = [
   "write.payment.refund",
   "write.admin.user",
   "write.admin.master",
+  "write.owner.staff",
   "read.patient",
   "read.appointment",
   "read.encounter",

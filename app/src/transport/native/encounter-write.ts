@@ -1,4 +1,4 @@
-import { FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
+import { captureClinicRequestContext, FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
 import { nativeCsrfToken } from "./session";
 
 /** Distinct from the patient and appointment locks. */
@@ -321,6 +321,7 @@ async function writeEncounter(
   if (!token || encounterWriteLocked())
     throw new NativeEncounterWriteError("locked");
 
+  const isCurrent = captureClinicRequestContext();
   persistLock();
 
   let response: Response;
@@ -358,7 +359,9 @@ async function writeEncounter(
     throw new NativeEncounterWriteError("uncertain");
 
   try {
+    if (!isCurrent()) throw new NativeEncounterWriteError("uncertain");
     await acknowledge(token, kind, operationKey, ackToken);
+    if (!isCurrent()) throw new NativeEncounterWriteError("uncertain");
   } catch {
     notifyLock();
     throw new NativeEncounterWriteError("uncertain");

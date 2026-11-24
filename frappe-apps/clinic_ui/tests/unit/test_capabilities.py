@@ -218,6 +218,7 @@ class BootstrapCapabilityTests(unittest.TestCase):
             "write.payment.receive",
             "write.admin.user",
             "write.admin.master",
+            "write.owner.staff",
             *NEW_WRITE_NAMES,
         }
         for name in CAPABILITY_NAMES:

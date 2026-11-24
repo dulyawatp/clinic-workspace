@@ -11,17 +11,15 @@ import {
 } from "../../design/components";
 import { type AppointmentStatus, coreData } from "../../fixtures/data";
 import { recentEncountersFor } from "../../fixtures/data-clinical";
-import { opsData } from "../../fixtures/data-ops";
 import { translateClinicalText } from "../../i18n";
-import { formatDate, formatDateTime, formatTime } from "../../i18n/format";
+import { formatDateTime, formatTime } from "../../i18n/format";
 import { useLocale } from "../../i18n/LocaleProvider";
+import { DoctorHoursCard } from "./DoctorHoursCard";
 import {
   draftVisitsFor,
   followUpVisitsFor,
   patientLabel,
-  practitionerLabel,
   receivedLabsFor,
-  roomLabel,
   SAMPLE_DOCTOR_PRACTITIONER,
   SAMPLE_DOCTOR_STAFF,
   sampleDoctorName,
@@ -62,16 +60,6 @@ export function DoctorHomePage() {
   const drafts = draftVisitsFor(practitioner);
   const labs = receivedLabsFor(practitioner);
   const followUps = followUpVisitsFor(practitioner);
-  const schedules = opsData.schedules.filter(
-    (schedule) => schedule.practitioner === practitioner,
-  );
-  const hours = opsData.hours();
-  const breaks = hours.breaks.filter(
-    (row) => row.practitioner === "all" || row.practitioner === practitioner,
-  );
-  const leave = hours.leave.filter(
-    (row) => row.practitioner === "all" || row.practitioner === practitioner,
-  );
   const recent = recentEncountersFor(practitioner, 5);
   const firstLab = labs[0];
 
@@ -256,43 +244,7 @@ export function DoctorHomePage() {
           </Card>
         </div>
 
-        <Card title={t("doctor.hours")} hint={t("doctor.hoursNote")}>
-          <p className="pc-status-line">
-            {t("clinical.practitioner")}:{" "}
-            {practitionerLabel(practitioner, locale)} · {practitioner} ·{" "}
-            {hours.timezone}
-          </p>
-          {schedules.map((schedule) => (
-            <p
-              className="pc-status-line"
-              key={`${schedule.day}-${schedule.start}`}
-            >
-              {t(`day.${schedule.day}`)} · {schedule.start}–{schedule.end} ·{" "}
-              {roomLabel(schedule.room, locale)}
-            </p>
-          ))}
-          {breaks.length > 0 && (
-            <>
-              <p className="pc-field__label">{t("doctor.breaksLeave")}</p>
-              {breaks.map((row) => (
-                <p
-                  className="pc-status-line"
-                  key={`break-${row.practitioner}-${row.day}-${row.start}`}
-                >
-                  {t(`day.${row.day}`)} {row.start}–{row.end}
-                </p>
-              ))}
-            </>
-          )}
-          {leave.map((row) => (
-            <p
-              className="pc-status-line"
-              key={`leave-${row.practitioner}-${row.date}-${row.start}`}
-            >
-              {formatDate(row.date, locale)} {row.start}–{row.end}
-            </p>
-          ))}
-        </Card>
+        <DoctorHoursCard />
 
         <Card title={t("doctor.recentEncounters")}>
           {recent.length === 0 ? (

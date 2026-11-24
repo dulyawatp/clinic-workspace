@@ -1,4 +1,4 @@
-import { FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
+import { captureClinicRequestContext, FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
 import { nativeCsrfToken } from "./session";
 
 /** Lock retained for the not-yet-converted master edit lane only. */
@@ -333,6 +333,7 @@ export async function editNativeMaster(
   if (!token || adminMasterWriteLocked())
     throw new NativeAdminWriteError("locked");
 
+  const isCurrent = captureClinicRequestContext();
   persistLock(MASTER_LOCK);
 
   let response: Response;
@@ -369,7 +370,9 @@ export async function editNativeMaster(
   }
 
   try {
+    if (!isCurrent()) throw new NativeAdminWriteError("uncertain");
     await acknowledge(token, input.operation_key, parsed.ackToken);
+    if (!isCurrent()) throw new NativeAdminWriteError("uncertain");
   } catch {
     notifyLock();
     throw new NativeAdminWriteError("uncertain");

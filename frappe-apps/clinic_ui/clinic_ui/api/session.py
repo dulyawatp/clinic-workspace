@@ -6,9 +6,8 @@ its own 403 for a missing or expired session, but the client needs an explicit
 fixed ``{"code": "AUTH_EXPIRED"}`` body with HTTP 401 for anonymous/expired
 callers. Authenticated authorization denials remain framework 403s.
 
-Frappe wraps the returned mapping as ``{"message": ...}``. The method takes no
-parameter: any client-supplied argument is a framework error rather than an
-accepted input, and every response is marked no-store through the adapter.
+Frappe wraps the returned mapping as ``{"message": ...}``. The optional
+``workspace`` query selects an assigned clinic role; every response is no-store.
 """
 
 import frappe
@@ -18,5 +17,5 @@ from clinic_ui.runtime.frappe_gateway import Gateway
 
 
 @frappe.whitelist(allow_guest=True, methods=["GET"])
-def bootstrap():
-    return session_endpoint.bootstrap(Gateway())
+def bootstrap(workspace=None):
+    return session_endpoint.bootstrap(Gateway(), workspace=workspace)

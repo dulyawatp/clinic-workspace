@@ -124,6 +124,26 @@ def require_native_session() -> None:
         raise frappe.PermissionError(SAFE_DENIAL)
 
 
+def require_production_workspace(allowed_codes):
+    """Narrow browser RPCs only when the clinic production lane is configured."""
+    import os
+
+    frappe = _frappe()
+    conf = getattr(frappe, "conf", None)
+    enabled = conf.get("clinic_ui_production_read_enabled") if conf is not None else None
+    if (enabled is None or enabled is False) and "CLINIC_UI_PRODUCTION_MARKER_PATH" not in os.environ:
+        return None
+    try:
+        from clinic_ui.endpoints import production_read
+        from clinic_ui.runtime.frappe_gateway import Gateway
+    except ImportError:
+        raise frappe.PermissionError(SAFE_DENIAL) from None
+    result = production_read.authorize_if_selected(Gateway(frappe), allowed_codes)
+    if result is None:
+        raise frappe.PermissionError(SAFE_DENIAL)
+    return result[2]
+
+
 def require_current_clinician():
     from clinic_photos.access import frappe_context
     from clinic_photos.access.policy import NON_CLINICAL_SESSION_IDENTITIES
@@ -206,6 +226,7 @@ def save(payload: dict | str) -> dict:
     frappe = _frappe()
     require_post()
     require_native_session()
+    require_production_workspace(frozenset({"DOC", "NUR"}))
     actor = require_current_clinician()
     if not publication_enabled():
         raise frappe.PermissionError(SAFE_DISABLED)
@@ -246,6 +267,7 @@ def status(operation_id: str) -> dict:
     frappe = _frappe()
     require_post()
     require_native_session()
+    require_production_workspace(frozenset({"DOC", "NUR"}))
     actor = require_current_clinician()
     if not publication_enabled():
         raise frappe.PermissionError(SAFE_DISABLED)

@@ -1,4 +1,4 @@
-import { FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
+import { captureClinicRequestContext, FRAPPE_CSRF_HEADER, frappeRequest } from "./frappe";
 import { nativeCsrfToken } from "./session";
 
 export type StockWriteKind =
@@ -320,6 +320,7 @@ async function submit(
   if (!token || stockWriteLocked(kind))
     throw new NativeStockWriteError("locked");
 
+  const isCurrent = captureClinicRequestContext();
   persistLock(kind);
 
   let response: Response;
@@ -352,7 +353,9 @@ async function submit(
   }
 
   try {
+    if (!isCurrent()) throw new NativeStockWriteError("uncertain");
     await acknowledge(token, kind, operationKey, parsed.ackToken);
+    if (!isCurrent()) throw new NativeStockWriteError("uncertain");
   } catch {
     notifyLock();
     throw new NativeStockWriteError("uncertain");

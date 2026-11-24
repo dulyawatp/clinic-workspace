@@ -8,6 +8,8 @@ import {
   isRoleCode,
   type RoleCode,
 } from "../../domain/capability";
+import type { SessionDTO } from "../../domain/session";
+import { canViewOwnerStaff } from "../owner-staff/access";
 
 /**
  * Nav visibility for a surface is read from the same interim matrix the proxy
@@ -349,7 +351,6 @@ export const NAV_MANIFEST: readonly NavItem[] = [
     surface: "MGR-02",
     owner: "05",
   },
-
   {
     id: "admin",
     labelKey: "nav.setup",
@@ -397,6 +398,15 @@ export const NAV_MANIFEST: readonly NavItem[] = [
     owner: "05",
   },
 ];
+
+/** Native extension, separate from the designed fixture destinations. */
+const OWNER_STAFF_NAV: NavItem = {
+  id: "owner-staff",
+  labelKey: "nav.staff",
+  routeKey: "ownerStaff",
+  icon: "shield",
+  owner: "05",
+};
 
 /**
  * Designed navigation order per role. The manifest is one list; each role reads
@@ -450,6 +460,7 @@ const ROLE_NAV_ORDER: Readonly<Record<RoleCode, readonly string[]>> = {
     "home",
     "management",
     "management-reports",
+    "owner-staff",
     "invoices",
     "payments",
     "pharmacy-batches",
@@ -488,9 +499,13 @@ function navRank(roleList: readonly RoleCode[], id: string): number {
 export function navFor(
   roles: readonly RoleCode[],
   caps: CapabilityMap,
+  mode?: SessionDTO["mode"],
 ): NavItem[] {
   const roleList = Array.isArray(roles) ? roles : [];
-  return NAV_MANIFEST.filter((item) => {
+  const destinations = canViewOwnerStaff(mode, roleList, caps)
+    ? [...NAV_MANIFEST, OWNER_STAFF_NAV]
+    : NAV_MANIFEST;
+  return destinations.filter((item) => {
     if (item.roles && !item.roles.some((role) => roleList.includes(role)))
       return false;
     const state = item.requiredCapability

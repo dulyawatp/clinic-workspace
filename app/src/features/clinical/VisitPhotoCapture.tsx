@@ -1,8 +1,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useSession } from "../../app/SessionProvider";
+import { nativeWriteMarkerOwner, useSession } from "../../app/SessionProvider";
 import { Button } from "../../design/components";
+import { captureClinicRequestContext } from "../../transport/native/frappe";
 import {
   captureVisitPhoto, changeVisitPhotoConsent, encodeVisitPhoto, readVisitPhotoOptions, readVisitPhotoStatus,
   type readVisitPhotoPair, type VisitPhotoFraming, type VisitPhotoSlot, type VisitPhotoSlotStatus, type VisitPhotoTarget,
@@ -25,17 +26,26 @@ type Activity = {
 const initial: Activity = { revision: 0 };
 
 export function useVisitPhotoActivity(appointment: string) {
-  const { authGeneration } = useSession();
+  const { authGeneration, session } = useSession();
+  const owner = nativeWriteMarkerOwner(session);
   const client = useQueryClient();
-  const queryKey = ["visit-photo-activity", authGeneration, appointment] as const;
+  const queryKey = ["visit-photo-activity", owner ?? authGeneration, appointment] as const;
   // Session-scoped memory only: no files, consent evidence or image bytes here.
   // Keep the guard across route/disclosure remounts until session cache is cleared.
-  const { data } = useQuery({
-    queryKey, initialData: initial, enabled: false, gcTime: Infinity, queryFn: () => initial,
-  });
   function update(fn: (previous: Activity) => Activity) {
     client.setQueryData<Activity>(queryKey, (previous) => previous && fn(previous));
   }
+  const { data } = useQuery({
+    queryKey, initialData: initial, enabled: false, gcTime: Infinity, queryFn: () => initial,
+    ...(owner ? { meta: {
+      nativeWriteMarker: owner,
+      resetNativeWorkspaceState: () => update((activity) => ({
+        revision: 0,
+        ...(activity.upload?.key ? { upload: { ...activity.upload, state: "unknown" } } : {}),
+        ...(activity.consent || activity.notice === "consentUnknown" ? { notice: "consentUnknown" } : {}),
+      })),
+    } } : {}),
+  });
   return { data, update };
 }
 
@@ -74,6 +84,7 @@ export function VisitPhotoCapture({ target, activity, pair, intakeBefore }: {
   const upload = data.upload;
 
   async function submitConsent(evidence: string | null) {
+    const isCurrent = captureClinicRequestContext();
     const marker = Symbol();
     let started = false;
     update((current) => {
@@ -83,6 +94,7 @@ export function VisitPhotoCapture({ target, activity, pair, intakeBefore }: {
     });
     if (!started) return;
     const ok = await changeVisitPhotoConsent(target.appointment, evidence).catch(() => false);
+    if (!isCurrent()) return;
     update((current) => current.consent !== marker ? current : {
       ...current, consent: undefined, revision: current.revision + Number(ok),
       notice: ok ? (evidence === null ? "consentRevoked" : "consentRecorded") : "consentUnknown",
@@ -90,6 +102,7 @@ export function VisitPhotoCapture({ target, activity, pair, intakeBefore }: {
   }
 
   async function submitPhoto(slot: VisitPhotoSlot, file: File, framing: VisitPhotoFraming) {
+    const isCurrent = captureClinicRequestContext();
     const marker = Symbol();
     let started = false;
     update((current) => {
@@ -99,6 +112,7 @@ export function VisitPhotoCapture({ target, activity, pair, intakeBefore }: {
     });
     if (!started) return;
     const image_base64 = await encodeVisitPhoto(file).catch(() => null);
+    if (!isCurrent()) return;
     let key: string | undefined;
     update((current) => {
       if (current.upload?.marker !== marker) return current; // Auth changed during encoding.
@@ -118,11 +132,13 @@ export function VisitPhotoCapture({ target, activity, pair, intakeBefore }: {
       ...(slot === "After" && target.encounter ? { encounter: target.encounter } : {}),
       ...framing, slot, request_key: key, image_base64,
     }).catch(() => "unknown" as const);
+    if (!isCurrent()) return;
     update((current) => current.upload?.marker === marker
       ? { ...current, upload: { ...current.upload, state } } : current);
   }
 
   async function checkUpload() {
+    const isCurrent = captureClinicRequestContext();
     const key = upload?.key;
     if (!upload || !key) return;
     let started = false;
@@ -136,6 +152,7 @@ export function VisitPhotoCapture({ target, activity, pair, intakeBefore }: {
     const state = await readVisitPhotoStatus({
       appointment: target.appointment, slot: upload.slot, request_key: key,
     }).catch(() => "unknown" as const);
+    if (!isCurrent()) return;
     update((current) => {
       if (current.upload?.marker !== upload.marker) return current;
       // A not-found read can race a still-committing request; only a verified

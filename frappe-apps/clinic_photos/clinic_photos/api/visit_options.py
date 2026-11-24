@@ -21,6 +21,7 @@ def capture_options(payload=None, **extra):
     frappe = photo_save._frappe()
     photo_save.require_post()
     photo_save.require_native_session()
+    workspace = photo_save.require_production_workspace(frozenset({"DOC", "REC", "ADM"}))
     user = getattr(getattr(frappe, "session", None), "user", None)
     if (not isinstance(user, str) or not user or user == "Guest" or
         not enabled_for_site(getattr(frappe.local, "site", None), getattr(frappe, "conf", None))):
@@ -97,7 +98,7 @@ def capture_options(payload=None, **extra):
 
     # After first preserves the native actor -> encounter -> visit lock order.
     after = False
-    if active and encounter and before_slot and not after_slot:
+    if (workspace is None or workspace == "DOC") and active and encounter and before_slot and not after_slot:
         try:
             projection = _read_pair(appointment.name)
             after = bool(projection["appointment"] == appointment.name and

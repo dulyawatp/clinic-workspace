@@ -398,6 +398,153 @@ class LinkedNoteMismatch(LinkedEncounterError):
 class Gateway:
     """Adapter used by the whitelisted entry points."""
 
+    def owner_role_update(self, doc, choices, requested, before):
+        for row in list(doc.roles):
+            if row.role in choices and row.role not in requested:
+                doc.remove(row)
+        for role in sorted(requested - before):
+            doc.append("roles", {"role": role})
+        doc.save()
+
+    def owner_doctor_create_draft(self, values, name):
+        doc = self.frappe.get_doc(values)
+        doc.insert(set_name=name)
+        return doc
+
+    def owner_doctor_stage_schedule(self, practitioner, unit, slots):
+        from uuid import uuid4
+
+        schedule = self.frappe.new_doc("Practitioner Schedule")
+        schedule.schedule_name = "Clinic doctor hours " + uuid4().hex
+        schedule.disabled = 1
+        schedule.allow_video_conferencing = 0
+        for slot in slots:
+            schedule.append("time_slots", dict(slot))
+        schedule.insert()
+        practitioner.append("practitioner_schedules", {
+            "schedule": schedule.name, "service_unit": unit.name,
+        })
+        practitioner.save()
+        return schedule
+
+    def owner_doctor_finish_native_user_supported(self):
+        import hashlib
+        import inspect
+        from frappe.core.doctype.user.user import User
+        from frappe.model.document import Document, get_controller
+
+        for cls, digest in (
+            (User, "9b8cef481ac0508fcc14fc57fd7d30b2ebc717e2ad631ed6da668ba07b02dd9b"),
+            (Document, "4c1bf95413517c7deed5ae2edd24a38cadf0e21869e0710c80ad62aaada459b3"),
+        ):
+            with open(inspect.getfile(cls), "rb") as source:
+                if hashlib.sha256(source.read()).hexdigest() != digest:
+                    return False
+        return get_controller("User") is User
+
+    def owner_doctor_finish_email_valid(self, email):
+        from frappe.utils import validate_email_address
+
+        return validate_email_address(email) == email
+
+    def owner_doctor_finish_insert_user(self, user):
+        user.insert()
+
+    def owner_doctor_finish_link(self, practitioner, email, schedule, unit):
+        practitioner.append("practitioner_schedules", {"schedule": schedule, "service_unit": unit})
+        practitioner.user_id = email
+        practitioner.status = "Active"
+        practitioner.save()
+
+    def owner_doctor_finish_publish(self, practitioner, email, slots):
+        from uuid import uuid4
+
+        published = self.frappe.new_doc("Practitioner Schedule")
+        published.schedule_name = "Clinic doctor hours " + uuid4().hex
+        published.disabled = 0
+        published.allow_video_conferencing = 0
+        for slot in slots:
+            published.append("time_slots", dict(slot))
+        published.insert()
+        practitioner.practitioner_schedules[0].schedule = published.name
+        practitioner.user_id = email
+        practitioner.status = "Active"
+        practitioner.save()
+        return published
+
+    def owner_doctor_invitation_native(self):
+        import hashlib
+        import inspect
+        from frappe.core.doctype.communication.communication import Communication
+        from frappe.core.doctype.user.user import User
+        from frappe.email import sendmail
+        from frappe.email.doctype.email_queue.email_queue import EmailQueue
+        from frappe.model.document import Document, get_controller
+
+        for obj, digest in (
+            (User, "9b8cef481ac0508fcc14fc57fd7d30b2ebc717e2ad631ed6da668ba07b02dd9b"),
+            (Document, "4c1bf95413517c7deed5ae2edd24a38cadf0e21869e0710c80ad62aaada459b3"),
+            (sendmail, "8d0ba0009feddfe1ab2abe243e4b01fa486aacd144048643a2123b265f9c0c90"),
+            (EmailQueue, "e2aee51e809d452db4e22d23f4155eed333f916c815ba375c5a8282b7c3cfc11"),
+            (Communication, "bd32c4c9ff0e54a3e2eb997cbbaff9eb1e3e2b5faa435d868079ba27b8922a81"),
+        ):
+            with open(inspect.getfile(obj), "rb") as source:
+                if hashlib.sha256(source.read()).hexdigest() != digest:
+                    raise ValueError("Unsupported native implementation")
+        if (self.frappe.sendmail is not sendmail or get_controller("User") is not User
+                or get_controller("Communication") is not Communication
+                or get_controller("Email Queue") is not EmailQueue):
+            raise ValueError("Unsupported native controller")
+
+    def owner_doctor_invitation_retry(self, queue_id):
+        from frappe.email.doctype.email_queue.email_queue import retry_sending
+
+        retry_sending([queue_id])
+
+    def owner_doctor_invitation_enqueue(self, marker, marker_name, user):
+        from html import escape
+
+        marker.insert(set_name=marker_name)
+        marker.check_permission("read")
+        link = user._reset_password(send_email=False)
+        return self.frappe.sendmail(
+            recipients=[user.email], subject="Set up your clinic account",
+            message='<p>Set up your account: <a href="%s">Set password</a></p>' % escape(link, quote=True),
+            delayed=True, now=False, reference_doctype="User", reference_name=user.name,
+            communication=marker.name, add_unsubscribe_link=0, redact_message_after_send=True,
+        )
+
+    def owner_deployment_insert_role(self, role_name):
+        self.frappe.get_doc({
+            "doctype": "Role", "role_name": role_name, "is_custom": 1, "desk_access": 0,
+        }).insert()
+
+    def owner_deployment_insert_permission(self, practitioner, role_name, checks):
+        self.frappe.get_doc({
+            "doctype": "Custom DocPerm", "parent": practitioner,
+            "role": role_name, "permlevel": 0, **checks,
+        }).insert()
+
+    def owner_deployment_save_roles(self, owner, roles):
+        for role in roles:
+            owner.append("roles", {"role": role})
+        owner.save()
+
+    def owner_deployment_copy_permissions(self, doctype):
+        from frappe.permissions import copy_perms
+
+        copy_perms(doctype)
+
+    def owner_deployment_validate_permissions(self, doctype):
+        from frappe.core.doctype.doctype.doctype import validate_permissions
+
+        validate_permissions(self.frappe.get_meta(doctype))
+
+    def owner_deployment_clear_permissions_cache(self, doctype):
+        from frappe.core.doctype.doctype.doctype import clear_permissions_cache
+
+        clear_permissions_cache(doctype)
+
     def __init__(self, frappe_module=None):
         self._frappe = frappe_module
         self._site_config = None
@@ -1587,7 +1734,7 @@ class Gateway:
         except Exception:
             return True
 
-    def _fields_readable(self, meta, fields):
+    def _fields_readable(self, meta, fields, parenttype=None):
         """True when every named DocField is readable for the current user.
 
         Mirrors the verified v16 API: ``get_permlevel_access("read")`` for the
@@ -1597,10 +1744,17 @@ class Gateway:
 
         try:
             user = self.frappe.session.user
-            accessible = set(meta.get_permlevel_access("read", user=user))
+            if parenttype is None:
+                accessible = set(meta.get_permlevel_access("read", user=user))
+                masked_fields = meta.get_masked_fields()
+            else:
+                accessible = set(
+                    meta.get_permlevel_access("read", parenttype=parenttype, user=user)
+                )
+                masked_fields = meta.get_masked_fields(parenttype=parenttype)
             masked = {
                 getattr(masked, "fieldname", None)
-                for masked in (meta.get_masked_fields() or ())
+                for masked in (masked_fields or ())
             }
             for field in fields:
                 if field in masked:
@@ -9243,6 +9397,314 @@ class Gateway:
             raise patient_write.StoreUnavailable() from exc
         except write_fence.FenceError as exc:
             raise patient_write.WriteUncertain() from exc
+
+    def owner_role_choices(self, role_map, create=False):
+        """Return explicitly approved staff roles, or None on any drift."""
+        try:
+            prefix = "clinic_ui_owner_staff_create" if create else "clinic_ui_owner_role_edit"
+            if self.setting(prefix + "_enabled") is not True:
+                return None
+            if self.setting(prefix + "_site") != self.site:
+                return None
+            if create and self.setting("clinic_ui_owner_staff_create_hooks_reviewed_site") != self.site:
+                return None
+            mapping = self.setting("clinic_ui_owner_assignable_roles")
+            if not isinstance(mapping, dict) or not mapping or not set(mapping) <= {"REC", "CAS"}:
+                return None
+            names = []
+            for code, roles in mapping.items():
+                if not isinstance(roles, list) or not roles:
+                    return None
+                for role in roles:
+                    if (
+                        not isinstance(role, str) or not is_valid_text(role, 140)
+                        or role != role.strip()
+                        or role not in role_map.get(code, ())
+                        or (create and any(role in roles for other, roles in role_map.items() if other != code))
+                        or role in names
+                        or role.casefold() in ("all", "guest", "desk user", "healthcare administrator")
+                        or any(word in role.casefold() for word in
+                               ("admin", "manager", "system"))
+                    ):
+                        return None
+                    role_doc = self.frappe.get_doc("Role", role)
+                    role_doc.check_permission("read")
+                    if not self._fields_readable(self.frappe.get_meta("Role"), ("disabled", "desk_access")):
+                        return None
+                    if getattr(role_doc, "disabled", None) != 0 or getattr(role_doc, "desk_access", None) != 1:
+                        return None
+                    for doctype in ("DocPerm", "Custom DocPerm"):
+                        targets = ("User", "Role", "Role Profile", "User Permission",
+                                   "DocPerm", "Custom DocPerm", "Server Script")
+                        if create:
+                            targets += ("System Settings", "Customize Form", "Property Setter",
+                                        "Custom Field", "Client Script", "Web Form")
+                        for target in targets:
+                            for permission in ("write", "create", "delete", "share", "submit", "cancel", "amend"):
+                                if self.frappe.db.exists(
+                                    doctype,
+                                    {"role": role, "parent": target, permission: 1},
+                                ):
+                                    return None
+                    names.append(role)
+            return tuple(sorted(names))
+        except Exception:
+            return None
+
+    def owner_staff_create_authorized(self, actor):
+        """Require native create/read authority and fields used by readback."""
+        try:
+            return (
+                self.frappe.has_permission("User", ptype="create", user=actor)
+                and self.frappe.has_permission("User", ptype="read", user=actor)
+                and self._fields_readable(self.frappe.get_meta("User"),
+                                          ("email", "roles", "enabled", "user_type"))
+                and self._fields_readable(self.frappe.get_meta("Has Role"),
+                                          ("role",), parenttype="User")
+            )
+        except Exception:
+            return False
+
+    def owner_staff_create(self, body, actor):
+        """Create only against the reviewed stock native User insertion path."""
+        import hashlib
+        import inspect
+        from frappe.core.doctype.user.user import User
+        from frappe.model.document import Document, get_controller
+        from frappe.utils import validate_email_address
+
+        email = body["email"].strip().lower()
+        if (len(email) > 140 or email.count("@") != 1 or "," in email
+            or validate_email_address(email) != email):
+            return self.respond_write(422, {"code": "VALIDATION"})
+        try:
+            expected = (
+                (User, "9b8cef481ac0508fcc14fc57fd7d30b2ebc717e2ad631ed6da668ba07b02dd9b"),
+                (Document, "4c1bf95413517c7deed5ae2edd24a38cadf0e21869e0710c80ad62aaada459b3"),
+            )
+            for cls, digest in expected:
+                with open(inspect.getfile(cls), "rb") as source:
+                    if hashlib.sha256(source.read()).hexdigest() != digest:
+                        self.deny()
+            if get_controller("User") is not User:
+                self.deny()
+            doc = self.frappe.get_doc({
+                "doctype": "User", "email": email,
+                "first_name": body["firstName"].strip(),
+                "last_name": body["lastName"].strip(),
+                "enabled": 1, "user_type": "System User", "send_welcome_email": 0,
+                "roles": [{"role": role} for role in sorted(body["roles"])],
+            })
+            doc.check_permission("create")
+            for meta, fields, parent in (
+                (self.frappe.get_meta("User"),
+                 ("email", "first_name", "last_name", "enabled", "user_type", "send_welcome_email", "roles"), None),
+                (self.frappe.get_meta("Has Role"), ("role",), "User"),
+            ):
+                levels = meta.get_permlevel_access("write", parenttype=parent, user=actor)
+                for field in fields:
+                    definition = meta.get_field(field)
+                    if definition is None or definition.permlevel not in levels:
+                        self.deny()
+            if self.frappe.db.exists("User", email):
+                return self.respond_write(409, {"code": "EMAIL_IN_USE"})
+            if (
+                self.frappe.db.exists("Notification Settings", email)
+                or self.frappe.db.sql("select 1 from `tabSessions` where user = %s limit 1", (email,))
+                or self.frappe.db.sql(
+                    "select 1 from `__Auth` where doctype = 'User' and name = %s limit 1", (email,)
+                )
+            ):
+                self.deny()
+            # Add staff does not adopt existing Contact identities or links.
+            if (
+                self.frappe.db.exists("Contact", {"email_id": email})
+                or self.frappe.db.exists("Contact", {"user": email})
+                or self.frappe.db.exists("Contact Email", {"email_id": email})
+            ):
+                return self.respond_write(422, {"code": "VALIDATION"})
+        except Exception as exc:
+            if self.is_native_permission_denial(exc):
+                raise
+            self.deny()
+        try:
+            try:
+                doc.insert()
+            except self.frappe.DuplicateEntryError as exc:
+                self.rollback()
+                if exc.args[:2] == ("User", email):
+                    return self.respond_write(409, {"code": "EMAIL_IN_USE"})
+                return self.respond_write(409, {"code": "WRITE_UNCERTAIN"})
+            before_commit, before_roles = self.owner_role_readback(email)
+            if (before_commit.enabled != 1 or before_commit.email != email
+                or before_commit.user_type != "System User"
+                or not set(body["roles"]).issubset(before_roles)):
+                raise ValueError("unexpected native User state")
+            self.commit()
+            after, roles = self.owner_role_readback(email)
+            if (after.enabled != 1 or after.email != email or after.user_type != "System User"
+                or not set(body["roles"]).issubset(roles)):
+                raise ValueError("unexpected native User state")
+            self.strip_message_channels()
+            return {"userId": after.name, "email": after.email, "enabled": True, "roles": sorted(set(roles))}
+        except Exception:
+            self.rollback()
+            return self.respond_write(409, {"code": "WRITE_UNCERTAIN"})
+
+    def owner_role_readback(self, user):
+        meta = self.frappe.get_meta("User")
+        child_meta = self.frappe.get_meta("Has Role")
+        if not self._fields_readable(meta, ("roles", "enabled", "user_type")) or not self._fields_readable(
+            child_meta, ("role",), parenttype="User"
+        ):
+            raise ValueError("field access denied")
+        doc = self.frappe.get_doc("User", user)
+        doc.check_permission("read")
+        roles = [row.role for row in doc.roles]
+        if doc.name != user or any(not isinstance(role, str) or not role for role in roles):
+            raise ValueError("invalid role readback")
+        return doc, roles
+
+    def owner_role_target(self, user, actor, role_map, lock=False):
+        """Resolve eligible User under native read and write authority."""
+        if user == actor or user in ("Administrator", "Guest"):
+            raise ValueError("protected")
+        meta = self.frappe.get_meta("User")
+        child_meta = self.frappe.get_meta("Has Role")
+        if not self._fields_readable(
+            meta, ("roles", "enabled", "user_type", "role_profile_name", "role_profiles",
+                   "social_logins", "user_emails", "user_image", "banner_image")
+        ) or not self._fields_readable(child_meta, ("role",), parenttype="User") or not self._fields_readable(
+            self.frappe.get_meta("User Social Login"), ("provider",), parenttype="User"
+        ):
+            raise ValueError("field read denied")
+        for target_meta, field, parent in ((meta, "roles", None), (child_meta, "role", "User")):
+            levels = target_meta.get_permlevel_access("write", parenttype=parent, user=actor)
+            definition = target_meta.get_field(field)
+            # User.roles is read-only in the Desk form because Desk renders a
+            # dedicated RoleEditor. Its native write permlevel still applies.
+            if (
+                definition is None
+                or definition.permlevel not in levels
+                or (parent is not None and definition.read_only)
+            ):
+                raise ValueError("field write denied")
+        doc = self.frappe.get_doc("User", user, for_update=True) if lock else self.frappe.get_doc("User", user)
+        doc.check_permission("read")
+        doc.check_permission("write")
+        roles = [row.role for row in doc.roles]
+        if (
+            doc.name != user or doc.enabled != 1 or doc.user_type != "System User"
+            or doc.role_profile_name or doc.role_profiles
+            # Frappe inserts its own provider for regular users. Only linked
+            # external providers make this account ineligible for this editor.
+            or any(row.provider != "frappe" for row in doc.social_logins or ())
+            or doc.user_emails or doc.user_image or doc.banner_image
+            or any(not isinstance(role, str) or not role for role in roles)
+            or len(set(roles)) != len(roles)
+            or any(any(word in role.casefold() for word in ("admin", "manager")) for role in roles)
+            or any(set(roles).intersection(role_map.get(code, ())) for code in ("MGR", "ADM"))
+        ):
+            raise ValueError("protected user")
+        if not self.owner_roles_keep_desk(roles):
+            raise ValueError("unsupported role state")
+        return doc, roles
+
+    def owner_roles_keep_desk(self, roles):
+        try:
+            if not self._fields_readable(self.frappe.get_meta("Role"), ("disabled", "desk_access")):
+                return False
+            desk = False
+            for role in roles:
+                doc = self.frappe.get_doc("Role", role)
+                doc.check_permission("read")
+                if doc.disabled:
+                    return False
+                desk = desk or bool(doc.desk_access)
+            return desk
+        except Exception:
+            return False
+
+    def owner_staff_list(self, start, page_size, role_map, actor):
+        """List native Users under current permissions; never return raw documents."""
+        try:
+            meta = self.frappe.get_meta("User")
+            role_meta = self.frappe.get_meta("Has Role")
+            if not self._fields_readable(
+                meta, ("full_name", "enabled", "user_type", "role_profile_name", "roles")
+            ) or not self._fields_readable(role_meta, ("role",), parenttype="User"):
+                return None
+            names = self.frappe.get_list(
+                "User",
+                fields=["name"],
+                order_by="name asc",
+                limit_start=start,
+                limit_page_length=page_size + 1,
+            )
+            if not isinstance(names, (tuple, list)) or len(names) > page_size + 1:
+                return None
+            has_more = len(names) > page_size
+            available_choices = self.owner_role_choices(role_map)
+            rows = []
+            for entry in names[:page_size]:
+                name = entry.get("name")
+                if not isinstance(name, str) or not name or len(name) > 140:
+                    return None
+                doc = self.frappe.get_doc("User", name)
+                doc.check_permission("read")
+                if doc.name != name:
+                    return None
+                native_roles = []
+                for child in doc.roles or ():
+                    role = getattr(child, "role", None)
+                    if not isinstance(role, str) or not role:
+                        return None
+                    native_roles.append(role)
+                matched_codes = sorted(
+                    code for code, mapped in role_map.items()
+                    if set(native_roles).intersection(mapped)
+                )
+                if name == actor:
+                    reason = "self"
+                elif name in ("Administrator", "Guest"):
+                    reason = "protected_identity"
+                elif "System Manager" in native_roles or any(
+                    code in ("MGR", "ADM") for code in matched_codes
+                ):
+                    reason = "privileged_account"
+                elif getattr(doc, "role_profile_name", None):
+                    reason = "role_profile"
+                elif getattr(doc, "user_type", None) != "System User":
+                    reason = "user_type"
+                else:
+                    reason = "staff_controls_unavailable"
+                    try:
+                        if available_choices is not None:
+                            self.owner_role_target(name, actor, role_map)
+                            reason = None
+                    except Exception:
+                        pass
+                display = getattr(doc, "full_name", None) or name
+                if not is_valid_text(display, 140):
+                    return None
+                rows.append({
+                    "userId": name,
+                    "displayName": display,
+                    "enabled": bool(doc.enabled),
+                    "roles": matched_codes,
+                    "editable": reason is None,
+                    "protectedReason": reason,
+                    "onboardingStatus": None,
+                    "version": str(doc.modified),
+                })
+            return {
+                "staff": rows,
+                "start": start,
+                "pageSize": page_size,
+                "hasMore": has_more,
+            }
+        except Exception:
+            return None
 
     @contextmanager
     def finance_write_fence(self, actor, kind, operation_key, payload_digest):

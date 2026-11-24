@@ -292,7 +292,7 @@ function PaymentReview({
   const disabled = !canSettle || !invoice || invalidBalance || stopped || (mode === "card" && !reference.trim());
 
   // Invalidate the review synchronously when the selected invoice or auth
-  // view unmounts. A dispatched write still finishes its transport ACK.
+  // view unmounts. A dispatched write continues under its captured auth context.
   useLayoutEffect(() => () => attempt.current?.abort(), []);
 
   async function confirm() {

@@ -50,6 +50,7 @@ CAPABILITY_NAMES = (
     "write.payment.refund",
     "write.admin.user",
     "write.admin.master",
+    "write.owner.staff",
     "read.patient",
     "read.appointment",
     "read.encounter",
@@ -111,8 +112,16 @@ DEPLOYMENT_GATED_WRITE_NAMES = frozenset(
         "write.admin.master",
     }
 )
+# The Owner staff surface is production-only: it is advertised by the
+# production bootstrap after the enrollment/workspace gate resolves ``MGR`` and
+# the caller currently holds native ``System Manager``. It has no site-config
+# flag and no legacy-lane promotion.
+OWNER_STAFF_WRITE_NAMES = frozenset({"write.owner.staff"})
 ENABLEABLE_NAMES = (
-    PATIENT_WRITE_NAMES | APPOINTMENT_WRITE_NAMES | DEPLOYMENT_GATED_WRITE_NAMES
+    PATIENT_WRITE_NAMES
+    | APPOINTMENT_WRITE_NAMES
+    | DEPLOYMENT_GATED_WRITE_NAMES
+    | OWNER_STAFF_WRITE_NAMES
 )
 
 
@@ -145,6 +154,7 @@ def bootstrap_capabilities(
     write_payment_receive=False,
     write_admin_user=False,
     write_admin_master=False,
+    write_owner_staff=False,
 ):
     """Return the default read-only map with reviewed writes enabled.
 
@@ -219,6 +229,11 @@ def bootstrap_capabilities(
         capabilities["write.admin.user"] = ENABLED_STATE
     if write_admin_master is True:
         capabilities["write.admin.master"] = ENABLED_STATE
+    # The Owner staff surface is advertised only by the production bootstrap,
+    # after the enrollment/workspace gate and the fresh native System Manager
+    # check pass. The legacy lane never passes this flag.
+    if write_owner_staff is True:
+        capabilities["write.owner.staff"] = ENABLED_STATE
     return capabilities
 
 
@@ -227,8 +242,9 @@ def validate_capabilities(capabilities):
 
     Exactly the contract names are required, in contract order, and every state
     must be a bootstrap state. ``enabled`` is accepted only for the reviewed
-    patient/appointment writes and the deployment-gated wave writes. Anything
-    else fails closed at the DTO boundary.
+    patient/appointment writes, the deployment-gated wave writes and the
+    production-only Owner staff write. Anything else fails closed at the DTO
+    boundary.
     """
 
     if not isinstance(capabilities, dict):

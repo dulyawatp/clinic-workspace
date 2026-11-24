@@ -1,3 +1,4 @@
+import { captureClinicRequestContext, frappeRequest } from "./frappe";
 import { nativeCsrfToken } from "./session";
 
 export type NativeEncounterOption = { id: string; label: string };
@@ -65,9 +66,10 @@ export async function createNativeEncounterDraft(input: { userId: string; patien
   if (!Object.values(input).every(text)) return fail("unsupported");
   const token = nativeCsrfToken();
   if (!token) return fail("denied");
+  const current = captureClinicRequestContext();
   let response: Response;
   try {
-    response = await fetch("/api/method/clinic_ui.api.encounters.create_draft", {
+    response = await frappeRequest("clinic_ui.api.encounters.create_draft", {
       ...options, method: "POST", headers: { "Content-Type": "application/json", "X-Frappe-CSRF-Token": token },
       body: JSON.stringify({ patient: input.patientId, practitioner: input.practitionerId, appointment_type: input.appointmentTypeId }),
     });
@@ -80,7 +82,7 @@ export async function createNativeEncounterDraft(input: { userId: string; patien
       if (!record(body) || !record(body.message) || !text(body.message.id) || body.message.docstatus !== 0) return fail("unconfirmed");
       const id = body.message.id;
       const result = await read(`/api/resource/Patient%20Encounter/${encodeURIComponent(id)}`);
-      if (!record(result) || !record(result.data)) return fail("unconfirmed");
+       if (!current() || !record(result) || !record(result.data)) return fail("unconfirmed");
       const doc = result.data;
       if (doc.name !== id || doc.patient !== input.patientId || doc.practitioner !== input.practitionerId ||
           doc.appointment_type !== input.appointmentTypeId || doc.docstatus !== 0 ||
