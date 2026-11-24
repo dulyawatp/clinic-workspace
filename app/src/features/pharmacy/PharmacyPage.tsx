@@ -92,13 +92,14 @@ export function PharmacyPage() {
   const { dateTime } = useOpsFormat();
   const [warehouse, setWarehouse] = useState("all");
   const { status, session, authGeneration, refresh } = useSession();
-  const allowed =
+  const canViewPharmacy =
     status === "authenticated" &&
-    session?.mode === "live" &&
+    session !== null &&
     session.user.roles.includes("PHA");
+  const liveStockEnabled = canViewPharmacy && session.mode === "live";
   const query = useQuery<z.infer<typeof stockResponse>["items"], AppError>({
     queryKey: ["live-stock", session?.mode, authGeneration],
-    enabled: allowed,
+    enabled: liveStockEnabled,
     queryFn: ({ signal }) => fetchStock(signal),
     retry: false,
   });
@@ -118,12 +119,12 @@ export function PharmacyPage() {
     <>
       <PageHeader title={t("pharmacy.title")} />
       <div className="shell-page-body">
-        {!allowed ? (
+        {!canViewPharmacy ? (
           <StatePanel
             kind="permission-denied"
             title={t("state.denied.title")}
           />
-        ) : (
+        ) : liveStockEnabled ? (
           <section className="pharmacy-card" aria-labelledby="pharmacy-heading">
             <div className="pharmacy-intro">
               <span className="pharmacy-eyebrow">{t("pharmacy.eyebrow")}</span>
@@ -192,9 +193,9 @@ export function PharmacyPage() {
               </div>
             )}
           </section>
-        )}
+        ) : null}
 
-        {allowed ? (
+        {canViewPharmacy ? (
           <>
             <SampleBanner
               label={t("app.demoTag")}

@@ -139,6 +139,21 @@ function renderShell({
 }
 
 describe("shell navigation contract", () => {
+  it("gates Owner staff navigation to eligible single-role native live sessions", () => {
+    vi.stubEnv("VITE_CLINIC_NATIVE", "1");
+    const enabled: CapabilityMap = { "write.owner.staff": "enabled" };
+    const hasStaff = (roles: RoleCode[], caps: CapabilityMap, mode: "live" | "fixture") =>
+      navFor(roles, caps, mode).some((item) => item.id === "owner-staff");
+    expect(hasStaff(["MGR"], enabled, "live")).toBe(true);
+    expect(hasStaff(["MGR"], enabled, "fixture")).toBe(false);
+    expect(hasStaff(["MGR"], {}, "live")).toBe(false);
+    expect(hasStaff(["MGR"], { "write.owner.staff": "denied" }, "live")).toBe(false);
+    expect(hasStaff(["ADM"], enabled, "live")).toBe(false);
+    expect(hasStaff(["MGR", "ADM"], enabled, "live")).toBe(false);
+    vi.stubEnv("VITE_CLINIC_NATIVE", "0");
+    expect(hasStaff(["MGR"], enabled, "live")).toBe(false);
+    vi.unstubAllEnvs();
+  });
   it("resolves only canonical route keys", () => {
     expect(NAV_MANIFEST.map((item) => item.id)).toEqual([
       "home",

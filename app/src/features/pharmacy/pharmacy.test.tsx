@@ -1,7 +1,8 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import { RequireSession } from "../../app/guards";
 import { ROUTES } from "../../app/routes";
 import { useSession } from "../../app/SessionProvider";
 import { useLocale } from "../../i18n/LocaleProvider";
@@ -9,6 +10,8 @@ import { server } from "../../test/msw/server";
 import { renderWithFixtures } from "../../test/render";
 import { navFor } from "../shell/nav";
 import { PharmacyPage } from "./PharmacyPage";
+
+afterEach(() => vi.restoreAllMocks());
 
 const item = {
   item_code: "S-1",
@@ -143,15 +146,40 @@ it("isolates stock rows across session identities", async () => {
   expect(screen.queryByText("Stock one")).toBeNull();
 });
 
-it.each([
-  { role: "DOC" as const, sessionMode: "live" as const },
-  { role: "PHA" as const, sessionMode: "fixture" as const },
-])("does not fetch for $role in $sessionMode mode", async (options) => {
-  const handler = vi.fn(() => HttpResponse.json({ items: [item] }));
-  server.use(http.get("*/api/live/synthetic-stock", handler));
-  renderWithFixtures(<PharmacyPage />, options);
-  expect(await screen.findByText("ไม่มีสิทธิ์เข้าถึงหน้านี้")).toBeVisible();
-  expect(handler).not.toHaveBeenCalled();
+it.each(["live", "fixture"] as const)(
+  "denies non-PHA in %s mode without showing samples or fetching stock",
+  async (sessionMode) => {
+    const requests = vi.spyOn(globalThis, "fetch");
+    renderWithFixtures(
+      <RequireSession>
+        <PharmacyPage />
+      </RequireSession>,
+      { role: "DOC", sessionMode, path: ROUTES.pharmacy },
+    );
+    expect(await screen.findByText("ไม่มีสิทธิ์เข้าถึงหน้านี้")).toBeVisible();
+    expect(screen.queryByTestId("sample-banner")).toBeNull();
+    expect(requests.mock.calls.map(([url]) => url)).not.toContain(
+      "/api/live/synthetic-stock",
+    );
+  },
+);
+
+it("shows the labeled sample dashboard for fixture PHA without fetching live stock", async () => {
+  const requests = vi.spyOn(globalThis, "fetch");
+  renderWithFixtures(<PharmacyPage />, { role: "PHA", sessionMode: "fixture" });
+  const banner = await screen.findByTestId("sample-banner");
+  expect(
+    within(banner).getByText(
+      "ข้อมูลตัวอย่างในเครื่อง · ยังไม่ยืนยันสัญญาเซิร์ฟเวอร์",
+    ),
+  ).toBeVisible();
+  const movements = screen.getByRole("region", { name: "การเคลื่อนไหวล่าสุด" });
+  expect(within(movements).getByText("หน้ากากอนามัย (กล่อง)")).toBeVisible();
+  expect(screen.queryByRole("heading", { name: "รายการสินค้า" })).toBeNull();
+  expect(screen.queryByText("ไม่มีสิทธิ์เข้าถึงหน้านี้")).toBeNull();
+  expect(requests.mock.calls.map(([url]) => url)).not.toContain(
+    "/api/live/synthetic-stock",
+  );
 });
 
 it("advertises pharmacy to pharmacy roles only", () => {
